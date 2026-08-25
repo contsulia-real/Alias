@@ -1,16 +1,34 @@
 // ---------------------------------------------------------------------------
+// emit — 表达式/语句发射域: 单元格访问、体/循环、表达式、调用与内建。
+// 归 codegen/mod.rs 的 Compiler 状态所驱动的纯发射逻辑; 无独立状态。
+// ---------------------------------------------------------------------------
+use super::*;
+use crate::ast::*;
+use crate::codegen::{
+    invariant_violation, native_err, Compiler, Slot,
+};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types;
+use cranelift_codegen::ir::{
+    Block, BlockArg, InstBuilder, MemFlagsData, Value,
+};
+use cranelift_frontend::{FunctionBuilder, Variable};
+use super::{Frame, VTy, decl_vty};
+use cranelift_module::{Linkage, Module};
+// ---------------------------------------------------------------------------
 // 单元格与全局槽位访问 — 一切在途值均为 64 位字
 // ---------------------------------------------------------------------------
 
 /// 名字 → 单元格位置。解析顺序: 词法作用域链 → 本函数捕获表 (env 加载)
 /// → 顶层槽位。捕获表命中返回 env 派生地址 (引用捕获: 读写穿透到定义帧)。
-enum CellAddr {
+pub(crate) enum CellAddr {
     Reg(Variable),
     EnvLoad(usize),
     GlobalOff(usize),
 }
 
-fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> Option<CellAddr> {
+pub(crate) fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> Option<CellAddr> {
     for scope in frame.scopes.iter().rev() {
         if let Some(s) = scope.get(name) {
             return Some(match s {
@@ -28,7 +46,7 @@ fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> Option<Ce
     c.globals_final.get(name).map(|(off, _)| CellAddr::GlobalOff(*off))
 }
 
-fn read_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr) -> Value {
+pub(crate) fn read_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr) -> Value {
     match addr {
         CellAddr::Reg(v) => {
             let cp = bcx.use_var(*v);
@@ -43,7 +61,7 @@ fn read_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr) -> Value
     }
 }
 
-fn write_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr, w: Value) {
+pub(crate) fn write_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr, w: Value) {
     match addr {
         CellAddr::Reg(v) => {
             let cp = bcx.use_var(*v);
@@ -58,18 +76,18 @@ fn write_cell(bcx: &mut FunctionBuilder, frame: &Frame, addr: &CellAddr, w: Valu
     }
 }
 
-fn read_global(bcx: &mut FunctionBuilder, frame: &Frame, off: usize) -> Value {
+pub(crate) fn read_global(bcx: &mut FunctionBuilder, frame: &Frame, off: usize) -> Value {
     let base = bcx.use_var(frame.globals);
     bcx.ins().load(types::I64, MemFlagsData::new(), base, ((off as i64) * 8) as i32)
 }
 
-fn write_global(bcx: &mut FunctionBuilder, frame: &Frame, off: usize, w: Value) {
+pub(crate) fn write_global(bcx: &mut FunctionBuilder, frame: &Frame, off: usize, w: Value) {
     let base = bcx.use_var(frame.globals);
     bcx.ins().store(MemFlagsData::new(), w, base, ((off as i64) * 8) as i32);
 }
 
 /// 绑定 → 新鲜单元格 + 登记 SSA 变量与静态类型。
-fn emit_local_cell<M: Module>(
+pub(crate) fn emit_local_cell<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -90,14 +108,14 @@ fn emit_local_cell<M: Module>(
     Ok(var)
 }
 
-fn first_result(bcx: &FunctionBuilder, inst: cranelift_codegen::ir::Inst) -> Value {
+pub(crate) fn first_result(bcx: &FunctionBuilder, inst: cranelift_codegen::ir::Inst) -> Value {
     match bcx.inst_results(inst) {
         [v] => *v,
         _ => invariant_violation("单返回值签名"),
     }
 }
 
-fn ensure_current(bcx: &mut FunctionBuilder, frame: &mut Frame) {
+pub(crate) fn ensure_current(bcx: &mut FunctionBuilder, frame: &mut Frame) {
     if frame.terminated {
         let dead = bcx.create_block();
         bcx.switch_to_block(dead);
@@ -110,7 +128,7 @@ fn ensure_current(bcx: &mut FunctionBuilder, frame: &mut Frame) {
 // 体发射
 // ---------------------------------------------------------------------------
 
-fn emit_body<M: Module>(
+pub(crate) fn emit_body<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -133,7 +151,7 @@ fn emit_body<M: Module>(
     Ok(())
 }
 
-fn emit_stmt<M: Module>(
+pub(crate) fn emit_stmt<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -198,7 +216,7 @@ fn emit_stmt<M: Module>(
 
 /// 循环: 条件每迭代求值; 体在子作用域发射且绑定分配新鲜单元格 —
 /// 跨迭代捕获看到逐迭代值 (每迭代子作用域, spec-notes §附录三)。
-fn emit_loop<M: Module>(
+pub(crate) fn emit_loop<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -244,7 +262,7 @@ fn emit_loop<M: Module>(
 // 表达式发射 — 一切结果为 64 位规范字
 // ---------------------------------------------------------------------------
 
-fn emit_expr<M: Module>(
+pub(crate) fn emit_expr<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -419,7 +437,7 @@ fn emit_expr<M: Module>(
 
 /// 单臂发射: 绑定 = 新鲜单元格持载荷 (val 语义); 返回是否跳入了 join
 /// (false = never 流, 已跳函数返回块)。
-fn emit_match_arm<M: Module>(
+pub(crate) fn emit_match_arm<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -479,7 +497,7 @@ fn emit_match_arm<M: Module>(
 }
 
 /// 插值/字符串字面量: 各部分 display 成串后左折叠 concat。
-fn emit_str<M: Module>(
+pub(crate) fn emit_str<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -503,7 +521,7 @@ fn emit_str<M: Module>(
 }
 
 /// 字面量字节经数据段内嵌; 块 = 数据段地址的复制块。
-fn str_literal_handle<M: Module>(
+pub(crate) fn str_literal_handle<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     s: &str,
@@ -532,7 +550,7 @@ fn str_literal_handle<M: Module>(
 }
 
 /// 按静态类型把规范字 display 成字符串块 (Value::display 逐字节规则)。
-fn display_word<M: Module>(
+pub(crate) fn display_word<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
@@ -566,7 +584,7 @@ fn display_word<M: Module>(
     }
 }
 
-fn call_str_cmp<M: Module>(c: &mut Compiler<M>, bcx: &mut FunctionBuilder, l: Value, r: Value) -> AliasResult<Value> {
+pub(crate) fn call_str_cmp<M: Module>(c: &mut Compiler<M>, bcx: &mut FunctionBuilder, l: Value, r: Value) -> AliasResult<Value> {
     c.call_rt(bcx, "alias.str.cmp", &[types::I64, types::I64], Some(types::I32), &[l, r])
 }
 
@@ -574,7 +592,7 @@ fn call_str_cmp<M: Module>(c: &mut Compiler<M>, bcx: &mut FunctionBuilder, l: Va
 // 调用 / 内建 / 闭包创建 / 捕获扫描
 // ---------------------------------------------------------------------------
 
-fn emit_call<M: Module>(
+pub(crate) fn emit_call<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -632,7 +650,7 @@ fn emit_call<M: Module>(
 
 /// 结构体构造发射: 泄漏 n×8 槽区 (alias.env.new 同源), 字段按声明序
 /// 求值写入 (显式命名实参优先, 缺省取声明默认值)。全覆盖由 sema 保证。
-fn emit_construct<M: Module>(
+pub(crate) fn emit_construct<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -657,7 +675,7 @@ fn emit_construct<M: Module>(
 
 /// result 构造发射 (Phase 2b): 泄漏 2×8 块 {tag, payload} —
 /// tag 0=ok / 1=err, 载荷为规范字。镜像 emit_construct 的槽区模式。
-fn emit_result_ctor<M: Module>(
+pub(crate) fn emit_result_ctor<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -684,7 +702,7 @@ fn emit_result_ctor<M: Module>(
 /// 用户方法直调 (统一约定 fn(globals, env, self, args...), env 传哑字 0 —
 /// 方法无捕获, 自由名经 globals 可达); 内建字符串方法落运行时符号。
 /// 接收者静态投影不可知属后端已知缺口 (sema 全知) — 编译期拒绝不 panic。
-fn emit_method_call<M: Module>(
+pub(crate) fn emit_method_call<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -741,7 +759,7 @@ fn emit_method_call<M: Module>(
 
 /// 字段偏移回查: recv 静态类型给出结构体名 → 布局表定位下标*8。
 /// recv 非结构体/未知字段在 sema 已拒绝 — 违例即编译器不变式破坏。
-fn field_offset<M: Module>(
+pub(crate) fn field_offset<M: Module>(
     c: &Compiler<M>,
     frame: &Frame,
     recv: &Expr,
@@ -757,7 +775,7 @@ fn field_offset<M: Module>(
     invariant_violation("字段访问目标为结构体实例 (sema 已校验)");
 }
 
-fn emit_incdec<M: Module>(
+pub(crate) fn emit_incdec<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -784,7 +802,7 @@ fn emit_incdec<M: Module>(
     Ok(bcx.ins().iconst(types::I64, 0))
 }
 
-fn emit_print<M: Module>(
+pub(crate) fn emit_print<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -826,7 +844,7 @@ fn emit_print<M: Module>(
 
 /// 除零与 INT_MIN÷-1 显式守卫 → 中止存根 (span-ID 回查原始行:列)。
 /// I32 域内守卫 — P2 冻结语义; 后端默认陷阱行为不渗入。
-fn emit_div_guard<M: Module>(
+pub(crate) fn emit_div_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     l: Value,

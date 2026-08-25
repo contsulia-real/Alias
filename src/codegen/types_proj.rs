@@ -1,4 +1,5 @@
-fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
+use super::*;
+pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
     for (scope, vtys) in frame.scopes.iter().zip(frame.locals_vty.iter()) {
         if scope.contains_key(name) {
             return vtys.get(name).cloned().unwrap_or(VTy::Other);
@@ -14,7 +15,7 @@ fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
 }
 
 /// 打印分派所需的最小静态类型投影 (推断不外泄 — 仅后端内部消费)。
-fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
+pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
     match e {
         Expr::Int(..) | Expr::Neg { .. } => VTy::Int,
         Expr::Bool(..) => VTy::Bool,
@@ -87,7 +88,7 @@ fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
 
 /// 函数字面量返回类型的保守推断 (箭头体=体类型; 块体=末条 return 类型;
 /// 其余落空=Unit)。仅用于打印分派与调用结果宽度 — 不外泄诊断。
-fn infer_ret_vty<M: Module>(c: &Compiler<M>, frame: &Frame, params: &[Param], body: &Body) -> VTy {
+pub(crate) fn infer_ret_vty<M: Module>(c: &Compiler<M>, frame: &Frame, params: &[Param], body: &Body) -> VTy {
     let mut scoped = frame.scopes.clone();
     let mut vtys = frame.locals_vty.clone();
     let mut pmap: HashMap<String, Slot> = HashMap::new();

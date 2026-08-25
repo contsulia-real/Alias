@@ -1,4 +1,23 @@
 // ---------------------------------------------------------------------------
+// aot_shim — AOT 运行时 shim 区: kernel32/msvcrt 符号契约的 IR 实现。
+// 与 host.rs (JIT 宿主) 逐符号对齐; 发射顺序必须先于 compile_program
+// (用户代码 Import 声明与同名 Export 定义经 cranelift-module 合并)。
+// ---------------------------------------------------------------------------
+use super::*;
+use crate::codegen::Compiler;
+use std::collections::HashMap;
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types;
+use cranelift_codegen::ir::{BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::Function;
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{FuncId, Linkage, Module};
+
+/// ASCII 空白字符集 (trim 判定)
+const TRIM_SET: &[u8] = b" \t\r\n";
+// ---------------------------------------------------------------------------
 // AOT 运行时 shim 区 — 与 JIT 宿主函数逐符号对齐 (模块头契约)
 //
 // 依赖面: kernel32.lib (GetStdHandle/WriteFile/ExitProcess/HeapAlloc/
@@ -9,7 +28,6 @@
 // 同名 Export 定义经 cranelift-module 符号合并为同一 FuncId。
 // ---------------------------------------------------------------------------
 
-use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
 
 /// AOT 外部符号集 (链接期经导入库解析)
 struct AotExterns {
@@ -58,7 +76,7 @@ macro_rules! shim {
 }
 
 /// trim 字节成员判定: 空格/\t/\r/\n 四路比较或链 (冻结字符集)。
-fn emit_is_trim_byte(bcx: &mut FunctionBuilder, b: Value) -> Value {
+pub(crate) fn emit_is_trim_byte(bcx: &mut FunctionBuilder, b: Value) -> Value {
     let mut acc = bcx.ins().icmp_imm_s(IntCC::Equal, b, TRIM_SET[0] as i64);
     for &t in &TRIM_SET[1..] {
         let e = bcx.ins().icmp_imm_s(IntCC::Equal, b, t as i64);
@@ -70,7 +88,7 @@ fn emit_is_trim_byte(bcx: &mut FunctionBuilder, b: Value) -> Value {
 /// ASCII 大小写映射 shim (upper/lower 共用体): 逐字节范围 icmp + select
 /// 平移, 写入新缓冲; 空串短路产出 null 数据指针块 (§五契约)。
 /// 与 JIT 宿主 str_map_ascii 同语义 — 双后端逐字节对齐。
-fn emit_case_shim<M: Module>(
+pub(crate) fn emit_case_shim<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
     lo: i64,
@@ -180,7 +198,7 @@ fn emit_case_shim<M: Module>(
 }
 
 /// span 表数据段回填: (line, col) u32 小端对 — abort shim 运行时查表。
-fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {
+pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {
     let id = c
         .module
         .declare_data("alias_span_table", Linkage::Local, false, false)
@@ -197,7 +215,7 @@ fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) ->
         .map_err(|e| native_err(Span::default(), format!("内部: span 段定义失败 {e}")))
 }
 
-fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
+pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
     let ext = AotExterns {
         get_std_handle: c.import_fn("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
         write_file: c.import_fn(

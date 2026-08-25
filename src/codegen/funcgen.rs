@@ -1,10 +1,11 @@
+use super::*;
 // ---------------------------------------------------------------------------
 // 编译器
 // ---------------------------------------------------------------------------
 
 impl<'m, M: Module> Compiler<'m, M> {
     /// 统一调用约定: (globals:I64, env:I64, args:I64...) -> I64。
-    fn user_sig(&self, n_args: usize) -> Signature {
+    pub(crate) fn user_sig(&self, n_args: usize) -> Signature {
         let mut s = Signature::new(self.cc);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -15,7 +16,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         s
     }
 
-    fn sig(&self, params: &[cranelift_codegen::ir::Type], ret: Option<cranelift_codegen::ir::Type>) -> Signature {
+    pub(crate) fn sig(&self, params: &[cranelift_codegen::ir::Type], ret: Option<cranelift_codegen::ir::Type>) -> Signature {
         let mut s = Signature::new(self.cc);
         for p in params {
             s.params.push(AbiParam::new(*p));
@@ -26,7 +27,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         s
     }
 
-    fn declare_user_func(&mut self, n_args: usize) -> AliasResult<FuncId> {
+    pub(crate) fn declare_user_func(&mut self, n_args: usize) -> AliasResult<FuncId> {
         let name = format!("u{}", self.next_fid);
         self.next_fid += 1;
         self.declare_fn_named(name, n_args)
@@ -34,14 +35,14 @@ impl<'m, M: Module> Compiler<'m, M> {
 
     /// 具名内部函数 (Local 链接) — 方法以 m<接收者>名字 混成,
     /// 类型命名空间唯一化, 与用户函数 u{n} 互不冲突
-    fn declare_fn_named(&mut self, name: String, n_args: usize) -> AliasResult<FuncId> {
+    pub(crate) fn declare_fn_named(&mut self, name: String, n_args: usize) -> AliasResult<FuncId> {
         let sig = self.user_sig(n_args);
         self.module
             .declare_function(&name, Linkage::Local, &sig)
             .map_err(|e| native_err(Span::default(), format!("内部: 函数声明失败 {e}")))
     }
 
-    fn import_fn(
+    pub(crate) fn import_fn(
         &mut self,
         name: &str,
         params: &[cranelift_codegen::ir::Type],
@@ -53,7 +54,7 @@ impl<'m, M: Module> Compiler<'m, M> {
     }
 
     /// 调外部/运行时符号的单返回值调用辅助 (JIT 宿主符号与 AOT shim 同名)
-    fn call_rt(
+    pub(crate) fn call_rt(
         &mut self,
         bcx: &mut FunctionBuilder,
         name: &str,
@@ -71,7 +72,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         })
     }
 
-    fn define_user_func(
+    pub(crate) fn define_user_func(
         &mut self,
         fid: FuncId,
         params: &[Param],
@@ -145,7 +146,7 @@ impl<'m, M: Module> Compiler<'m, M> {
     /// JIT: 名 alias_entry 返回 I64 由宿主读取;
     /// AOT: 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
     /// 链接参数 /ENTRY:alias_start (linker.rs 单一拥有者)。
-    fn compile_entry(&mut self, items: &[Item], main_slot: usize, main_ret: VTy) -> AliasResult<FuncId> {
+    pub(crate) fn compile_entry(&mut self, items: &[Item], main_slot: usize, main_ret: VTy) -> AliasResult<FuncId> {
         let mut entry_sig = Signature::new(self.cc);
         entry_sig.returns.push(AbiParam::new(if self.is_aot { types::I32 } else { types::I64 }));
         let fid = self
@@ -236,7 +237,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         Ok(fid)
     }
 }
-fn slot_of<M: Module>(c: &Compiler<M>, name: &str) -> usize {
+pub(crate) fn slot_of<M: Module>(c: &Compiler<M>, name: &str) -> usize {
     c.globals_final[name].0
 }
 
@@ -245,7 +246,7 @@ fn slot_of<M: Module>(c: &Compiler<M>, name: &str) -> usize {
 // ---------------------------------------------------------------------------
 
 /// 创建闭包值: 扫描捕获 → 声明并排队函数体 → 组装 env 数组与闭包对象。
-fn emit_funclit_value<M: Module>(
+pub(crate) fn emit_funclit_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -311,7 +312,7 @@ fn emit_funclit_value<M: Module>(
 /// 且可经外层链解析 → 记入捕获表。嵌套字面量的名字同样记入 (传递捕获),
 /// 其自身捕获在其发射时按本帧捕获表再解析。insert-after-eval:
 /// 绑定名于初始化器求值后方才生效。
-fn scan_captures<M: Module>(
+pub(crate) fn scan_captures<M: Module>(
     c: &Compiler<M>,
     params: &[Param],
     body: &Body,
@@ -324,7 +325,7 @@ fn scan_captures<M: Module>(
     caps
 }
 
-fn scan_body<M: Module>(
+pub(crate) fn scan_body<M: Module>(
     c: &Compiler<M>,
     body: &Body,
     locals: &mut HashSet<String>,
@@ -342,13 +343,13 @@ fn scan_body<M: Module>(
     }
 }
 
-fn record_cap(name: &str, caps: &mut Vec<String>, seen: &mut HashSet<String>) {
+pub(crate) fn record_cap(name: &str, caps: &mut Vec<String>, seen: &mut HashSet<String>) {
     if seen.insert(name.to_string()) {
         caps.push(name.to_string());
     }
 }
 
-fn scan_stmt<M: Module>(
+pub(crate) fn scan_stmt<M: Module>(
     c: &Compiler<M>,
     s: &Stmt,
     locals: &mut HashSet<String>,
@@ -383,7 +384,7 @@ fn scan_stmt<M: Module>(
     }
 }
 
-fn ensure_scanned_name(
+pub(crate) fn ensure_scanned_name(
     name: &str,
     locals: &mut HashSet<String>,
     caps: &mut Vec<String>,
@@ -404,7 +405,7 @@ fn ensure_scanned_name(
     }
 }
 
-fn scan_expr<M: Module>(
+pub(crate) fn scan_expr<M: Module>(
     c: &Compiler<M>,
     e: &Expr,
     locals: &mut HashSet<String>,
@@ -478,5 +479,3 @@ fn scan_expr<M: Module>(
         _ => {}
     }
 }
-
-/// 名字的静态类型投影: 作用域链 → 捕获表 → 顶层槽位。

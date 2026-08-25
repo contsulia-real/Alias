@@ -45,6 +45,15 @@
 //!
 //! allow: SIZE_OK — 依赖清单强制 codegen.rs 为 cranelift 唯一拥有者。
 
+// 子模块划分 (纯机械拆分): host=JIT 宿主实现; emit=表达式/语句发射;
+// funcgen=函数/方法/闭包定义与捕获扫描; types_proj=静态类型投影;
+// aot_shim=AOT 运行时 shim 区 (kernel32 符号契约)。
+mod aot_shim;
+mod emit;
+mod funcgen;
+mod host;
+mod types_proj;
+
 use crate::ast::*;
 use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -61,17 +70,23 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
 
+use aot_shim::{define_span_data, emit_runtime_shims};
+pub(crate) use emit::*;
+pub(crate) use funcgen::*;
+pub(crate) use types_proj::*;
+use host::register_host_fns;
+
 /// 除零中止存根的 span 回查表: ID → (line, col)。
 /// 仅 JIT 路径使用 (宿主 abort 读); AOT 路径以只读数据段内嵌同一表
 /// (见 define_span_data / abort shim)。
-static SPAN_TABLE: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static SPAN_TABLE: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // 静态类型投影 — 打印分派 / 字宽转换 / 调用返回类型所需
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
-enum VTy {
+pub(crate) enum VTy {
     Int,
     Bool,
     Str,
@@ -137,23 +152,23 @@ fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
 
 /// 名字解析: 局部 SSA 变量(持单元格指针)或顶层槽区偏移。
 #[derive(Clone, Copy)]
-enum Slot {
+pub(crate) enum Slot {
     Local(Variable),
     Global(usize),
 }
 
 /// 词法帧: 作用域链 + globals/env 寄存器 + 本函数捕获表。
 /// terminated: 当前块是否已发射终结指令 (frontend 不公开该查询, 自行跟踪)。
-struct Frame {
-    scopes: Vec<HashMap<String, Slot>>,
-    locals_vty: Vec<HashMap<String, VTy>>,
-    globals: Variable,
-    env: Option<Variable>,
-    caps: HashMap<String, usize>,
+pub(crate) struct Frame {
+    pub(crate) scopes: Vec<HashMap<String, Slot>>,
+    pub(crate) locals_vty: Vec<HashMap<String, VTy>>,
+    pub(crate) globals: Variable,
+    pub(crate) env: Option<Variable>,
+    pub(crate) caps: HashMap<String, usize>,
     /// 捕获项静态类型 (打印分派/字段偏移回查所需) — 捕获名不在本帧
     /// 作用域链也不在 globals, 类型信息必须随捕获表跨帧传递
-    caps_vty: HashMap<String, VTy>,
-    terminated: bool,
+    pub(crate) caps_vty: HashMap<String, VTy>,
+    pub(crate) terminated: bool,
     /// 顶层初始化器语境: 名字仅随项序可见 (禁回退全量表 — 前向引用必须报错)
     init_ctx: bool,
     /// 函数返回块 (match never 臂 / expr? 的 return 跳转目标);
@@ -164,24 +179,24 @@ struct Frame {
 /// 顶层初始化器语境可见性由 env.scopes[0] 渐增插入实现 (insert-after-eval),
 /// 函数体语境则全量可见 — 与迁移前逐项插入语义一致。
 /// M: JITModule | ObjectModule — 发射机器经 Module trait 单份共享。
-struct Compiler<'m, M: Module> {
-    module: &'m mut M,
-    cc: cranelift_codegen::isa::CallConv,
-    ptr_ty: cranelift_codegen::ir::Type,
-    globals_final: HashMap<String, (usize, VTy)>,
-    global_slots: usize,
-    next_fid: u32,
+pub(crate) struct Compiler<'m, M: Module> {
+    pub(crate) module: &'m mut M,
+    pub(crate) cc: cranelift_codegen::isa::CallConv,
+    pub(crate) ptr_ty: cranelift_codegen::ir::Type,
+    pub(crate) globals_final: HashMap<String, (usize, VTy)>,
+    pub(crate) global_slots: usize,
+    pub(crate) next_fid: u32,
     /// 运行时函数 ID → 定稿用 FuncId
-    fn_ids: Vec<FuncId>,
+    pub(crate) fn_ids: Vec<FuncId>,
     /// 运行时函数 ID → 返回类型 (打印分派)
-    fn_rets: Vec<VTy>,
+    pub(crate) fn_rets: Vec<VTy>,
     /// 名字 → 声明返回类型 (具名调用的打印分派; 遮蔽近似, 语料内无歧义)
-    fn_ret_by_name: HashMap<String, VTy>,
-    pending: VecDeque<PendingFn>,
-    str_data: HashMap<String, cranelift_module::DataId>,
+    pub(crate) fn_ret_by_name: HashMap<String, VTy>,
+    pub(crate) pending: VecDeque<PendingFn>,
+    pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
     /// 除零守卫 span 表: ID = 下标。JIT 定稿后拷入 SPAN_TABLE;
     /// AOT 序列化为只读数据段供 abort shim 回查。
-    span_table: Vec<(u32, u32)>,
+    pub(crate) span_table: Vec<(u32, u32)>,
     /// 结构体布局表 (Phase 2a): 由 Program 项预扫描登记
     struct_layouts: StructTable,
     /// 方法表 (Phase 2c): (接收者类型名, 方法名) → FuncId — 静态分派;
@@ -193,7 +208,7 @@ struct Compiler<'m, M: Module> {
     is_aot: bool,
 }
 
-struct PendingFn {
+pub(crate) struct PendingFn {
     fid: FuncId,
     params: Vec<Param>,
     body: Body,
@@ -416,11 +431,11 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
     Ok(entry_fid)
 }
 
-fn native_err(span: Span, msg: impl Into<String>) -> AliasError {
+pub(crate) fn native_err(span: Span, msg: impl Into<String>) -> AliasError {
     AliasError { msg: msg.into(), span }
 }
 
 /// 内部不变式违例 (sema 之后不应可达) — 编译器 bug 走 panic, 不伪装成用户错误。
-fn invariant_violation(what: &'static str) -> ! {
+pub(crate) fn invariant_violation(what: &'static str) -> ! {
     panic!("内部代码生成不变式被破坏: {what} (sema 校验缺口, 请报告)")
 }
