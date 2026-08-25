@@ -81,7 +81,7 @@ D:\Project\Alias\
 ## UNIQUE STYLES
 
 - 语言语法风格：`func i32 main = () -> {...}`、`var i32 x = 1;`——绑定名后强制类型槽，`=` 连接名与函数体。
-- 无括号调用仅限单参数内建（increase/decrease/println），跨行不吞参数。
+- 无括号调用 (P2e 泛化): 语句入口裸名吞一个 unary 实参（通用，不限内建）；表达式内 `ident unary` 吞参调用、`expr Ident [unary]` 方法中缀（`a plus b` ≡ `a.plus(b)`）。铁律: 无括号绑定紧于二元运算 — `dup 5 + 1` 报错，须 `(dup 5) + 1`; 函数值传参须显式 `f(g)`; 零参调用必须括号 `five()`。
 - main 可返回 i32 或 bool：bool true→退出码 0，false→1。
 - 字符串插值用单引号：`'n=$i'`。
 - demos/ 即测试夹具：smoke.rs 用 include_str! 直接跑 demo 文件。

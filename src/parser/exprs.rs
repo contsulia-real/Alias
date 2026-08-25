@@ -16,7 +16,104 @@ impl Parser {
     // ---------- 表达式 (优先级爬升) ----------
 
     pub(super) fn parse_expr(&mut self) -> AliasResult<Expr> {
-        self.parse_comparison()
+        self.parse_no_paren()
+    }
+
+    /// 无括号文法泛化 (P2e): 表达式位置的两类无括号形态。
+    ///
+    /// 优先级铁律: 无括号绑定紧于一切二元运算 — `dup 5 + 1` 在 + 处
+    /// 悬空报错, 须写 `(dup 5) + 1` 或 `dup (5 + 1)` (spec-notes 附录八)。
+    ///
+    /// - 方法中缀: `a plus b` ≡ `a.plus(b)`; `s shout` ≡ `s.shout()` (零参);
+    ///   左结合链 `a plus b times c`
+    /// - 原生吞参: 仅裸名 callee — `val x = dup 5`; 实参位遇 Ident 必然
+    ///   按方法中缀解释 (函数值传参须显式 f(g) — breaking change M38)
+    fn parse_no_paren(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_comparison()?;
+        loop {
+            let span = self.span();
+            match self.peek().cloned() {
+                Some(Tok::Ident(m)) => {
+                    // 内建名单 callee: Ident 实参无条件吞入 (println a);
+                    // 实参后同行再无括号起点 → 链式限制报错 (≤1 参裁决)
+                    let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
+                        if matches!(n.as_str(), "println" | "print" | "increase" | "decrease"));
+                    if callee_is_bare_builtin {
+                        // 实参 = 单个 unary/后缀链 (≤1 参裁决); 嵌套无括号
+                        // (println wrap 'yo') 须显式括号 println (wrap 'yo')
+                        let arg = self.parse_unary()?;
+                        let a_span = arg.span();
+                        let args = vec![CallArg { label: None, value: arg, span: a_span }];
+                        let c_span = lhs.span();
+                        lhs = Expr::Call {
+                            callee: Box::new(lhs),
+                            args,
+                            span: c_span,
+                        };
+                        if self.starts_unary_at(0) {
+                            return Err(AliasError {
+                                msg: "无括号调用的实参后不能直接链接表达式 — 请使用括号".into(),
+                                span: self.span(),
+                            });
+                        }
+                        continue;
+                    }
+                    let has_arg = self.starts_unary_at(1);
+                    self.bump();
+                    let args = if has_arg {
+                        let a = self.parse_unary()?;
+                        let a_span = a.span();
+                        vec![CallArg { label: None, value: a, span: a_span }]
+                    } else {
+                        Vec::new()
+                    };
+                    let span = lhs.span();
+                    lhs = Expr::MethodCall { recv: Box::new(lhs), name: m, args, span };
+                }
+                Some(t)
+                    if matches!(
+                        t,
+                        Tok::Int(_) | Tok::Bool(_) | Tok::Str(_) | Tok::LParen | Tok::LBracket
+                    ) =>
+                {
+                    let callee = match &lhs {
+                        Expr::Ident(n, s) => Expr::Ident(n.clone(), *s),
+                        _ => {
+                            return Err(AliasError {
+                                msg: "意外的表达式".into(),
+                                span,
+                            })
+                        }
+                    };
+                    // 实参 token 由 parse_unary 自行消费 — 此处不可预 bump
+                    let a = self.parse_unary()?;
+                    let a_span = a.span();
+                    let c_span = callee.span();
+                    lhs = Expr::Call {
+                        callee: Box::new(callee),
+                        args: vec![CallArg { label: None, value: a, span: a_span }],
+                        span: c_span,
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(lhs)
+    }
+
+
+    /// lookahead n 处是否可启动一个 unary 表达式 (P2e 无括号判定)
+    fn starts_unary_at(&self, n: usize) -> bool {
+        matches!(
+            self.peek_at(n),
+            Some(Tok::Ident(_))
+                | Some(Tok::Int(_))
+                | Some(Tok::Bool(_))
+                | Some(Tok::Str(_))
+                | Some(Tok::LParen)
+                | Some(Tok::LBracket)
+                | Some(Tok::Minus)
+        )
     }
 
     fn parse_comparison(&mut self) -> AliasResult<Expr> {
@@ -68,19 +165,8 @@ impl Parser {
         Ok(lhs)
     }
 
-    pub(super) fn parse_unary(&mut self) -> AliasResult<Expr> {
-        if self.peek() == Some(&Tok::Minus) {
-            let span = self.span();
-            self.bump();
-            let expr = self.parse_unary()?;
-            return Ok(Expr::Neg { expr: Box::new(expr), span });
-        }
-        self.parse_postfix()
-    }
-
-    /// primary + 后缀链: .field / .method(args) / [idx] / (args) / ?
-    fn parse_postfix(&mut self) -> AliasResult<Expr> {
-        let mut expr = self.parse_primary()?;
+    /// 后缀链主体: 从已解析的头部 expr 继续消费 .field/.method/[idx]/(args)/?
+    fn parse_postfix_on(&mut self, mut expr: Expr) -> AliasResult<Expr> {
         loop {
             let span = self.span();
             match self.peek().cloned() {
@@ -118,6 +204,23 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    pub(super) fn parse_unary(&mut self) -> AliasResult<Expr> {
+        if self.peek() == Some(&Tok::Minus) {
+            let span = self.span();
+            self.bump();
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Neg { expr: Box::new(expr), span });
+        }
+        self.parse_postfix()
+    }
+
+    /// primary + 后缀链: .field / .method(args) / [idx] / (args) / ?
+    /// primary + 后缀链 (主体见 parse_postfix_on)
+    fn parse_postfix(&mut self) -> AliasResult<Expr> {
+        let head = self.parse_primary()?;
+        self.parse_postfix_on(head)
     }
 
     fn parse_args(&mut self) -> AliasResult<Vec<CallArg>> {

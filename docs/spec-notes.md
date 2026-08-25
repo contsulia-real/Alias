@@ -331,3 +331,19 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 
 锁定: tests/array_laws.rs (21 用例) + demos/arrays.as 双形态 parity
 (native_parity 黄金基线 + aot_parity 语料)。
+
+# 附录八 — 无括号文法泛化 (P2e, 规范性)
+
+优先级表 (高→低): 后缀链(. [ ( ?) > 无括号绑定 > 二元运算(* / > + - > 比较)。
+
+| 形态 | 解析 |
+|------|------|
+| 语句入口 `裸名 unary` | Call(裸名,[unary]) — 通用, 不限内建 |
+| 表达式内 `ident unary起点` | Call(ident,[unary]) — val x = dup 5 |
+| 表达式内 `expr Ident(m) unary起点` | MethodCall(lhs,m,[unary]) — a plus b |
+| 表达式内 `expr Ident(m) 边界` | 零参 MethodCall(lhs,m,[]) — s shout |
+| 内建名单 {println,print,increase,decrease} + Ident 实参 | 名单优先: println a = Call 而非方法 |
+
+铁律: `dup 5 + 1` 编译错误 (+ 悬空); 写法 `(dup 5) + 1` 或 `dup (5 + 1)`。
+函数值传参须显式括号 f(g); 零参调用必须 five()。
+已知边界: 内建名单吞参后不可链式 (println wrap 'yo' 报错, 用 println (wrap 'yo'))。

@@ -60,7 +60,7 @@ func i32 main = () -> {
     val string greet = 'hey'
     println greet
     println 'n=$i'
-    println wrap 'yo'
+    println (wrap 'yo')
     println ('abc' == 'abc')
     println ('b' > 'a')
 

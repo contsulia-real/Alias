@@ -37,10 +37,11 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
             exit: 0,
         },
-        // Phase 3 全量对等演练夹具 (P3 探测冻结)
+        // Phase 3 全量对等演练夹具 (P3 探测冻结; M40: P2e 无括号泛化后
+        // `println wrap 'yo'` 由「误打印 <func>」修复为真实调用 → "[yo]")
         Baseline {
             file: "hello_native.as",
-            stdout: "999\n49\n55\n3\n4\n5\n14\n13\n-5\ntrue\nfalse\ntrue\nhey\nn=6\n<func>\ntrue\ntrue\n3\n42\n".as_bytes(),
+            stdout: "999\n49\n55\n3\n4\n5\n14\n13\n-5\ntrue\nfalse\ntrue\nhey\nn=6\n[yo]\ntrue\ntrue\n3\n42\n".as_bytes(),
             stderr: b"",
             exit: 11,
         },
