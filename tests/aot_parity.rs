@@ -128,6 +128,7 @@ fn aot_demo_corpus_parity() {
             || name == "structs.as"
             || name == "result_match.as"
             || name == "methods.as"
+            || name == "arrays.as"
         {
             runnable += 1;
             let src = std::fs::read_to_string(&path).unwrap();

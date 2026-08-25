@@ -111,7 +111,8 @@ impl Parser {
     }
 
     /// '=' 前的表达式必须是左值形态: 简名已在语句入口特判,
-    /// 此处只承接字段链; 其余维持既有报错形态 ('=' 处无法开始表达式)
+    /// 此处承接字段链; 下标目标 Phase 2d 明确拒绝 (只读索引裁决);
+    /// 其余维持既有报错形态 ('=' 处无法开始表达式)
     fn assign_from_lvalue(&mut self, expr: Expr, span: Span) -> AliasResult<Stmt> {
         match expr {
             Expr::Field { recv, name, .. } => {
@@ -119,6 +120,7 @@ impl Parser {
                 let value = self.parse_expr()?;
                 Ok(Stmt::FieldAssign { recv, field: name, value, span })
             }
+            Expr::Index { .. } => Err(self.err_here("下标赋值尚未支持")),
             _ => Err(self.err_here(format!(
                 "无法开始一个表达式: {:?}",
                 self.peek().cloned()

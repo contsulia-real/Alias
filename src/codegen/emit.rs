@@ -351,10 +351,37 @@ pub(crate) fn emit_expr<M: Module>(
             let off = field_offset(c, frame, recv, name)?;
             Ok(bcx.ins().load(types::I64, MemFlagsData::new(), p, off))
         }
-        Expr::Index { span, .. } => Err(native_err(
-            *span,
-            "下标访问尚未接入原生后端 (随 array 类型一起到)",
-        )),
+        // 下标读 (Phase 2d): 主语与下标按序求值 → I32 域越界守卫
+        // (i<0 或 i>=len → span-ID 中止存根) → 头块 data_ptr 偏移加载
+        Expr::Index { recv, idx, span } => {
+            let arr = emit_expr(c, bcx, frame, recv)?;
+            let idxw = emit_expr(c, bcx, frame, idx)?;
+            let idx32 = bcx.ins().ireduce(types::I32, idxw);
+            let len64 = bcx.ins().load(types::I64, MemFlagsData::new(), arr, 8);
+            let len32 = bcx.ins().ireduce(types::I32, len64);
+            emit_index_guard(c, bcx, idx32, len32, *span)?;
+            let dp = bcx.ins().load(types::I64, MemFlagsData::new(), arr, 0);
+            let idx64 = bcx.ins().sextend(types::I64, idx32);
+            let off = bcx.ins().imul_imm_s(idx64, 8);
+            let addr = bcx.ins().iadd(dp, off);
+            Ok(bcx.ins().load(types::I64, MemFlagsData::new(), addr, 0))
+        }
+        // 数组字面量 (Phase 2d): 头块分配 → 元素按书写序求值逐个入缓冲
+        // (lhs-to-rhs 黄金冻结约定) → 回填 len
+        Expr::ArrayLit { elems, .. } => {
+            let n = elems.len() as i64;
+            let cap = bcx.ins().iconst(types::I32, n);
+            let hdr = c.call_rt(bcx, "alias.arr.new", &[types::I32], Some(types::I64), &[cap])?;
+            for (i, el) in elems.iter().enumerate() {
+                let v = emit_expr(c, bcx, frame, el)?;
+                let dp = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+                let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * 8);
+                bcx.ins().store(MemFlagsData::new(), v, addr, 0);
+            }
+            let lenw = bcx.ins().iconst(types::I64, n);
+            bcx.ins().store(MemFlagsData::new(), lenw, hdr, 8);
+            Ok(hdr)
+        }
         Expr::FuncLit { params, body, .. } => {
             emit_funclit_value(c, bcx, frame, params, body)
         }
@@ -571,6 +598,8 @@ pub(crate) fn display_word<M: Module>(
         VTy::Func => c.call_rt(bcx, "alias.display.func", &[], Some(types::I64), &[]),
         // 结构体值永不泄露内部布局 — 固定 "<struct>" (与 <func> 同规约)
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[], Some(types::I64), &[]),
+        // 数组值永不泄露元素 — 固定 "<array>" (与 <struct> 对称, Phase 2d)
+        VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[], Some(types::I64), &[]),
         // result 值按运行时 tag 显示 <ok>/<err> — 静态类型名不参与
         VTy::Result(..) => {
             let tag = bcx.ins().load(types::I64, MemFlagsData::new(), w, 0);
@@ -712,7 +741,45 @@ pub(crate) fn emit_method_call<M: Module>(
     span: Span,
 ) -> AliasResult<Value> {
     let rv = emit_expr(c, bcx, frame, recv)?;
-    let tname = match static_vty(c, frame, recv) {
+    let svt = static_vty(c, frame, recv);
+    // 数组内建三件套 (Phase 2d): len/push/pop 落运行时符号 (双后端同契约);
+    // pop 的空数组守卫在发射层 (span-ID 中止存根), 与下标越界守卫同机制
+    if matches!(svt, VTy::Array(_)) {
+        return match name {
+            "len" => {
+                let t = c.call_rt(bcx, "alias.arr.len", &[types::I64], Some(types::I32), &[rv])?;
+                Ok(bcx.ins().sextend(types::I64, t))
+            }
+            "push" => {
+                let [a] = args else {
+                    invariant_violation("push 元数 (sema 已校验)")
+                };
+                let v = emit_expr(c, bcx, frame, &a.value)?;
+                c.call_rt(bcx, "alias.arr.push", &[types::I64, types::I64], None, &[rv, v])?;
+                Ok(bcx.ins().iconst(types::I64, 0))
+            }
+            "pop" => {
+                let len = bcx.ins().load(types::I64, MemFlagsData::new(), rv, 8);
+                let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
+                let span_id = new_span_id(c, span);
+                let abort_b = bcx.create_block();
+                let ok_b = bcx.create_block();
+                bcx.ins().brif(empty, abort_b, &[], ok_b, &[]);
+                bcx.seal_block(abort_b);
+                bcx.seal_block(ok_b);
+                bcx.switch_to_block(abort_b);
+                let aid = bcx.ins().iconst(types::I32, span_id as i64);
+                let af = c.import_fn("alias.abort_pop", &[types::I32], None)?;
+                let aref = c.module.declare_func_in_func(af, &mut bcx.func);
+                bcx.ins().call(aref, &[aid]);
+                bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+                bcx.switch_to_block(ok_b);
+                c.call_rt(bcx, "alias.arr.pop", &[types::I64], Some(types::I64), &[rv])
+            }
+            _ => invariant_violation("数组内建方法存在性 (sema 已校验)"),
+        };
+    }
+    let tname = match svt {
         VTy::Str => "string".to_string(),
         VTy::Int => "i32".to_string(),
         VTy::Bool => "bool".to_string(),
@@ -825,9 +892,10 @@ pub(crate) fn emit_print<M: Module>(
             let h = if name == "println" { "alias.println.bool" } else { "alias.print.bool" };
             c.call_rt(bcx, h, &[types::I32], None, &[t])?;
         }
-        // Str/Unit/Func/Struct/Result 均经 display 成块后走字符串通道
-        // (Struct → 固定 "<struct>"; Result → 运行时 tag 定 <ok>/<err>)
-        VTy::Str | VTy::Unit | VTy::Func | VTy::Struct(_) | VTy::Result(..) => {
+        // Str/Unit/Func/Struct/Result/Array 均经 display 成块后走字符串通道
+        // (Struct → 固定 "<struct>"; Result → 运行时 tag 定 <ok>/<err>;
+        //  Array → 固定 "<array>")
+        VTy::Str | VTy::Unit | VTy::Func | VTy::Struct(_) | VTy::Result(..) | VTy::Array(_) => {
             let s = display_word(c, bcx, frame, &arg.value, v)?;
             let h = if name == "println" { "alias.println.str" } else { "alias.print.str" };
             c.call_rt(bcx, h, &[types::I64], None, &[s])?;
@@ -842,6 +910,12 @@ pub(crate) fn emit_print<M: Module>(
     Ok(bcx.ins().iconst(types::I64, 0))
 }
 
+/// span-ID 登记: 守卫点行:列入表, 中止存根按 ID 回查 (div/越界/pop 共用)。
+pub(crate) fn new_span_id<M: Module>(c: &mut Compiler<M>, span: Span) -> i32 {
+    c.span_table.push((span.line, span.col));
+    c.span_table.len() as i32 - 1
+}
+
 /// 除零与 INT_MIN÷-1 显式守卫 → 中止存根 (span-ID 回查原始行:列)。
 /// I32 域内守卫 — P2 冻结语义; 后端默认陷阱行为不渗入。
 pub(crate) fn emit_div_guard<M: Module>(
@@ -851,10 +925,7 @@ pub(crate) fn emit_div_guard<M: Module>(
     r: Value,
     span: Span,
 ) -> AliasResult<Value> {
-    let span_id = {
-        c.span_table.push((span.line, span.col));
-        c.span_table.len() as i32 - 1
-    };
+    let span_id = new_span_id(c, span);
     let zero = bcx.ins().iconst(types::I32, 0);
     let m1 = bcx.ins().iconst(types::I32, -1);
     let mini = bcx.ins().iconst(types::I32, i32::MIN as i64);
@@ -880,4 +951,36 @@ pub(crate) fn emit_div_guard<M: Module>(
 
     bcx.switch_to_block(ok_b);
     Ok(bcx.ins().sdiv(l, r))
+}
+
+/// 下标越界守卫 → 中止存根 (Phase 2d): i < 0 或 i >= len 即中止,
+/// 与 div 守卫同一 span-ID 机制; 正常路径返回元素字。
+fn emit_index_guard<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    idx32: Value,
+    len32: Value,
+    span: Span,
+) -> AliasResult<()> {
+    let span_id = new_span_id(c, span);
+    let zero = bcx.ins().iconst(types::I32, 0);
+    let neg = bcx.ins().icmp(IntCC::SignedLessThan, idx32, zero);
+    let oob_hi = bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, idx32, len32);
+    let trap = bcx.ins().bor(neg, oob_hi);
+
+    let abort_b = bcx.create_block();
+    let ok_b = bcx.create_block();
+    bcx.ins().brif(trap, abort_b, &[], ok_b, &[]);
+    bcx.seal_block(abort_b);
+    bcx.seal_block(ok_b);
+
+    bcx.switch_to_block(abort_b);
+    let aid = bcx.ins().iconst(types::I32, span_id as i64);
+    let af = c.import_fn("alias.abort_oob", &[types::I32], None)?;
+    let aref = c.module.declare_func_in_func(af, &mut bcx.func);
+    bcx.ins().call(aref, &[aid]);
+    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+
+    bcx.switch_to_block(ok_b);
+    Ok(())
 }

@@ -445,6 +445,12 @@ pub(crate) fn scan_expr<M: Module>(
             scan_expr(c, recv, locals, caps, seen, frame);
             scan_expr(c, idx, locals, caps, seen, frame);
         }
+        // 数组字面量元素可携带外层绑定 (闭包内 [a, b]) — 必须扫描
+        Expr::ArrayLit { elems, .. } => {
+            for el in elems {
+                scan_expr(c, el, locals, caps, seen, frame);
+            }
+        }
         Expr::Propagate { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
         Expr::Match { subject, arms, .. } => {
             scan_expr(c, subject, locals, caps, seen, frame);

@@ -182,10 +182,11 @@ fn result_one_param_rejected() {
 
 #[test]
 fn other_generic_still_rejected() {
-    // 既有法律不变: result 之外泛型仍按 Phase 5+ 拒绝
+    // 既有法律不变: result/array 之外泛型仍按 Phase 5+ 拒绝
+    // (例证原为 array<i32>, Phase 2d 落地后轮换为 sender<i32> — M35)
     assert_law(
-        "func i32 main = () -> {\n    val array<i32> a = ()\n    return 0\n}\n",
-        "泛型类型 array<i32> 尚未实现 (Phase 5+)",
+        "func i32 main = () -> {\n    val sender<i32> a = ()\n    return 0\n}\n",
+        "泛型类型 sender<i32> 尚未实现 (Phase 5+)",
         2, 4,
     );
 }

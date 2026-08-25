@@ -167,10 +167,24 @@ extern "C" fn alias_print_bool(v: i32) {
 
 /// 除零/INT_MIN÷-1 中止: 按 span-ID 打印原始行:列, 退出码 1 (对齐黄金记录)。
 extern "C" fn alias_abort_div(span_id: i32) {
+    abort_with_span(span_id, "除以零");
+}
+
+/// 下标越界中止 (Phase 2d): 同一 span-ID 机制, 消息不同。
+extern "C" fn alias_abort_oob(span_id: i32) {
+    abort_with_span(span_id, "下标越界");
+}
+
+/// pop 空数组中止 (Phase 2d): 同一 span-ID 机制, 消息不同。
+extern "C" fn alias_abort_pop(span_id: i32) {
+    abort_with_span(span_id, "pop 空数组");
+}
+
+fn abort_with_span(span_id: i32, msg: &str) {
     let table = SPAN_TABLE.lock().expect("SPAN_TABLE 锁中毒");
     let (line, col) = table.get(span_id.max(0) as usize).copied().unwrap_or((0, 0));
     drop(table);
-    eprintln!("错误 @ {}:{} — 除以零", line, col);
+    eprintln!("错误 @ {line}:{col} — {msg}");
     std::process::exit(1);
 }
 
@@ -224,6 +238,71 @@ extern "C" fn alias_str_trim(s: i64) -> i64 {
     }
 }
 
+// ---- 内建数组方法宿主实现 (Phase 2d; AOT 侧 aot_shim.rs 同契约 IR shim) ----
+// 头块布局: {data_ptr: u64, len: u64, cap: u64} 共 24 字节;
+// pop 的空守卫由发射层承担 (span-ID 中止存根) — 宿主按契约假定非空。
+
+const ARR_HDR_BYTES: usize = 24;
+
+/// 泄漏头块 + cap×8 元素缓冲 (cap=0 → data_ptr 恒 null, 镜像空串契约)。
+extern "C" fn alias_arr_new(cap: i32) -> i64 {
+    unsafe {
+        let hdr = alloc_bytes(ARR_HDR_BYTES) as *mut u64;
+        let cap_u = cap.max(0) as u64;
+        let data = if cap_u == 0 {
+            std::ptr::null_mut()
+        } else {
+            alloc_bytes(cap_u as usize * 8) as *mut u64
+        };
+        hdr.write_unaligned(data as u64);
+        hdr.add(1).write_unaligned(0);
+        hdr.add(2).write_unaligned(cap_u);
+        hdr as i64
+    }
+}
+
+extern "C" fn alias_arr_len(arr: i64) -> i32 {
+    unsafe { (arr as *const u64).add(1).read_unaligned() as i32 }
+}
+
+/// 满 len==cap 时换新缓冲 (2x, 空 cap 取 1) 并复制旧元素 —
+/// 头块原地更新, 所有别名共享可见 (引用语义)。
+extern "C" fn alias_arr_push(arr: i64, v: i64) {
+    unsafe {
+        let hdr = arr as *mut u64;
+        let mut data = hdr.read_unaligned() as *mut u64;
+        let len = hdr.add(1).read_unaligned();
+        let cap = hdr.add(2).read_unaligned();
+        if len == cap {
+            let new_cap = if cap == 0 { 1 } else { cap * 2 };
+            let grown = alloc_bytes(new_cap as usize * 8) as *mut u64;
+            std::ptr::copy_nonoverlapping(data, grown, len as usize);
+            data = grown;
+            hdr.write_unaligned(grown as u64);
+            hdr.add(2).write_unaligned(new_cap);
+        }
+        data.add(len as usize).write_unaligned(v as u64);
+        hdr.add(1).write_unaligned(len + 1);
+    }
+}
+
+extern "C" fn alias_arr_pop(arr: i64) -> i64 {
+    unsafe {
+        let hdr = arr as *mut u64;
+        let data = hdr.read_unaligned() as *const u64;
+        let len = hdr.add(1).read_unaligned();
+        let v = data.add(len as usize - 1).read_unaligned();
+        hdr.add(1).write_unaligned(len - 1);
+        v as i64
+    }
+}
+
+/// 数组显示 (Phase 2d): 固定 "<array>" — 元素永不泄露 (与 <struct> 对称)。
+extern "C" fn alias_display_array() -> i64 {
+    static ARRAY: &[u8] = b"<array>";
+    unsafe { make_block(ARRAY.as_ptr() as u64, ARRAY.len() as u64) as i64 }
+}
+
 pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.cell.new", alias_cell_new as *const u8);
     builder.symbol("alias.env.new", alias_env_new as *const u8);
@@ -250,4 +329,11 @@ pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.str.trim", alias_str_trim as *const u8);
     builder.symbol("alias.display.result", alias_display_result as *const u8);
     builder.symbol("alias.display.struct", alias_display_struct as *const u8);
+    builder.symbol("alias.display.array", alias_display_array as *const u8);
+    builder.symbol("alias.arr.new", alias_arr_new as *const u8);
+    builder.symbol("alias.arr.len", alias_arr_len as *const u8);
+    builder.symbol("alias.arr.push", alias_arr_push as *const u8);
+    builder.symbol("alias.arr.pop", alias_arr_pop as *const u8);
+    builder.symbol("alias.abort_oob", alias_abort_oob as *const u8);
+    builder.symbol("alias.abort_pop", alias_abort_pop as *const u8);
 }

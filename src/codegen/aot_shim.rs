@@ -198,8 +198,7 @@ pub(crate) fn emit_case_shim<M: Module>(
 }
 
 /// span 表数据段回填: (line, col) u32 小端对 — abort shim 运行时查表。
-pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {
-    let id = c
+pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {    let id = c
         .module
         .declare_data("alias_span_table", Linkage::Local, false, false)
         .map_err(|e| native_err(Span::default(), format!("内部: span 段声明失败 {e}")))?;
@@ -213,6 +212,88 @@ pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32
     c.module
         .define_data(id, &desc)
         .map_err(|e| native_err(Span::default(), format!("内部: span 段定义失败 {e}")))
+}
+
+/// span-ID 中止 shim (div/越界/pop 三路共用): 查 span 表 → 分段
+/// WriteFile 拼「错误 @ L:C — {suffix}」到 stderr → ExitProcess(1)。
+fn emit_span_abort<M: Module>(
+    c: &mut Compiler<'_, M>,
+    name: &str,
+    ext: &AotExterns,
+    span_data: cranelift_module::DataId,
+    static_ids: &HashMap<&str, cranelift_module::DataId>,
+    suffix: &str,
+    suffix_len: i64,
+) -> AliasResult<()> {
+    let sig = c.sig(&[types::I32], None);
+    let fid = c
+        .module
+        .declare_function(name, Linkage::Export, &sig)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let mut ctx = Context::new();
+    ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
+    let mut fbc = FunctionBuilderContext::new();
+    let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+    let entry = bcx.create_block();
+    bcx.append_block_params_for_function_params(entry);
+    bcx.switch_to_block(entry);
+    bcx.seal_block(entry);
+    let a: Vec<Value> = bcx.block_params(entry).to_vec();
+
+    let base = {
+        let gv = c.module.declare_data_in_func(span_data, &mut bcx.func);
+        bcx.ins().symbol_value(c.ptr_ty, gv)
+    };
+    let id64 = bcx.ins().uextend(types::I64, a[0]);
+    let off = bcx.ins().imul_imm_s(id64, 8);
+    let laddr = bcx.ins().iadd(base, off);
+    let line = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 0);
+    let col = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 4);
+
+    macro_rules! w_str {
+        ($bcx:expr, $err:expr, $data:expr, $len:expr) => {{
+            let __wa = $bcx.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let __wa_addr = $bcx.ins().stack_addr(c.ptr_ty, __wa, 0);
+            let __null = $bcx.ins().iconst(c.ptr_ty, 0);
+            let __gv = c.module.declare_data_in_func(static_ids[$data], &mut $bcx.func);
+            let __addr = $bcx.ins().symbol_value(c.ptr_ty, __gv);
+            let __len = $bcx.ins().iconst(types::I64, $len);
+            let __wf = c.module.declare_func_in_func(ext.write_file, &mut $bcx.func);
+            $bcx.ins().call(__wf, &[$err, __addr, __len, __wa_addr, __null]);
+        }};
+    }
+    macro_rules! w_dec {
+        ($bcx:expr, $err:expr, $v:expr) => {{
+            let __f = c.import_fn("rt.write.dec", &[c.ptr_ty, types::I64], None)?;
+            let __r = c.module.declare_func_in_func(__f, &mut $bcx.func);
+            let __args = [$err, bcx.ins().uextend(types::I64, $v)];
+            $bcx.ins().call(__r, &__args);
+        }};
+    }
+    let err_args = [bcx.ins().iconst(types::I32, -12)];
+    let err = {
+        let r = c.module.declare_func_in_func(ext.get_std_handle, &mut bcx.func);
+        let inst = bcx.ins().call(r, &err_args);
+        first_result(&bcx, inst)
+    };
+    w_str!(bcx, err, "rt_msg_prefix", 9); // 「错误 @ 」 = 6+1+1+1 字节
+    w_dec!(bcx, err, line);
+    w_str!(bcx, err, "rt_colon", 1);
+    w_dec!(bcx, err, col);
+    w_str!(bcx, err, suffix, suffix_len);
+    let code1 = bcx.ins().iconst(types::I32, 1);
+    let ep = c.module.declare_func_in_func(ext.exit_process, &mut bcx.func);
+    bcx.ins().call(ep, &[code1]);
+    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+
+    bcx.finalize(c.module.target_config());
+    c.module
+        .define_function(fid, &mut ctx)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
 }
 
 pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
@@ -243,11 +324,14 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("rt_unit", b"()"),
         ("rt_func", b"<func>"),
         ("rt_struct", b"<struct>"),
+        ("rt_array", b"<array>"),
         ("rt_ok", b"<ok>"),
         ("rt_err", b"<err>"),
         ("rt_msg_prefix", "错误 @ ".as_bytes()),      // 9 字节
         ("rt_colon", b":"),
         ("rt_msg_suffix", " — 除以零\n".as_bytes()), // 15 字节
+        ("rt_oob_suffix", " — 下标越界\n".as_bytes()),  // 18 字节
+        ("rt_pop_suffix", " — pop 空数组\n".as_bytes()), // 19 字节
     ];
     let mut static_ids: HashMap<&str, cranelift_module::DataId> = HashMap::new();
     for (name, bytes) in statics.drain(..) {
@@ -557,6 +641,104 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         true
     });
 
+    // ---- 内建数组方法 (Phase 2d): 与 JIT 宿主函数同符号同契约 ----
+    // 头块 {data_ptr, len, cap} 24 字节; pop 空守卫在发射层 — shim 按契约假定非空
+    shim!(c, "alias.arr.new", vec![types::I32], Some(types::I64), |bcx, a| {
+        let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
+            vec![bcx.ins().iconst(types::I64, 24)]);
+        let cap64 = bcx.ins().sextend(types::I64, a[0]);
+        let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, cap64, 0);
+        let then_b = bcx.create_block();
+        let else_b = bcx.create_block();
+        let end_b = bcx.create_block();
+        bcx.ins().brif(has, then_b, &[], else_b, &[]);
+        bcx.seal_block(then_b);
+        bcx.seal_block(else_b);
+        bcx.switch_to_block(then_b);
+        {
+            let bytes = bcx.ins().imul_imm_s(cap64, 8);
+            let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
+            bcx.ins().store(MemFlagsData::new(), buf, hdr, 0);
+            bcx.ins().jump(end_b, &[]);
+        }
+        bcx.switch_to_block(else_b);
+        {
+            let zero = bcx.ins().iconst(types::I64, 0);
+            bcx.ins().store(MemFlagsData::new(), zero, hdr, 0);
+            bcx.ins().jump(end_b, &[]);
+        }
+        bcx.switch_to_block(end_b);
+        bcx.seal_block(end_b);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().store(MemFlagsData::new(), zero, hdr, 8);
+        bcx.ins().store(MemFlagsData::new(), cap64, hdr, 16);
+        bcx.ins().return_(&[hdr]);
+        true
+    });
+    shim!(c, "alias.arr.len", vec![types::I64], Some(types::I32), |bcx, a| {
+        let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
+        let t = bcx.ins().ireduce(types::I32, l);
+        bcx.ins().return_(&[t]);
+        true
+    });
+    // push: 满 len==cap → 新缓冲 2x (空 cap 取 1) + RtlMoveMemory 复制旧元素,
+    // 头块原地换 data_ptr/cap — 所有别名共享可见; 随后尾插 + len+1
+    shim!(c, "alias.arr.push", vec![types::I64, types::I64], None, |bcx, a| {
+        let hdr = a[0];
+        let dp0 = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+        let len = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 8);
+        let cap = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 16);
+        let full = bcx.ins().icmp(IntCC::Equal, len, cap);
+        let grow_b = bcx.create_block();
+        let ok_b = bcx.create_block();
+        let join_b = bcx.create_block();
+        let jdp = bcx.append_block_param(join_b, types::I64);
+        bcx.ins().brif(full, grow_b, &[], ok_b, &[]);
+        bcx.seal_block(grow_b);
+        bcx.seal_block(ok_b);
+
+        bcx.switch_to_block(grow_b);
+        {
+            let zero = bcx.ins().iconst(types::I64, 0);
+            let one = bcx.ins().iconst(types::I64, 1);
+            let is_empty = bcx.ins().icmp_imm_s(IntCC::Equal, cap, 0);
+            let doubled = bcx.ins().imul_imm_s(cap, 2);
+            let new_cap = bcx.ins().select(is_empty, one, doubled);
+            let bytes = bcx.ins().imul_imm_s(new_cap, 8);
+            let grown = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
+            let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let copy_bytes = bcx.ins().imul_imm_s(len, 8);
+            bcx.ins().call(mv, &[grown, dp0, copy_bytes]);
+            bcx.ins().store(MemFlagsData::new(), grown, hdr, 0);
+            bcx.ins().store(MemFlagsData::new(), new_cap, hdr, 16);
+            bcx.ins().jump(join_b, &[BlockArg::Value(grown)]);
+        }
+        bcx.switch_to_block(ok_b);
+        bcx.ins().jump(join_b, &[BlockArg::Value(dp0)]);
+
+        bcx.switch_to_block(join_b);
+        bcx.seal_block(join_b);
+        let slot = bcx.ins().imul_imm_s(len, 8);
+        let addr = bcx.ins().iadd(jdp, slot);
+        bcx.ins().store(MemFlagsData::new(), a[1], addr, 0);
+        let one = bcx.ins().iconst(types::I64, 1);
+        let len1 = bcx.ins().iadd(len, one);
+        bcx.ins().store(MemFlagsData::new(), len1, hdr, 8);
+        false
+    });
+    shim!(c, "alias.arr.pop", vec![types::I64], Some(types::I64), |bcx, a| {
+        let hdr = a[0];
+        let len = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 8);
+        let new_len = bcx.ins().iadd_imm_s(len, -1);
+        bcx.ins().store(MemFlagsData::new(), new_len, hdr, 8);
+        let dp = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+        let slot = bcx.ins().imul_imm_s(new_len, 8);
+        let addr = bcx.ins().iadd(dp, slot);
+        let v = bcx.ins().load(types::I64, MemFlagsData::new(), addr, 0);
+        bcx.ins().return_(&[v]);
+        true
+    });
+
     // ---- display 家族 (Value::display 逐字节规则) ----
     // rt.write.dec(h:PTR, v:I64 非负): 十进制写入句柄 (abort 消息行:列共用)
     shim!(c, "rt.write.dec", vec![c.ptr_ty, types::I64], None, |bcx, a| {
@@ -730,6 +912,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("alias.display.unit", "rt_unit", 2i64),
         ("alias.display.func", "rt_func", 6),
         ("alias.display.struct", "rt_struct", 8),
+        ("alias.display.array", "rt_array", 7),
     ] {
         shim!(c, name, vec![], Some(types::I64), |bcx, _a| {
             let addr = sym!(bcx, dname);
@@ -807,53 +990,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         });
     }
 
-    // ---- 除零中止: span 表回查 → stderr 消息 → ExitProcess(1) ----
-    // 除零中止: 分段 WriteFile 拼消息 (无 sprintf) → stderr → ExitProcess(1)
-    shim!(c, "alias.abort_div", vec![types::I32], None, |bcx, a| {
-        let base = {
-            let gv = c.module.declare_data_in_func(span_data, &mut bcx.func);
-            bcx.ins().symbol_value(c.ptr_ty, gv)
-        };
-        let id64 = bcx.ins().uextend(types::I64, a[0]);
-        let off = bcx.ins().imul_imm_s(id64, 8);
-        let laddr = bcx.ins().iadd(base, off);
-        let line = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 0);
-        let col = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 4);
-        macro_rules! w_str {
-            ($bcx:expr, $err:expr, $data:expr, $len:expr) => {{
-                let __wa = $bcx.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    8,
-                    3,
-                ));
-                let __wa_addr = $bcx.ins().stack_addr(c.ptr_ty, __wa, 0);
-                let __null = $bcx.ins().iconst(c.ptr_ty, 0);
-                let __addr = sym!($bcx, $data);
-                let __len = $bcx.ins().iconst(types::I64, $len);
-                let __wf = c.module.declare_func_in_func(ext.write_file, &mut $bcx.func);
-                $bcx.ins().call(__wf, &[$err, __addr, __len, __wa_addr, __null]);
-            }};
-        }
-        macro_rules! w_dec {
-            ($bcx:expr, $err:expr, $v:expr) => {{
-                call_rt_m!($bcx, "rt.write.dec", vec![c.ptr_ty, types::I64], None,
-                    vec![$err, bcx.ins().uextend(types::I64, $v)]);
-            }};
-        }
-        let err_args = [bcx.ins().iconst(types::I32, -12)];
-        let err = call_ext_m!(bcx, ext.get_std_handle, err_args);
-        w_str!(bcx, err, "rt_msg_prefix", 9); // 「错误 @ 」 = 6+1+1+1 字节
-        w_dec!(bcx, err, line);
-        w_str!(bcx, err, "rt_colon", 1);
-        w_dec!(bcx, err, col);
-        w_str!(bcx, err, "rt_msg_suffix", 15); // 「 — 除以零\n」 = 1+3+1+3+3+3+1 字节
-        let code1 = bcx.ins().iconst(types::I32, 1);
-        let ep = c.module.declare_func_in_func(ext.exit_process, &mut bcx.func);
-        let ep_args = [code1];
-        bcx.ins().call(ep, &ep_args);
-        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
-        true
-    });
+    // ---- span-ID 中止家族: 同一 IR, 消息后缀不同 (§五契约) ----
+    emit_span_abort(c, "alias.abort_div", &ext, span_data, &static_ids, "rt_msg_suffix", 15)?;
+    emit_span_abort(c, "alias.abort_oob", &ext, span_data, &static_ids, "rt_oob_suffix", 18)?;
+    emit_span_abort(c, "alias.abort_pop", &ext, span_data, &static_ids, "rt_pop_suffix", 19)?;
 
     Ok(())
 }

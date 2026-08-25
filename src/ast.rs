@@ -179,8 +179,12 @@ pub enum Expr {
     MethodCall { recv: Box<Expr>, name: String, args: Vec<CallArg>, span: Span },
     /// receiver.name
     Field { recv: Box<Expr>, name: String, span: Span },
-    /// arr[i] (P5 已裁决)
+    /// arr[i] (P5 已裁决; Phase 2d 落地为读语义 + 越界运行时守卫)
     Index { recv: Box<Expr>, idx: Box<Expr>, span: Span },
+
+    /// 数组字面量 (Phase 2d): [e1, e2, ...] — 元素类型须一致,
+    /// 实例 = 泄漏堆块, 变量持指针 (引用语义)
+    ArrayLit { elems: Vec<Expr>, span: Span },
 
     FuncLit { params: Vec<Param>, body: Box<Body>, span: Span },
 
@@ -239,6 +243,7 @@ impl Expr {
             | Expr::MethodCall { span, .. }
             | Expr::Field { span, .. }
             | Expr::Index { span, .. }
+            | Expr::ArrayLit { span, .. }
             | Expr::FuncLit { span, .. }
             | Expr::Match { span, .. }
             | Expr::Propagate { span, .. } => *span,

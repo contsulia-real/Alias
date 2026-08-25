@@ -32,6 +32,11 @@
 //!   tag 0=ok / 1=err, 载荷为规范字。ok()/err() 构造与 match 的
 //!   tag 分臂 / expr? 的载荷传播均按此布局; 打印 → 运行时 tag 定
 //!   "<ok>"/"<err>"。
+//! - **数组实例 (Phase 2d) = 泄漏 24 字节头块 {data_ptr, len, cap}**,
+//!   data_ptr 指向 n×8 元素缓冲 (空数组 data_ptr 为 null); 变量持
+//!   头块指针 — 引用语义: 赋值/传参/闭包捕获共享同一实例。push 满
+//!   容量时换新缓冲 (2x 或 +1) 复制旧元素, 旧块泄漏 (泄漏即 GC);
+//!   下标读带越界守卫 → span-ID 中止存根; 打印 → 固定 "<array>"。
 //!
 //! AOT 形态 (Phase 5): compile_to_object 发射 x86_64 COFF;
 //! 运行时 shim 区在同一 object 内定义 (Export), 经 kernel32.lib +
@@ -97,6 +102,9 @@ pub(crate) enum VTy {
     /// result<T,E> 实例 (Phase 2b) — 携带类型名供臂绑定静态投影;
     /// 打印只看运行时 tag (<ok>/<err>), 名字不参与显示
     Result(String, String),
+    /// array<T> 实例 (Phase 2d) — 携带元素静态投影供下标读的
+    /// 打印分派与字段偏移回查; 打印 → 固定 "<array>"
+    Array(Box<VTy>),
     Other,
 }
 
@@ -124,6 +132,8 @@ fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
         TypeExpr::Generic(n, args) => {
             if n == "result" && args.len() == 2 {
                 VTy::Result(args[0].display(), args[1].display())
+            } else if n == "array" && args.len() == 1 {
+                VTy::Array(Box::new(decl_vty(&args[0], structs)))
             } else {
                 VTy::Other
             }
@@ -132,8 +142,12 @@ fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
 }
 
 /// 类型显示名 → 静态投影 (match 臂绑定回查用): result<T,E> 的 T/E 名
-/// 经 decl_vty 同一词汇表反解; 嵌套 result 名等未知形态 → Other (打印被拒)
+/// 经 decl_vty 同一词汇表反解; array<T> 显示名递归反解 (Phase 2d);
+/// 其余未知形态 → Other (打印被拒)
 fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
+    if let Some(inner) = name.strip_prefix("array<").and_then(|s| s.strip_suffix('>')) {
+        return VTy::Array(Box::new(vty_of_type_name(structs, inner)));
+    }
     match name {
         "i32" => VTy::Int,
         "bool" => VTy::Bool,

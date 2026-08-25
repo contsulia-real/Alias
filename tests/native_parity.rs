@@ -74,6 +74,13 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: b"",
             exit: 0,
         },
+        // Phase 2d array<T> 演练夹具 (M36; 探测冻结 — JIT/AOT 双形态 parity 同源)
+        Baseline {
+            file: "arrays.as",
+            stdout: "10\n30\n6\n7\n5\n5\n4\n4\n5\n99\n5\n2\n3\n50\n忠\n3\n犬bc\n<array>\n".as_bytes(),
+            stderr: b"",
+            exit: 0,
+        },
         // forward-spec 文档: 方法已随 Phase 2c 落地可解析; 语料前进至
         // main 存在性 (helper.as 只有方法定义, 无 main) → sema 拒绝
         Baseline {

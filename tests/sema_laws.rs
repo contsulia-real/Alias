@@ -192,9 +192,10 @@ fn return_expr_vs_declared_mismatch() {
 
 #[test]
 fn generic_type_shape_rejected() {
+    // 例证原为 array<string>, Phase 2d 落地后轮换为 sender<string> — M35
     assert_law(
-        "\nfunc i32 main = () -> {\n    val array<string> a = ()\n    return 0\n}\n",
-        "泛型类型 array<string> 尚未实现 (Phase 5+)",
+        "\nfunc i32 main = () -> {\n    val sender<string> a = ()\n    return 0\n}\n",
+        "泛型类型 sender<string> 尚未实现 (Phase 5+)",
         3, 4,
     );
 }

@@ -28,6 +28,7 @@ D:\Project\Alias\
 ├── tests/struct_laws.rs # Phase 2a struct 法律：正负矩阵断言精确中文消息+行:列
 ├── tests/result_laws.rs # Phase 2b result/match/? 法律：正负矩阵
 ├── tests/method_laws.rs # Phase 2c 扩展方法法律：正负矩阵断言精确中文消息+行:列
+├── tests/array_laws.rs # Phase 2d array<T> 法律：正负矩阵 + 运行时中止子进程用例
 ├── tests/aot_parity.rs # Phase 5 AOT 奇偶：build 产物 vs JIT 三元组逐字节一致
 ├── docs/spec-notes.md # 规范冻结：display 表、Q①–Q⑥ 裁决、Q③ 落空规则、§五 运行时契约、§六 AOT 形态
 ├── MIGRATION.md     # 迁移记录：每个语义变化一行，引用裁决编号
@@ -65,16 +66,17 @@ D:\Project\Alias\
   - 报错必须提供详细信息（file:line:col 从第一天起强制）
   - 类型槽强制非空、无类型推断（`var x = 1` 必须报错）
   - val 绑定不可重新赋值
-- **Phase 路线图**：代码按阶段演进。当前 Phase 2c 完成（struct / result / 扩展方法落地；AOT exe 为双形态之一）；标准库接入 = Phase 5+。未实现特性报错信息里标注对应 Phase。
+- **Phase 路线图**：代码按阶段演进。当前 Phase 2d 完成（struct / result / 扩展方法 / array<T> 落地；AOT exe 为双形态之一）；标准库接入 = Phase 5+。未实现特性报错信息里标注对应 Phase。
 - **中文报错**：所有面向用户的错误消息为简体中文。
 - **闭包语义**：每个绑定一泄漏堆单元格，闭包 env 持捕获单元格指针（引用捕获）——cond 闭包须读到外层变量最新值，见 codegen.rs 模块头值模型说明。
 - **方法语义**：`public? func <Ret> <RecvType>.<name>` 定义扩展方法；self 是隐式 val 绑定（不在参数表）；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖——见 spec-notes 附录五。
+- **数组语义**：实例 = 泄漏头块 {data_ptr,len,cap}，引用语义（别名共享）；下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop 不可定义——见 spec-notes 附录六。
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
 - **禁止字符串哨兵**：控制流与错误各有类型化通道（迁移前为 Flow enum，现为 Result/别名），不得用特殊字符串/魔法值传递。
 - import 只解析不执行——不要尝试解析 import 语义（Phase 5 前）。
-- 下标访问是占位报错，不是 bug；方法调用/字段访问已是真语义（Phase 2a/2c）。
+- 下标赋值是明确拒绝（只读索引裁决），不是 bug；下标读/方法调用/字段访问已是真语义（Phase 2a/2c/2d）。
 
 ## UNIQUE STYLES
 

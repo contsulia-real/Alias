@@ -27,6 +27,19 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             _ => VTy::Bool,
         },
         Expr::Ident(name, _) => vty_of_name(c, frame, name),
+        // 数组字面量 (Phase 2d): 元素静态投影取首元素 (sema 已统一全元素)
+        Expr::ArrayLit { elems, .. } => VTy::Array(Box::new(
+            elems
+                .first()
+                .map(|e| static_vty(c, frame, e))
+                .unwrap_or(VTy::Other),
+        )),
+        // 下标读 (Phase 2d): 主语元素投影即结果类型 —
+        // 链式 arr[i].field / println arr[i] 的分派由此流动
+        Expr::Index { recv, .. } => match static_vty(c, frame, recv) {
+            VTy::Array(inner) => *inner,
+            _ => VTy::Other,
+        },
         // 字段链: recv 的结构体名 → 布局表 → 字段静态类型 (嵌套可递归)
         Expr::Field { recv, name, .. } => {
             if let VTy::Struct(s) = static_vty(c, frame, recv) {
@@ -64,13 +77,22 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         // (直接打印 match 值被拒; 经声明绑定中转后打印不受影响)
         Expr::Match { .. } => VTy::Other,
         // 方法调用 (Phase 2c): 用户方法回查发射期返回类型表;
-        // 内建字符串方法按冻结签名投影 — 链式调用由此逐级流动
+        // 内建字符串方法按冻结签名投影 — 链式调用由此逐级流动;
+        // 数组内建三件套 (Phase 2d) 按冻结签名投影
         Expr::MethodCall { recv, name, .. } => {
             let rn = match static_vty(c, frame, recv) {
                 VTy::Str => "string".to_string(),
                 VTy::Int => "i32".to_string(),
                 VTy::Bool => "bool".to_string(),
                 VTy::Struct(s) => s,
+                VTy::Array(elem) => {
+                    return match name.as_str() {
+                        "len" => VTy::Int,
+                        "push" => VTy::Unit,
+                        "pop" => *elem,
+                        _ => VTy::Other,
+                    };
+                }
                 _ => return VTy::Other,
             };
             if let Some(v) = c.method_rets.get(&(rn.clone(), name.clone())) {
@@ -82,7 +104,7 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 _ => VTy::Other,
             }
         }
-        _ => VTy::Other,
+        // Expr 变体已全覆盖 — 新增变体时编译器强制补投影 (穷尽匹配)
     }
 }
 

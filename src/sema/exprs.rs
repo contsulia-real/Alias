@@ -58,10 +58,51 @@ impl Checker {
             Expr::MethodCall { recv, name, args, span } => {
                 self.method_call(recv, name, args, *span, env)
             }
-            // 占位表达式: 运行时在求值 recv 之前就报「尚未实现」, 因此 sema
-            // 不下钻子树 — 保证 surfaced 的错误与现状逐字节一致
-            // (Field 自 Phase 2a 起为真语义, 不再是占位)
-            Expr::Index { .. } => Ok(Ty::Unknown),
+            // Phase 2d: 下标读真语义 — 主语须为 array<T>, 下标须 i32;
+            // 主语类型不可知时级联抑制 (先例: match 主语)
+            Expr::Index { recv, idx, .. } => {
+                let rt = self.expr(recv, env)?;
+                if rt.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                let Ty::Array(elem) = rt else {
+                    return Err(AliasError {
+                        msg: format!("下标访问需要 array 类型, 实际 {}", rt.name()),
+                        span: recv.span(),
+                    });
+                };
+                let it = self.expr(idx, env)?;
+                if !it.is_unknown() && it != Ty::Int {
+                    return Err(AliasError {
+                        msg: format!("下标需要 i32, 实际 {}", it.name()),
+                        span: idx.span(),
+                    });
+                }
+                Ok(*elem)
+            }
+            // Phase 2d: 数组字面量 — 元素按书写序检查, 首元素定候选类型,
+            // 其余逐个统一; 不一致即编译错误 (span 落在违规元素上)
+            Expr::ArrayLit { elems, .. } => {
+                let mut elem_ty: Option<Ty> = None;
+                for e in elems {
+                    let t = self.expr(e, env)?;
+                    match &elem_ty {
+                        None => elem_ty = Some(t),
+                        Some(first) if !types_match(first, &t) => {
+                            return Err(AliasError {
+                                msg: format!(
+                                    "数组元素类型不一致: {} 与 {}",
+                                    first.name(),
+                                    t.name()
+                                ),
+                                span: e.span(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Ty::Array(Box::new(elem_ty.unwrap_or(Ty::Unknown))))
+            }
             Expr::Field { recv, name, span } => {
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
@@ -519,6 +560,52 @@ impl Checker {
         let rt = self.expr(recv, env)?;
         if rt.is_unknown() {
             return Ok(Ty::Unknown);
+        }
+        // 数组内建三件套 (Phase 2d): 编译器提供, 元素类型参数化 —
+        // 不入名字键方法表 (表按接收者名索引, 泛型元素无法枚举播种),
+        // 用户亦无法定义数组方法 (接收者文法不含 '<', 天然不可覆盖)
+        if let Ty::Array(elem) = &rt {
+            for a in args {
+                if let Some(lbl) = &a.label {
+                    return Err(AliasError {
+                        msg: format!("方法调用不接受命名实参 '{lbl}'"),
+                        span: a.span,
+                    });
+                }
+            }
+            match name {
+                "len" if args.is_empty() => return Ok(Ty::Int),
+                "push" if args.len() == 1 => {
+                    let at = self.expr(&args[0].value, env)?;
+                    if !types_match(elem, &at) {
+                        return Err(AliasError {
+                            msg: format!(
+                                "第 1 个实参需要 {}, 实际 {}",
+                                elem.name(),
+                                at.name()
+                            ),
+                            span: args[0].value.span(),
+                        });
+                    }
+                    return Ok(Ty::Unit);
+                }
+                "pop" if args.is_empty() => return Ok((**elem).clone()),
+                _ => {}
+            }
+            let arity = match name {
+                "len" | "pop" => 0,
+                "push" => 1,
+                _ => {
+                    return Err(AliasError {
+                        msg: format!("类型 {} 上没有方法 '{name}'", rt.name()),
+                        span,
+                    })
+                }
+            };
+            return Err(AliasError {
+                msg: format!("期望 {arity} 个参数, 实际 {} 个", args.len()),
+                span,
+            });
         }
         let rname = rt.name();
         let Some(sig) =

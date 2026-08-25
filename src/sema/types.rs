@@ -27,6 +27,9 @@ pub(super) enum Ty {
     /// result<T,E> 内建泛型枚举 (Phase 2b): 值即泄漏堆块指针
     /// {tag, payload}; 构造器单侧推断时另一侧为 Unknown
     Result(Box<Ty>, Box<Ty>),
+    /// array<T> 内建泛型 (Phase 2d): 值即泄漏堆块指针 (引用语义);
+    /// 空字面量 [] 的元素类型为 Unknown, 由声明上下文统一
+    Array(Box<Ty>),
     /// 已报错或签名不可知的子树 — 抑制级联诊断, 不再产生新消息
     Unknown,
 }
@@ -43,6 +46,7 @@ impl Ty {
             Ty::Unit => "()".into(),
             Ty::Struct(s) => s.clone(),
             Ty::Result(t, e) => format!("result<{}, {}>", t.name(), e.name()),
+            Ty::Array(t) => format!("array<{}>", t.name()),
             Ty::Unknown => "未知".into(),
         }
     }
@@ -62,12 +66,13 @@ pub(super) fn types_match(want: &Ty, got: &Ty) -> bool {
         (Ty::Result(t1, e1), Ty::Result(t2, e2)) => {
             types_match(t1, t2) && types_match(e1, e2)
         }
+        (Ty::Array(a), Ty::Array(b)) => types_match(a, b),
         _ => matches!(want, Ty::FuncPoly) && matches!(got, Ty::Func { .. } | Ty::FuncPoly),
     }
 }
 
-/// 类型槽校验: result<T,E> 内建泛型展开 (恰两参, 递归校验);
-/// 其余泛型形状报命名 Phase 错误; 未知名拒绝
+/// 类型槽校验: result<T,E> (恰两参) 与 array<T> (恰一参, Phase 2d)
+/// 内建泛型展开, 递归校验; 其余泛型形状报命名 Phase 错误; 未知名拒绝
 /// (parser 接受任意名字, 此处按 D3 冻结类型集 + 结构体表收紧)。
 pub(super) fn check_type_slot(
     te: &TypeExpr,
@@ -76,21 +81,34 @@ pub(super) fn check_type_slot(
 ) -> AliasResult<Ty> {
     match te {
         TypeExpr::Generic(name, args) => {
-            if name != "result" {
+            let want_arity = match name.as_str() {
+                "result" => 2,
+                "array" => 1,
+                _ => {
+                    return Err(AliasError {
+                        msg: format!("泛型类型 {} 尚未实现 (Phase 5+)", te.display()),
+                        span,
+                    })
+                }
+            };
+            if args.len() != want_arity {
                 return Err(AliasError {
-                    msg: format!("泛型类型 {} 尚未实现 (Phase 5+)", te.display()),
+                    msg: format!("{name} 需要 {want_arity} 个类型参数, 实际 {} 个", args.len()),
                     span,
                 });
             }
-            if args.len() != 2 {
-                return Err(AliasError {
-                    msg: format!("result 需要 2 个类型参数, 实际 {} 个", args.len()),
-                    span,
-                });
+            let mut ts = Vec::with_capacity(args.len());
+            for a in args {
+                ts.push(check_type_slot(a, span, structs)?);
             }
-            let t = check_type_slot(&args[0], span, structs)?;
-            let e = check_type_slot(&args[1], span, structs)?;
-            Ok(Ty::Result(Box::new(t), Box::new(e)))
+            if name == "result" {
+                Ok(Ty::Result(
+                    Box::new(ts.swap_remove(0)),
+                    Box::new(ts.swap_remove(0)),
+                ))
+            } else {
+                Ok(Ty::Array(Box::new(ts.swap_remove(0))))
+            }
         }
         TypeExpr::Named(n) => match n.as_str() {
             "i32" => Ok(Ty::Int),

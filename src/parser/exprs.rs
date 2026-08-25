@@ -223,8 +223,34 @@ impl Parser {
             }
             // match 表达式 (Phase 2b): match <expr> { ctor(绑定) -> 体, ... }
             Some(Tok::Match) => self.parse_match_expr(),
+            // 数组字面量 (Phase 2d): [e1, e2, ...] — 元素逗号分隔,
+            // 尾逗号容忍 (M27 先例); 括号内换行由 skip_newlines 吸收
+            Some(Tok::LBracket) => self.parse_array_lit(),
             other => Err(self.err_here(format!("无法开始一个表达式: {:?}", other))),
         }
+    }
+
+    /// '[' 处进入: [ 元素, 元素, ... ] — 空字面量 [] 合法
+    /// (元素类型由声明上下文统一; 裸空字面量推断为 array<未知>)
+    fn parse_array_lit(&mut self) -> AliasResult<Expr> {
+        let span = self.span();
+        self.bump(); // [
+        let mut elems = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek() == Some(&Tok::RBracket) || self.peek().is_none() {
+                break;
+            }
+            elems.push(self.parse_expr()?);
+            self.skip_newlines();
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            break;
+        }
+        self.skip_newlines();
+        self.expect(&Tok::RBracket)?;
+        Ok(Expr::ArrayLit { elems, span })
     }
 
     /// match 文法 (file_wc.as 34-52 为冻结形状):

@@ -80,8 +80,8 @@
 
 - `demos/recursion.as`、`file_wc.as`、`producer_consumer.as`、`helper.as` 是
   **规范文档非测试夹具** — 当前可能无法解析/运行, 禁止纳入黄金记录。
-- MethodCall/Field/Index 保持占位报错 (Phase 2/5 标注不变);
-  import 保持解析暂存 (Phase 5 前)。
+- MethodCall/Field/Index 占位已分别随 Phase 2a/2b/2c/2d 退役为真语义
+  (见附录三/四/五/六); import 保持解析暂存 (Phase 5 前)。
 - 本文件只冻结行为, 不发明新语义; 未尽事宜以迁移计划为准。
 
 ---
@@ -277,4 +277,57 @@ postfix     := ... | postfix "." IDENT "(" args ")"    (真语义, 占位退役)
 - **空串结果 data_ptr 恒 null** (§五契约); 非空结果字节一律复制进新块。
 
 锁定: tests/method_laws.rs (26 用例) + demos/methods.as 双形态 parity
+(native_parity 黄金基线 + aot_parity 语料)。
+
+---
+
+# 附录六 — Phase 2d array<T> 规范 (规范性, 2026-08-25 用户批准)
+
+## §十五 文法
+
+```
+type_expr   := ... | "array" "<" type_expr ">"          恰一参, T 递归
+array_lit   := "[" [ expr ("," expr)* [","] ] "]"       尾逗号容忍 (M27 先例)
+postfix     := ... | postfix "[" expr "]"               下标读
+lvalue      := ... (不含下标)                            arr[i] = x 拒绝
+```
+
+- 空字面量 `[]` 合法 — 元素类型为 Unknown, 由声明上下文统一;
+  裸空字面量推断 array<未知>。
+- `array<>` 零参在语法层拒绝 (类型参数至少一个);
+  `array<i32, string>` 多参在 sema 报「array 需要 1 个类型参数, 实际 N 个」。
+
+## §十六 语义 (冻结)
+
+| 主题 | 裁决 |
+|------|------|
+| 值模型 | 实例 = 泄漏 24 字节头块 {data_ptr: I64, len: I64, cap: I64} + cap×8 元素缓冲; 空数组 data_ptr 恒 null (镜像空串契约); 变量持头块指针 |
+| 引用语义 | 赋值/传参/闭包捕获共享同一实例 — 经任一别名 push/pop, 其余别名立即可见 (镜像 struct 契约); val 绑定上的 push 合法 (变异在实例不在绑定) |
+| 字面量 | 元素按书写序求值逐个入缓冲 (lhs-to-rhs 黄金冻结约定), 头块先分配、len 后回填; 元素类型须一致 — 违规元素报「数组元素类型不一致: X 与 Y」 |
+| 下标读 | 主语与下标按序求值 → I32 域越界守卫 (i < 0 或 i >= len) → data_ptr 偏移加载; 主语非 array → 「下标访问需要 array 类型, 实际 X」(span 在主语); 下标非 i32 → 「下标需要 i32, 实际 X」(span 在下标) |
+| 下标赋值 | 本阶段拒绝 — 解析层「下标赋值尚未支持」; 经下标的字段赋值 (`cs[i].f = v`) 不属下标赋值, 按 FieldAssign 正常通道 (写穿透实例指针) |
+| 内建方法 | len()→i32 / push(v)→unit / pop()→元素字; 编译器提供, 接收者文法不含 '<' 故用户不可定义亦不可覆盖; push 实参须等于元素类型; pop 空数组 → 运行时中止 |
+| 打印 | 数组值经 println/print/插值 → 固定 `<array>` (display 表新增行, 与 `<struct>` 对称; 元素永不泄露) |
+
+## §十七 运行时表示与符号契约 (冻结)
+
+- **中止机制**: 越界读与 pop 空数组走 span-ID 中止存根 (与除零同机制):
+  发射期把守卫点行:列登记入 span 表, 运行时按 ID 回查打印
+  「错误 @ L:C — {下标越界|pop 空数组}」→ exit 1。span 记账点:
+  下标取 `[` token, pop 取方法调用 `.` token (parser 既有 span 语义)。
+- **双后端同符号** (§五 契约扩充):
+
+| 符号 | 签名 | 语义 |
+|------|------|------|
+| alias.arr.new | (i32)→i64 | 泄漏头块 + cap×8 缓冲 (cap=0 → data_ptr null), len=0 |
+| alias.arr.len | (i64)→i32 | 头块 len 字段 |
+| alias.arr.push | (i64,i64) | 满 len==cap → 新缓冲 2x (cap=0 取 1) + RtlMoveMemory 复制旧元素, 头块原地换 data_ptr/cap; 尾插 + len+=1 |
+| alias.arr.pop | (i64)→i64 | len-=1 返回 data[len] (空守卫在发射层, shim 按契约假定非空) |
+| alias.display.array | ()→i64 | 固定 "<array>" 块 |
+| alias.abort_oob / alias.abort_pop | (i32) | span-ID 中止存根 (消息后缀不同) |
+
+- AOT shim 无 CRT 调用: 增长复制走 RtlMoveMemory, 分配走 rt.heap.alloc
+  (HeapAlloc); JIT 宿主以 Rust 等价实现同一布局与增长策略。
+
+锁定: tests/array_laws.rs (21 用例) + demos/arrays.as 双形态 parity
 (native_parity 黄金基线 + aot_parity 语料)。

@@ -111,3 +111,15 @@ struct_laws 22 + result_laws 22 全绿; demos/result_match.as 双形态逐字节
 **终态验证**: golden 2 + aot_parity 5 + native_parity 3 + sema_laws 29 + smoke 8 +
 struct_laws 22 + result_laws 22 + method_laws 26 全绿; demos/methods.as 双形态
 逐字节一致; `cargo build` 零警告。
+
+## Phase 2d — array<T> 数组类型 (2026-08-25)
+
+| # | 变更 | 依据 | 安全性 |
+|---|------|------|--------|
+| M35 | **array<T> 内建泛型落地**: 类型槽接受 `array<T>` (恰一参, T 递归含 array<array<i32>>/结构体/string); 其余泛型仍按 Phase 5+ 拒绝; 字面量 `[e1, e2, ...]` 元素类型一致 (首元素定候选, 违规元素报「数组元素类型不一致: X 与 Y」, 空字面量元素类型 Unknown 由声明上下文统一); 下标读 `expr[i]` 真语义 (主语须 array → 「下标访问需要 array 类型, 实际 X」; 下标须 i32 → 「下标需要 i32, 实际 X」); `arr[i] = x` 解析层拒绝「下标赋值尚未支持」(只读索引裁决) | 用户批准 Phase 2d 设计 (spec-notes 附录六) | 全部为新发明检查/语法 — 此前 Index 为占位报错、数组字面量无法解析, 无被接受语料依赖。锁定于 tests/array_laws.rs 21 用例 (负向 9 断言精确中文消息+行:列, 正向 9 含增长/LIFO/别名/嵌套/结构体元素/闭包捕获, 运行时中止 3 走子进程 CLI) |
+| M36 | **运行时表示与内建方法**: 实例 = 泄漏 24 字节头块 {data_ptr, len, cap} + n×8 元素缓冲 (空数组 data_ptr 恒 null, 镜像空串契约); 引用语义 (赋值/传参/捕获共享头块指针); push 满 len==cap 换新缓冲 (2x, 空 cap 取 1) RtlMoveMemory 复制旧元素, 头块原地更新 — 别名立即可见; pop LIFO; 内建 len/push/pop 编译器提供且用户不可定义 (接收者文法不含 '<'); 越界读/负下标/pop 空数组 → span-ID 中止存根 (「错误 @ L:C — 下标越界」/「— pop 空数组」, exit 1, 与除零同机制); 打印数组值 → 固定 `<array>`; 双后端同符号契约 alias.arr.new·len·push·pop / alias.abort_oob / alias.abort_pop / alias.display.array | 用户批准 Phase 2d 设计 | 全部为新发明能力 — 只接受此前无法编译的程序; 中止消息经子进程探测逐字节冻结 (array_laws bounds/negative/pop 三用例); 双后端 parity 由 aot_parity 机械枚举背书 |
+| M37 | **基线重探** (探测后冻结): file_wc.as 语料不前进 — fail-fast 在 ok 臂 `.split/.map` 之前先撞上未解析 import 名 `open`, 基线维持「错误 @ 34:10 — 未定义的绑定 'open'」exit 1 逐字节不变; sema_laws/result_laws 中以 array 作「未实现泛型」例证的两用例轮换为 sender (法律本身不变: 非 result/array 泛型仍 Phase 5+ 拒绝); 新增 demos/arrays.as 黄金基线 (stdout 18 行, exit 0), native_parity/aot_parity 语料机械入册 | M23/M16 测试政策「探测后冻结」 | forward-spec 文档非行为契约 (spec-notes §五); 例证轮换不改变被测法律; 其余 demo 基线零改动通过 |
+
+**终态验证**: golden 2 + aot_parity 5 + native_parity 3 + sema_laws 29 + smoke 8 +
+struct_laws 22 + result_laws 22 + method_laws 26 + array_laws 21 全绿;
+demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
