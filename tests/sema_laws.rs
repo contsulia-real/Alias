@@ -127,7 +127,7 @@ fn binary_operand_type_mismatch() {
 fn neg_requires_i32() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return -true\n}\n",
-        "取负需要 i32, 实际 bool",
+        "取负需要有符号整数或浮点",
         3, 12,
     );
 }
