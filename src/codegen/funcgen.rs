@@ -4,18 +4,6 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 impl<'m, M: Module> Compiler<'m, M> {
-    /// 统一调用约定 (多态退化路径): (globals:I64, env:I64, args:I64...) -> I64。
-    pub(crate) fn user_sig(&self, n_args: usize) -> Signature {
-        let mut s = Signature::new(self.cc);
-        s.params.push(AbiParam::new(types::I64));
-        s.params.push(AbiParam::new(types::I64));
-        for _ in 0..n_args {
-            s.params.push(AbiParam::new(types::I64));
-        }
-        s.returns.push(AbiParam::new(types::I64));
-        s
-    }
-
     /// 混合签名 (Phase 3a): (globals:I64, env:I64, params...) -> ret —
     /// 参数/返回按静态类型逐位定型; 浮点经 ABI 寄存器传递 (win64 XMM)。
     /// Unit 函数统一携带 I64 哑字返回 (cl_type(Unit)=I64), 简化调用点。
@@ -151,8 +139,8 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.ins().return_(&[ret_val]);
         bcx.finalize(self.module.target_config());
         if let Err(ve) = ctx.verify_if(self.module.isa()) {
-            eprintln!("[verify-fail] {}", ve);
-            eprintln!("[CLIF]\n{}", ctx.func);
+            eprintln!("[内部验证失败] {}", ve);
+            eprintln!("[Cranelift 中间表示]\n{}", ctx.func);
         }
         self.module
             .define_function(fid, &mut ctx)
@@ -160,12 +148,14 @@ impl<'m, M: Module> Compiler<'m, M> {
     }
 
     /// 入口 wrapper: Q⑥ 顶层初始化按序求值 (insert-after-eval 可见性),
-    /// 随后间接调用 main 闭包并按声明返回类型映射退出码
-    /// (i32→原样 / bool true→0 false→1 / 其余→0, spec-notes Q④ 映射表)。
+    /// 随后间接调用 i32 main 闭包并把返回值映射为进程退出码。
     /// JIT: 名 alias_entry 返回 I64 由宿主读取;
     /// AOT: 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
     /// 链接参数 /ENTRY:alias_start (linker.rs 单一拥有者)。
     pub(crate) fn compile_entry(&mut self, items: &[Item], main_slot: usize, main_ret: VTy) -> AliasResult<FuncId> {
+        if main_ret != VTy::I(IntW::W32) {
+            return Err(native_err(Span::default(), "内部: sema 未将 main 收紧为 i32"));
+        }
         let mut entry_sig = Signature::new(self.cc);
         entry_sig.returns.push(AbiParam::new(if self.is_aot { types::I32 } else { types::I64 }));
         let fid = self
@@ -196,6 +186,9 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         let globals_v = bcx.declare_var(types::I64);
         bcx.def_var(globals_v, gword);
+        let abort_ret = bcx.create_block();
+        let abort_ty = if self.is_aot { types::I32 } else { types::I64 };
+        let abort_code = bcx.append_block_param(abort_ret, abort_ty);
         let mut frame = Frame {
             scopes: vec![HashMap::new()],
             locals_vty: vec![HashMap::new()],
@@ -205,26 +198,49 @@ impl<'m, M: Module> Compiler<'m, M> {
             caps_vty: HashMap::new(),
             terminated: false,
             init_ctx: false,
-            ret_block: None,
-            ret_vty: None,
+            ret_block: Some(abort_ret),
+            ret_vty: Some(VTy::I(IntW::W32)),
         };
         // 顶层槽位偏移在编译期已知 → 记录供 slot_of 解析 (init 语境)
         frame.init_ctx = true;
 
         // 名字随项序增长可见 — 镜像解释器逐项插入 (insert-after-eval);
         // 方法不是绑定, 不参与初始化序列
-        for b in items.iter().filter_map(|i| match i {
+        for (binding_index, b) in items.iter().filter_map(|i| match i {
             Item::Binding(b) if b.receiver.is_none() => Some(b),
             _ => None,
-        }) {
-            let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?;
-            let off = slot_of(self, &b.name);
-            let svty = self.globals_final[&b.name].1.clone();
+        }).enumerate() {
+            let (v, svty) = if b.kind == BindKind::Func {
+                let Expr::FuncLit { params, body, .. } = &b.value else {
+                    return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
+                };
+                let ret_vty = decl_vty(&b.ty, &self.struct_layouts);
+                let param_vtys = params
+                    .iter()
+                    .map(|p| decl_vty(&p.ty, &self.struct_layouts))
+                    .collect::<Vec<_>>();
+                let v = emit_funclit_value_typed(
+                    self,
+                    &mut bcx,
+                    &mut frame,
+                    params,
+                    body,
+                    ret_vty.clone(),
+                )?;
+                (v, VTy::Func(param_vtys, Box::new(ret_vty)))
+            } else {
+                let vty = decl_vty(&b.ty, &self.struct_layouts);
+                (
+                    emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?,
+                    vty,
+                )
+            };
+            let off = self.top_slots[binding_index];
             let sv = norm_store(&mut bcx, v, &svty);
             let base = bcx.use_var(frame.globals);
             bcx.ins().store(MemFlagsData::new(), sv, base, off as i32);
             frame.scopes[0].insert(b.name.clone(), Slot::Global(off));
-            frame.locals_vty[0].insert(b.name.clone(), decl_vty(&b.ty, &self.struct_layouts));
+            frame.locals_vty[0].insert(b.name.clone(), svty);
         }
 
         // main 闭包: 从全局槽位加载 → 间接调用 (混合签名 — 返回类型定型)
@@ -241,17 +257,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
-        // 退出映射 (Q④): i32→原样 / bool true→0 false→1 / string·unit→0
-        let code_word: Value = match &main_ret {
-            VTy::Bool => {
-                let is_true = bcx.ins().icmp_imm_s(IntCC::Equal, raw, 1);
-                let t = bcx.ins().iconst(types::I64, 0);
-                let f = bcx.ins().iconst(types::I64, 1);
-                bcx.ins().select(is_true, t, f)
-            }
-            VTy::Str | VTy::Unit => bcx.ins().iconst(types::I64, 0),
-            _ => norm_load(&mut bcx, raw, &main_ret),
-        };
+        let code_word = norm_load(&mut bcx, raw, &main_ret);
         if self.is_aot {
             // 无 CRT 环境: 显式 ExitProcess 传递退出码 (返回值无人接收)
             let exit_code = bcx.ins().ireduce(types::I32, code_word);
@@ -262,10 +268,24 @@ impl<'m, M: Module> Compiler<'m, M> {
         } else {
             bcx.ins().return_(&[code_word]);
         }
+
+        // JIT abort 宿主只记录 AliasError，发射代码沿此块安全退回 Rust；
+        // AOT abort shim 正常不会返回，兜底仍以错误码终止进程。
+        bcx.switch_to_block(abort_ret);
+        bcx.seal_block(abort_ret);
+        if self.is_aot {
+            let ep = self.import_fn("ExitProcess", &[types::I32], None)?;
+            let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
+            let one = bcx.ins().iconst(types::I32, 1);
+            bcx.ins().call(epr, &[one]);
+            bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+        } else {
+            bcx.ins().return_(&[abort_code]);
+        }
         bcx.finalize(self.module.target_config());
         if let Err(ve) = ctx.verify_if(self.module.isa()) {
-            eprintln!("[verify-fail] {}", ve);
-            eprintln!("[CLIF]\n{}", ctx.func);
+            eprintln!("[内部验证失败] {}", ve);
+            eprintln!("[Cranelift 中间表示]\n{}", ctx.func);
         }
         self.module
             .define_function(fid, &mut ctx)
@@ -273,10 +293,6 @@ impl<'m, M: Module> Compiler<'m, M> {
         Ok(fid)
     }
 }
-pub(crate) fn slot_of<M: Module>(c: &Compiler<M>, name: &str) -> usize {
-    c.globals_final[name].0
-}
-
 // ---------------------------------------------------------------------------
 // 函数字面量: 捕获扫描 + 闭包对象创建
 // ---------------------------------------------------------------------------
@@ -289,8 +305,21 @@ pub(crate) fn emit_funclit_value<M: Module>(
     params: &[Param],
     body: &Body,
 ) -> AliasResult<Value> {
-    let caps = scan_captures(c, params, body, frame);
     let ret_vty = infer_ret_vty(c, frame, params, body);
+    emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty)
+}
+
+/// 绑定位置的函数字面量使用声明返回类型，避免把 f32 字面量等按默认 f64
+/// 推断后生成与闭包静态签名不一致的机器函数。
+pub(crate) fn emit_funclit_value_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    params: &[Param],
+    body: &Body,
+    ret_vty: VTy,
+) -> AliasResult<Value> {
+    let caps = scan_captures(c, params, body, frame);
     let param_vtys: Vec<VTy> = params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect();
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;

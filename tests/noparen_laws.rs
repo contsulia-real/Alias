@@ -26,7 +26,7 @@ fn expr_pos_swallow_int() {
 
 #[test]
 fn expr_pos_swallow_string() {
-    let src = "func string wrap = (string s) -> return '[${s}]'\nfunc bool main = () -> {\n    val string w = wrap 'hi'\n    return w == '[hi]'\n}\n";
+    let src = "func string wrap = (string s) -> return '[${s}]'\nfunc i32 main = () -> {\n    val string w = wrap 'hi'\n    while w != '[hi]' { return 1 }\n    return 0\n}\n";
     assert_eq!(ok(src), 0);
 }
 
@@ -53,7 +53,7 @@ fn method_infix_two_arg() {
 
 #[test]
 fn method_infix_zero_arg() {
-    let src = "public func string string.shout = () -> return '${self}!'\nfunc bool main = () -> {\n    val string s = 'hi'\n    val string t = s shout\n    return t == 'hi!'\n}\n";
+    let src = "public func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    val string s = 'hi'\n    val string t = s shout\n    while t != 'hi!' { return 1 }\n    return 0\n}\n";
     assert_eq!(ok(src), 0);
 }
 

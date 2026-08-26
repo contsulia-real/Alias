@@ -62,28 +62,35 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 48,
         },
-        // ---- bool main 契约: true→0, false→1 (interp.rs:121) ----
+        // ---- Q④: main 只接受 i32，其余返回类型在 sema 阶段拒绝 ----
         Golden {
-            name: "bool_main_true_exit_0",
+            name: "bool_main_rejected",
             input: Input::Inline("func bool main = () -> { return true }\n"),
             stdout: b"",
-            stderr: b"",
-            exit: 0,
-        },
-        Golden {
-            name: "bool_main_false_exit_1",
-            input: Input::Inline("func bool main = () -> { return false }\n"),
-            stdout: b"",
-            stderr: b"",
+            stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 bool\n".as_bytes(),
             exit: 1,
         },
-        // ---- 字符串插值 'n=$i' 相等比较 → true → 退出码 0 ----
+        Golden {
+            name: "string_main_rejected",
+            input: Input::Inline("func string main = () -> { return 'x' }\n"),
+            stdout: b"",
+            stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 string\n".as_bytes(),
+            exit: 1,
+        },
+        Golden {
+            name: "unit_main_rejected",
+            input: Input::Inline("func unit main = () -> { return () }\n"),
+            stdout: b"",
+            stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 ()\n".as_bytes(),
+            exit: 1,
+        },
+        // ---- 字符串插值 'n=$i' 相等比较仍合法 ----
         Golden {
             name: "string_interpolation_equality",
             input: Input::Inline(
-                "func bool main = () -> {\n    var i32 i = 4;\n    return 'n=$i' == 'n=4'\n}\n",
+                "func i32 main = () -> {\n    var i32 i = 4;\n    println ('n=$i' == 'n=4')\n    return 0\n}\n",
             ),
-            stdout: b"",
+            stdout: b"true\n",
             stderr: b"",
             exit: 0,
         },

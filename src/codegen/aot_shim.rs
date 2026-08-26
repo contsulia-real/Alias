@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// aot_shim — AOT 运行时 shim 区: kernel32/msvcrt 符号契约的 IR 实现。
+// aot_shim — AOT 运行时 shim 区: kernel32 符号契约的 IR 实现。
 // 与 host.rs (JIT 宿主) 逐符号对齐; 发射顺序必须先于 compile_program
 // (用户代码 Import 声明与同名 Export 定义经 cranelift-module 合并)。
 // ---------------------------------------------------------------------------
@@ -7,7 +7,7 @@ use super::*;
 use crate::codegen::Compiler;
 use std::collections::HashMap;
 use crate::{AliasResult, Span};
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::ir::Function;
@@ -21,7 +21,7 @@ const TRIM_SET: &[u8] = b" \t\r\n";
 // AOT 运行时 shim 区 — 与 JIT 宿主函数逐符号对齐 (模块头契约)
 //
 // 依赖面: kernel32.lib (GetStdHandle/WriteFile/ExitProcess/HeapAlloc/
-// GetProcessHeap/RtlMoveMemory) + msvcrt.lib (memcmp/sprintf)。
+// GetProcessHeap/RtlMoveMemory)。
 // 无 CRT 字符串布局依赖; 泄漏即 GC。
 //
 // 发射顺序约束: 必须先于 compile_program — 用户代码的 Import 声明与
@@ -197,6 +197,437 @@ pub(crate) fn emit_case_shim<M: Module>(
         .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
 }
 
+/// I64/U64 十进制 display。幅度始终用无符号除法，因此 i64::MIN 的
+/// 二补码幅度 2^63 不会落入有符号除法陷阱。
+fn emit_integer_display_shim<M: Module>(
+    c: &mut Compiler<'_, M>,
+    name: &str,
+    signed: bool,
+) -> AliasResult<()> {
+    let sig = c.sig(&[types::I64], Some(types::I64));
+    let fid = c
+        .module
+        .declare_function(name, Linkage::Export, &sig)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let mut ctx = Context::new();
+    ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
+    let mut fbc = FunctionBuilderContext::new();
+    let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+    let entry = bcx.create_block();
+    bcx.append_block_params_for_function_params(entry);
+    bcx.switch_to_block(entry);
+    bcx.seal_block(entry);
+    let value = bcx.block_params(entry)[0];
+
+    let alloc = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let sz32 = bcx.ins().iconst(types::I64, 32);
+    let buf_call = bcx.ins().call(alloc_ref, &[sz32]);
+    let buf = first_result(&bcx, buf_call);
+    let zero = bcx.ins().iconst(types::I64, 0);
+    let neg = if signed {
+        bcx.ins().icmp(IntCC::SignedLessThan, value, zero)
+    } else {
+        bcx.ins().iconst(types::I8, 0)
+    };
+    let neg_mag = bcx.ins().isub(zero, value);
+    let mag = bcx.ins().select(neg, neg_mag, value);
+    let pos = bcx.declare_var(types::I64);
+    let end_pos = bcx.ins().iconst(types::I64, 32);
+    bcx.def_var(pos, end_pos);
+    let n = bcx.declare_var(types::I64);
+    bcx.def_var(n, mag);
+    let ten = bcx.ins().iconst(types::I64, 10);
+    let ascii0 = bcx.ins().iconst(types::I64, b'0' as i64);
+    let loop_b = bcx.create_block();
+    let sign_b = bcx.create_block();
+    let end_b = bcx.create_block();
+    bcx.ins().jump(loop_b, &[]);
+    bcx.switch_to_block(loop_b);
+    {
+        let cur = bcx.use_var(n);
+        let p = bcx.use_var(pos);
+        let digit = bcx.ins().urem(cur, ten);
+        let ch = bcx.ins().iadd(digit, ascii0);
+        let next_pos = bcx.ins().iadd_imm_s(p, -1);
+        bcx.def_var(pos, next_pos);
+        let addr = bcx.ins().iadd(buf, next_pos);
+        let byte = bcx.ins().ireduce(types::I8, ch);
+        bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
+        let rest = bcx.ins().udiv(cur, ten);
+        bcx.def_var(n, rest);
+        let more = bcx.ins().icmp_imm_s(IntCC::NotEqual, rest, 0);
+        let again = bcx.create_block();
+        bcx.ins().brif(more, again, &[], sign_b, &[]);
+        bcx.switch_to_block(again);
+        bcx.seal_block(again);
+        bcx.ins().jump(loop_b, &[]);
+        bcx.seal_block(loop_b);
+    }
+    bcx.switch_to_block(sign_b);
+    bcx.seal_block(sign_b);
+    if signed {
+        let add_sign = bcx.create_block();
+        bcx.ins().brif(neg, add_sign, &[], end_b, &[]);
+        bcx.switch_to_block(add_sign);
+        bcx.seal_block(add_sign);
+        let p = bcx.use_var(pos);
+        let next_pos = bcx.ins().iadd_imm_s(p, -1);
+        bcx.def_var(pos, next_pos);
+        let addr = bcx.ins().iadd(buf, next_pos);
+        let minus = bcx.ins().iconst(types::I8, b'-' as i64);
+        bcx.ins().store(MemFlagsData::new(), minus, addr, 0);
+        bcx.ins().jump(end_b, &[]);
+    } else {
+        bcx.ins().jump(end_b, &[]);
+    }
+    bcx.switch_to_block(end_b);
+    bcx.seal_block(end_b);
+    let p = bcx.use_var(pos);
+    let start = bcx.ins().iadd(buf, p);
+    let c32 = bcx.ins().iconst(types::I64, 32);
+    let len = bcx.ins().isub(c32, p);
+    let sz16 = bcx.ins().iconst(types::I64, 16);
+    let blk_call = bcx.ins().call(alloc_ref, &[sz16]);
+    let blk = first_result(&bcx, blk_call);
+    bcx.ins().store(MemFlagsData::new(), start, blk, 0);
+    bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+    bcx.ins().return_(&[blk]);
+
+    bcx.finalize(c.module.target_config());
+    c.module
+        .define_function(fid, &mut ctx)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+}
+
+fn static_string_block<M: Module>(
+    c: &mut Compiler<'_, M>,
+    bcx: &mut FunctionBuilder,
+    alloc: FuncId,
+    data_name: &str,
+    len: i64,
+) -> AliasResult<Value> {
+    let id = c
+        .module
+        .declare_data(data_name, Linkage::Local, false, false)
+        .map_err(|e| native_err(Span::default(), format!("内部: 数据声明失败 {e}")))?;
+    let gv = c.module.declare_data_in_func(id, &mut bcx.func);
+    let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
+    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let sz = bcx.ins().iconst(types::I64, 16);
+    let call = bcx.ins().call(alloc_ref, &[sz]);
+    let blk = first_result(bcx, call);
+    let n = bcx.ins().iconst(types::I64, len);
+    bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
+    bcx.ins().store(MemFlagsData::new(), n, blk, 8);
+    Ok(blk)
+}
+
+/// 纯 IR 浮点显示：规范化为一位整数、六位四舍五入有效小数和十进制指数，
+/// 例如 12.34 -> 1.234e1。F32 先按其真实位宽升档，双后端共用同一算法。
+fn emit_float_display_shim<M: Module>(
+    c: &mut Compiler<'_, M>,
+    name: &str,
+    param_ty: cranelift_codegen::ir::Type,
+) -> AliasResult<()> {
+    let sig = c.sig(&[param_ty], Some(types::I64));
+    let fid = c
+        .module
+        .declare_function(name, Linkage::Export, &sig)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let mut ctx = Context::new();
+    ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
+    let mut fbc = FunctionBuilderContext::new();
+    let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+    let entry = bcx.create_block();
+    bcx.append_block_params_for_function_params(entry);
+    bcx.switch_to_block(entry);
+    bcx.seal_block(entry);
+    let raw = bcx.block_params(entry)[0];
+    let value = if param_ty == types::F32 {
+        bcx.ins().fpromote(types::F64, raw)
+    } else {
+        raw
+    };
+    let alloc = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+
+    let nan_b = bcx.create_block();
+    let inf_b = bcx.create_block();
+    let zero_b = bcx.create_block();
+    let finite_b = bcx.create_block();
+    let not_nan_b = bcx.create_block();
+    let not_inf_b = bcx.create_block();
+    let nan = bcx.ins().fcmp(FloatCC::NotEqual, value, value);
+    bcx.ins().brif(nan, nan_b, &[], not_nan_b, &[]);
+    bcx.seal_block(nan_b);
+    bcx.seal_block(not_nan_b);
+
+    bcx.switch_to_block(nan_b);
+    let nan_blk = static_string_block(c, &mut bcx, alloc, "rt_nan", 3)?;
+    bcx.ins().return_(&[nan_blk]);
+
+    bcx.switch_to_block(not_nan_b);
+    let zero_f = bcx.ins().f64const(0.0);
+    let negative = bcx.ins().fcmp(FloatCC::LessThan, value, zero_f);
+    let abs = bcx.ins().fabs(value);
+    let inf_f = bcx.ins().f64const(f64::INFINITY);
+    let inf = bcx.ins().fcmp(FloatCC::Equal, abs, inf_f);
+    bcx.ins().brif(inf, inf_b, &[], not_inf_b, &[]);
+    bcx.seal_block(inf_b);
+    bcx.seal_block(not_inf_b);
+
+    bcx.switch_to_block(inf_b);
+    let neg_inf_b = bcx.create_block();
+    let pos_inf_b = bcx.create_block();
+    bcx.ins().brif(negative, neg_inf_b, &[], pos_inf_b, &[]);
+    bcx.seal_block(neg_inf_b);
+    bcx.seal_block(pos_inf_b);
+    bcx.switch_to_block(neg_inf_b);
+    let ninf_blk = static_string_block(c, &mut bcx, alloc, "rt_ninf", 4)?;
+    bcx.ins().return_(&[ninf_blk]);
+    bcx.switch_to_block(pos_inf_b);
+    let inf_blk = static_string_block(c, &mut bcx, alloc, "rt_inf", 3)?;
+    bcx.ins().return_(&[inf_blk]);
+
+    bcx.switch_to_block(not_inf_b);
+    let is_zero = bcx.ins().fcmp(FloatCC::Equal, abs, zero_f);
+    bcx.ins().brif(is_zero, zero_b, &[], finite_b, &[]);
+    bcx.seal_block(zero_b);
+    bcx.seal_block(finite_b);
+    bcx.switch_to_block(zero_b);
+    let zero_blk = static_string_block(c, &mut bcx, alloc, "rt_zero", 1)?;
+    bcx.ins().return_(&[zero_blk]);
+
+    bcx.switch_to_block(finite_b);
+    let norm = bcx.declare_var(types::F64);
+    bcx.def_var(norm, abs);
+    let exp = bcx.declare_var(types::I64);
+    let exp0 = bcx.ins().iconst(types::I64, 0);
+    bcx.def_var(exp, exp0);
+    let hi_check = bcx.create_block();
+    let hi_body = bcx.create_block();
+    let low_check = bcx.create_block();
+    let low_body = bcx.create_block();
+    let normalized = bcx.create_block();
+    bcx.ins().jump(hi_check, &[]);
+
+    bcx.switch_to_block(hi_check);
+    let nv = bcx.use_var(norm);
+    let ten_f = bcx.ins().f64const(10.0);
+    let ge_ten = bcx.ins().fcmp(FloatCC::GreaterThanOrEqual, nv, ten_f);
+    bcx.ins().brif(ge_ten, hi_body, &[], low_check, &[]);
+    bcx.seal_block(hi_body);
+    bcx.switch_to_block(hi_body);
+    let nv = bcx.use_var(norm);
+    let divided = bcx.ins().fdiv(nv, ten_f);
+    bcx.def_var(norm, divided);
+    let ev = bcx.use_var(exp);
+    let next_e = bcx.ins().iadd_imm_s(ev, 1);
+    bcx.def_var(exp, next_e);
+    bcx.ins().jump(hi_check, &[]);
+    bcx.seal_block(hi_check);
+
+    bcx.switch_to_block(low_check);
+    let nv = bcx.use_var(norm);
+    let one_f = bcx.ins().f64const(1.0);
+    let lt_one = bcx.ins().fcmp(FloatCC::LessThan, nv, one_f);
+    bcx.ins().brif(lt_one, low_body, &[], normalized, &[]);
+    bcx.seal_block(low_body);
+    bcx.seal_block(normalized);
+    bcx.switch_to_block(low_body);
+    let nv = bcx.use_var(norm);
+    let multiplied = bcx.ins().fmul(nv, ten_f);
+    bcx.def_var(norm, multiplied);
+    let ev = bcx.use_var(exp);
+    let prev_e = bcx.ins().iadd_imm_s(ev, -1);
+    bcx.def_var(exp, prev_e);
+    bcx.ins().jump(low_check, &[]);
+    bcx.seal_block(low_check);
+
+    bcx.switch_to_block(normalized);
+    let nv = bcx.use_var(norm);
+    let million_f = bcx.ins().f64const(1_000_000.0);
+    let half_f = bcx.ins().f64const(0.5);
+    let scaled_f = bcx.ins().fmul(nv, million_f);
+    let rounded_f = bcx.ins().fadd(scaled_f, half_f);
+    let scaled0 = bcx.ins().fcvt_to_uint(types::I64, rounded_f);
+    let carry = bcx.ins().icmp_imm_s(IntCC::Equal, scaled0, 10_000_000);
+    let one_m = bcx.ins().iconst(types::I64, 1_000_000);
+    let scaled = bcx.ins().select(carry, one_m, scaled0);
+    let ev = bcx.use_var(exp);
+    let ev1 = bcx.ins().iadd_imm_s(ev, 1);
+    let final_exp = bcx.ins().select(carry, ev1, ev);
+
+    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let cap = bcx.ins().iconst(types::I64, 64);
+    let buf_call = bcx.ins().call(alloc_ref, &[cap]);
+    let buf = first_result(&bcx, buf_call);
+    let pos = bcx.declare_var(types::I64);
+    let one_i = bcx.ins().iconst(types::I64, 1);
+    let zero_i = bcx.ins().iconst(types::I64, 0);
+    let sign_len = bcx.ins().select(negative, one_i, zero_i);
+    bcx.def_var(pos, sign_len);
+    let minus = bcx.ins().iconst(types::I8, b'-' as i64);
+    bcx.ins().store(MemFlagsData::new(), minus, buf, 0);
+
+    let million = bcx.ins().iconst(types::I64, 1_000_000);
+    let whole = bcx.ins().udiv(scaled, million);
+    let ascii0 = bcx.ins().iconst(types::I64, b'0' as i64);
+    let first_ch = bcx.ins().iadd(whole, ascii0);
+    let p0 = bcx.use_var(pos);
+    let first_addr = bcx.ins().iadd(buf, p0);
+    let first_byte = bcx.ins().ireduce(types::I8, first_ch);
+    bcx.ins().store(MemFlagsData::new(), first_byte, first_addr, 0);
+    let p1 = bcx.ins().iadd_imm_s(p0, 1);
+    bcx.def_var(pos, p1);
+    let frac = bcx.declare_var(types::I64);
+    let frac0 = bcx.ins().urem(scaled, million);
+    bcx.def_var(frac, frac0);
+    let has_frac = bcx.ins().icmp_imm_s(IntCC::NotEqual, frac0, 0);
+    let frac_b = bcx.create_block();
+    let exponent_b = bcx.create_block();
+    bcx.ins().brif(has_frac, frac_b, &[], exponent_b, &[]);
+    bcx.seal_block(frac_b);
+    bcx.switch_to_block(frac_b);
+    let p = bcx.use_var(pos);
+    let dot_addr = bcx.ins().iadd(buf, p);
+    let dot = bcx.ins().iconst(types::I8, b'.' as i64);
+    bcx.ins().store(MemFlagsData::new(), dot, dot_addr, 0);
+    let after_dot = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, after_dot);
+    let divisor = bcx.declare_var(types::I64);
+    let div0 = bcx.ins().iconst(types::I64, 100_000);
+    bcx.def_var(divisor, div0);
+    let digits_left = bcx.declare_var(types::I64);
+    let six = bcx.ins().iconst(types::I64, 6);
+    bcx.def_var(digits_left, six);
+    let digit_loop = bcx.create_block();
+    let trim_check = bcx.create_block();
+    bcx.ins().jump(digit_loop, &[]);
+    bcx.switch_to_block(digit_loop);
+    let fv = bcx.use_var(frac);
+    let dv = bcx.use_var(divisor);
+    let digit = bcx.ins().udiv(fv, dv);
+    let rest = bcx.ins().urem(fv, dv);
+    bcx.def_var(frac, rest);
+    let ch = bcx.ins().iadd(digit, ascii0);
+    let p = bcx.use_var(pos);
+    let addr = bcx.ins().iadd(buf, p);
+    let byte = bcx.ins().ireduce(types::I8, ch);
+    bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
+    let next_pos = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, next_pos);
+    let next_div = bcx.ins().udiv_imm_u(dv, 10);
+    bcx.def_var(divisor, next_div);
+    let left = bcx.use_var(digits_left);
+    let next_left = bcx.ins().iadd_imm_s(left, -1);
+    bcx.def_var(digits_left, next_left);
+    let more = bcx.ins().icmp_imm_s(IntCC::NotEqual, next_left, 0);
+    let digit_again = bcx.create_block();
+    bcx.ins().brif(more, digit_again, &[], trim_check, &[]);
+    bcx.seal_block(digit_again);
+    bcx.switch_to_block(digit_again);
+    bcx.ins().jump(digit_loop, &[]);
+    bcx.seal_block(digit_loop);
+
+    bcx.switch_to_block(trim_check);
+    let p = bcx.use_var(pos);
+    let last_pos = bcx.ins().iadd_imm_s(p, -1);
+    let last_addr = bcx.ins().iadd(buf, last_pos);
+    let last = bcx.ins().load(types::I8, MemFlagsData::new(), last_addr, 0);
+    let is_zero_digit = bcx.ins().icmp_imm_s(IntCC::Equal, last, b'0' as i64);
+    let trim_body = bcx.create_block();
+    bcx.ins().brif(is_zero_digit, trim_body, &[], exponent_b, &[]);
+    bcx.seal_block(trim_body);
+    bcx.switch_to_block(trim_body);
+    bcx.def_var(pos, last_pos);
+    bcx.ins().jump(trim_check, &[]);
+    bcx.seal_block(trim_check);
+
+    bcx.switch_to_block(exponent_b);
+    bcx.seal_block(exponent_b);
+    let p = bcx.use_var(pos);
+    let e_addr = bcx.ins().iadd(buf, p);
+    let e_ch = bcx.ins().iconst(types::I8, b'e' as i64);
+    bcx.ins().store(MemFlagsData::new(), e_ch, e_addr, 0);
+    let p = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, p);
+    let exp_neg = bcx.ins().icmp_imm_s(IntCC::SignedLessThan, final_exp, 0);
+    let exp_sign_b = bcx.create_block();
+    let exp_digits_b = bcx.create_block();
+    bcx.ins().brif(exp_neg, exp_sign_b, &[], exp_digits_b, &[]);
+    bcx.seal_block(exp_sign_b);
+    bcx.switch_to_block(exp_sign_b);
+    let p = bcx.use_var(pos);
+    let addr = bcx.ins().iadd(buf, p);
+    bcx.ins().store(MemFlagsData::new(), minus, addr, 0);
+    let next_pos = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, next_pos);
+    bcx.ins().jump(exp_digits_b, &[]);
+
+    bcx.switch_to_block(exp_digits_b);
+    bcx.seal_block(exp_digits_b);
+    let neg_exp = bcx.ins().ineg(final_exp);
+    let exp_mag = bcx.ins().select(exp_neg, neg_exp, final_exp);
+    let hundreds = bcx.ins().udiv_imm_u(exp_mag, 100);
+    let has_hundreds = bcx.ins().icmp_imm_s(IntCC::NotEqual, hundreds, 0);
+    let hundred_b = bcx.create_block();
+    let tens_check_b = bcx.create_block();
+    bcx.ins().brif(has_hundreds, hundred_b, &[], tens_check_b, &[]);
+    bcx.seal_block(hundred_b);
+    bcx.switch_to_block(hundred_b);
+    let p = bcx.use_var(pos);
+    let addr = bcx.ins().iadd(buf, p);
+    let ch = bcx.ins().iadd(hundreds, ascii0);
+    let byte = bcx.ins().ireduce(types::I8, ch);
+    bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
+    let next_pos = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, next_pos);
+    bcx.ins().jump(tens_check_b, &[]);
+
+    bcx.switch_to_block(tens_check_b);
+    bcx.seal_block(tens_check_b);
+    let rem100 = bcx.ins().urem_imm_u(exp_mag, 100);
+    let tens = bcx.ins().udiv_imm_u(rem100, 10);
+    let nonzero_tens = bcx.ins().icmp_imm_s(IntCC::NotEqual, tens, 0);
+    let has_tens = bcx.ins().bor(has_hundreds, nonzero_tens);
+    let tens_b = bcx.create_block();
+    let ones_b = bcx.create_block();
+    bcx.ins().brif(has_tens, tens_b, &[], ones_b, &[]);
+    bcx.seal_block(tens_b);
+    bcx.switch_to_block(tens_b);
+    let p = bcx.use_var(pos);
+    let addr = bcx.ins().iadd(buf, p);
+    let ch = bcx.ins().iadd(tens, ascii0);
+    let byte = bcx.ins().ireduce(types::I8, ch);
+    bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
+    let next_pos = bcx.ins().iadd_imm_s(p, 1);
+    bcx.def_var(pos, next_pos);
+    bcx.ins().jump(ones_b, &[]);
+
+    bcx.switch_to_block(ones_b);
+    bcx.seal_block(ones_b);
+    let ones = bcx.ins().urem_imm_u(exp_mag, 10);
+    let p = bcx.use_var(pos);
+    let addr = bcx.ins().iadd(buf, p);
+    let ch = bcx.ins().iadd(ones, ascii0);
+    let byte = bcx.ins().ireduce(types::I8, ch);
+    bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
+    let final_len = bcx.ins().iadd_imm_s(p, 1);
+    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let sz = bcx.ins().iconst(types::I64, 16);
+    let blk_call = bcx.ins().call(alloc_ref, &[sz]);
+    let blk = first_result(&bcx, blk_call);
+    bcx.ins().store(MemFlagsData::new(), buf, blk, 0);
+    bcx.ins().store(MemFlagsData::new(), final_len, blk, 8);
+    bcx.ins().return_(&[blk]);
+
+    bcx.finalize(c.module.target_config());
+    c.module
+        .define_function(fid, &mut ctx)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+}
+
 /// span 表数据段回填: (line, col) u32 小端对 — abort shim 运行时查表。
 pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {    let id = c
         .module
@@ -261,7 +692,7 @@ fn emit_span_abort<M: Module>(
             let __null = $bcx.ins().iconst(c.ptr_ty, 0);
             let __gv = c.module.declare_data_in_func(static_ids[$data], &mut $bcx.func);
             let __addr = $bcx.ins().symbol_value(c.ptr_ty, __gv);
-            let __len = $bcx.ins().iconst(types::I64, $len);
+            let __len = $bcx.ins().iconst(types::I32, $len);
             let __wf = c.module.declare_func_in_func(ext.write_file, &mut $bcx.func);
             $bcx.ins().call(__wf, &[$err, __addr, __len, __wa_addr, __null]);
         }};
@@ -301,7 +732,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         get_std_handle: c.import_fn("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
         write_file: c.import_fn(
             "WriteFile",
-            &[c.ptr_ty, c.ptr_ty, types::I64, c.ptr_ty, c.ptr_ty],
+            &[c.ptr_ty, c.ptr_ty, types::I32, c.ptr_ty, c.ptr_ty],
             Some(types::I32),
         )?,
         exit_process: c.import_fn("ExitProcess", &[types::I32], None)?,
@@ -327,11 +758,16 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("rt_array", b"<array>"),
         ("rt_ok", b"<ok>"),
         ("rt_err", b"<err>"),
+        ("rt_nan", b"NaN"),
+        ("rt_inf", b"inf"),
+        ("rt_ninf", b"-inf"),
+        ("rt_zero", b"0"),
         ("rt_msg_prefix", "错误 @ ".as_bytes()),      // 9 字节
         ("rt_colon", b":"),
         ("rt_msg_suffix", " — 除以零\n".as_bytes()), // 15 字节
         ("rt_oob_suffix", " — 下标越界\n".as_bytes()),  // 18 字节
         ("rt_pop_suffix", " — pop 空数组\n".as_bytes()), // 19 字节
+        ("rt_conv_suffix", " — 转换越界\n".as_bytes()), // 18 字节
     ];
     let mut static_ids: HashMap<&str, cranelift_module::DataId> = HashMap::new();
     for (name, bytes) in statics.drain(..) {
@@ -380,6 +816,18 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         let h = call_rt_m!(bcx, "GetProcessHeap", vec![], Some(c.ptr_ty), vec![]);
         let flags = bcx.ins().iconst(types::I32, 8); // HEAP_ZERO_MEMORY
         let p = call_ext_m!(bcx, heap_alloc, vec![h, flags, a[0]]);
+        let failed = bcx.ins().icmp_imm_s(IntCC::Equal, p, 0);
+        let fail_b = bcx.create_block();
+        let ok_b = bcx.create_block();
+        bcx.ins().brif(failed, fail_b, &[], ok_b, &[]);
+        bcx.seal_block(fail_b);
+        bcx.seal_block(ok_b);
+        bcx.switch_to_block(fail_b);
+        let one = bcx.ins().iconst(types::I32, 1);
+        let ep = c.module.declare_func_in_func(ext.exit_process, &mut bcx.func);
+        bcx.ins().call(ep, &[one]);
+        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+        bcx.switch_to_block(ok_b);
         bcx.ins().return_(&[p]);
         true
     });
@@ -461,14 +909,49 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
         let lb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 8);
         let total = bcx.ins().iadd(la, lb);
+        let has_total = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, total, 0);
+        let alloc_b = bcx.create_block();
+        let empty_b = bcx.create_block();
+        let data_b = bcx.create_block();
+        let out_word = bcx.append_block_param(data_b, types::I64);
+        bcx.ins().brif(has_total, alloc_b, &[], empty_b, &[]);
+        bcx.seal_block(alloc_b);
+        bcx.seal_block(empty_b);
+        bcx.switch_to_block(alloc_b);
         let out = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![total]);
+        bcx.ins().jump(data_b, &[BlockArg::Value(out)]);
+        bcx.switch_to_block(empty_b);
+        let null = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().jump(data_b, &[BlockArg::Value(null)]);
+        bcx.switch_to_block(data_b);
+        bcx.seal_block(data_b);
+
+        let copy_a_b = bcx.create_block();
+        let after_a_b = bcx.create_block();
+        let has_a = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, la, 0);
+        bcx.ins().brif(has_a, copy_a_b, &[], after_a_b, &[]);
+        bcx.seal_block(copy_a_b);
+        bcx.switch_to_block(copy_a_b);
         let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
-        bcx.ins().call(mv, &[out, pa, la]);
-        let out2 = bcx.ins().iadd(out, la);
+        bcx.ins().call(mv, &[out_word, pa, la]);
+        bcx.ins().jump(after_a_b, &[]);
+        bcx.switch_to_block(after_a_b);
+        bcx.seal_block(after_a_b);
+
+        let copy_b_b = bcx.create_block();
+        let after_b_b = bcx.create_block();
+        let has_b = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, lb, 0);
+        bcx.ins().brif(has_b, copy_b_b, &[], after_b_b, &[]);
+        bcx.seal_block(copy_b_b);
+        bcx.switch_to_block(copy_b_b);
+        let out2 = bcx.ins().iadd(out_word, la);
         bcx.ins().call(mv, &[out2, pb, lb]);
+        bcx.ins().jump(after_b_b, &[]);
+        bcx.switch_to_block(after_b_b);
+        bcx.seal_block(after_b_b);
         let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
             vec![bcx.ins().iconst(types::I64, 16)]);
-        bcx.ins().store(MemFlagsData::new(), out, blk, 0);
+        bcx.ins().store(MemFlagsData::new(), out_word, blk, 0);
         bcx.ins().store(MemFlagsData::new(), total, blk, 8);
         bcx.ins().return_(&[blk]);
         true
@@ -721,7 +1204,16 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
             let grown = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
             let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
             let copy_bytes = bcx.ins().imul_imm_s(len, 8);
+            let copy_b = bcx.create_block();
+            let after_copy_b = bcx.create_block();
+            let has_old = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len, 0);
+            bcx.ins().brif(has_old, copy_b, &[], after_copy_b, &[]);
+            bcx.seal_block(copy_b);
+            bcx.switch_to_block(copy_b);
             bcx.ins().call(mv, &[grown, dp0, copy_bytes]);
+            bcx.ins().jump(after_copy_b, &[]);
+            bcx.switch_to_block(after_copy_b);
+            bcx.seal_block(after_copy_b);
             bcx.ins().store(MemFlagsData::new(), grown, hdr, 0);
             bcx.ins().store(MemFlagsData::new(), new_cap, hdr, 16);
             bcx.ins().jump(join_b, &[BlockArg::Value(grown)]);
@@ -813,7 +1305,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
             let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
             let null = bcx.ins().iconst(c.ptr_ty, 0);
             let wf = c.module.declare_func_in_func(ext.write_file, &mut bcx.func);
-            let wf_args = [a[0].clone(), start, len, wa, null];
+            let len32 = bcx.ins().ireduce(types::I32, len);
+            let wf_args = [a[0], start, len32, wa, null];
             bcx.ins().call(wf, &wf_args);
         }
         false
@@ -901,6 +1394,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         }
         true
     });
+    emit_integer_display_shim(c, "alias.display.i64", true)?;
+    emit_integer_display_shim(c, "alias.display.u64", false)?;
+    emit_float_display_shim(c, "alias.display.f32", types::F32)?;
+    emit_float_display_shim(c, "alias.display.f64", types::F64)?;
     shim!(c, "alias.display.bool", vec![types::I32], Some(types::I64), |bcx, a| {
         let t_addr = sym!(bcx, "rt_true");
         let f_addr = sym!(bcx, "rt_false");
@@ -962,7 +1459,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
         let null = bcx.ins().iconst(c.ptr_ty, 0);
         let wf = c.module.declare_func_in_func(ext.write_file, &mut bcx.func);
-        bcx.ins().call(wf, &[h, a[0], a[1], wa, null]);
+        let len32 = bcx.ins().ireduce(types::I32, a[1]);
+        bcx.ins().call(wf, &[h, a[0], len32, wa, null]);
         false
     });
 
@@ -1007,6 +1505,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     emit_span_abort(c, "alias.abort_div", &ext, span_data, &static_ids, "rt_msg_suffix", 15)?;
     emit_span_abort(c, "alias.abort_oob", &ext, span_data, &static_ids, "rt_oob_suffix", 18)?;
     emit_span_abort(c, "alias.abort_pop", &ext, span_data, &static_ids, "rt_pop_suffix", 19)?;
+    emit_span_abort(c, "alias.abort_conv", &ext, span_data, &static_ids, "rt_conv_suffix", 18)?;
 
     Ok(())
 }

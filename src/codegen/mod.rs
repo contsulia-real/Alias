@@ -19,7 +19,7 @@
 //! - **函数签名混合化**: 用户函数/方法签名由参数 VTy 逐位构建
 //!   (win64 ABI 经 XMM 传递浮点, cranelift 处理); 闭包对象仍为
 //!   {code,env} 16 字节, env = 捕获单元格指针数组 (恒 8B/槽)。
-//!   多态 func 值 (签名不可知) 退化为全字统一约定。
+//!   函数值的参数/返回投影随词法作用域流动，不按全局名字猜签名。
 //! - **字符串 = 泄漏 16 字节块 {data_ptr: u64, len: u64}**; data_ptr 为 null
 //!   当且仅当 len = 0。JIT 宿主函数与 AOT shim 区实现同一符号契约
 //!   (spec-notes §五): alias.str.new/concat/cmp、alias.display.*、
@@ -42,16 +42,16 @@
 //!   下标读带越界守卫 → span-ID 中止存根; 打印 → 固定 "<array>"。
 //!
 //! AOT 形态 (Phase 5): compile_to_object 发射 x86_64 COFF;
-//! 运行时 shim 区在同一 object 内定义 (Export), 经 kernel32.lib +
-//! msvcrt.lib 解析 GetStdHandle/WriteFile/ExitProcess/HeapAlloc/
-//! GetProcessHeap/RtlMoveMemory/memcmp/sprintf。入口 main(I32) 由 CRT
-//! mainCRTStartup 调用。已知限制: cranelift-object 不写 .pdata/.xdata
+//! 运行时 shim 区在同一 object 内定义 (Export), 仅经 kernel32.lib
+//! 解析 GetStdHandle/WriteFile/ExitProcess/HeapAlloc/GetProcessHeap/
+//! RtlMoveMemory。入口为 alias_start 并显式 ExitProcess，无 CRT。
+//! 已知限制: cranelift-object 不写 .pdata/.xdata
 //! — console 程序无碍; SEH 展开穿越 Alias 帧暂不支持。
 //!
 //! 已知有意缺口 (MIGRATION.md M10/M12): 函数体对未定义名的引用在编译期
 //! 报错 (解释器为运行时); 打印静态类型不可知的表达式被拒绝。
 //!
-//! allow: SIZE_OK — 依赖清单强制 codegen.rs 为 cranelift 唯一拥有者。
+//! allow: SIZE_OK — 依赖清单强制 codegen/ 为 cranelift 唯一拥有者。
 
 // 子模块划分 (纯机械拆分): host=JIT 宿主实现; emit=表达式/语句发射;
 // funcgen=函数/方法/闭包定义与捕获扫描; types_proj=静态类型投影;
@@ -65,7 +65,6 @@ mod types_proj;
 use crate::ast::*;
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{
     AbiParam, Block, BlockArg, Function, InstBuilder, MemFlagsData, Signature, TrapCode,
@@ -89,6 +88,10 @@ use host::register_host_fns;
 /// 仅 JIT 路径使用 (宿主 abort 读); AOT 路径以只读数据段内嵌同一表
 /// (见 define_span_data / abort shim)。
 pub(crate) static SPAN_TABLE: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+/// JIT 运行时错误通过返回通道交还给库调用者；不得从宿主函数内 process::exit。
+pub(crate) static RUNTIME_ERROR: std::sync::Mutex<Option<AliasError>> = std::sync::Mutex::new(None);
+/// SPAN_TABLE/RUNTIME_ERROR 是单次执行上下文，串行化 execute 避免并发串案。
+static EXECUTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // 静态类型投影 — 打印分派 / 字宽转换 / 调用返回类型所需
@@ -107,7 +110,9 @@ pub(crate) enum VTy {
     Bool,
     Str,
     Unit,
-    Func,
+    /// 闭包对象指针 + 完整静态签名。签名必须随词法作用域/捕获表流动，
+    /// 不能按名字从全局表猜测，否则局部遮蔽与浮点 ABI 会发生类型混淆。
+    Func(Vec<VTy>, Box<VTy>),
     /// 结构体实例 — 携带结构体名供字段偏移回查与打印分派
     Struct(String),
     /// result<T,E> 实例 (Phase 2b) — 携带类型名供臂绑定静态投影;
@@ -155,7 +160,7 @@ pub(crate) fn size_align(v: &VTy) -> (usize, usize) {
         | VTy::Bool
         | VTy::Str
         | VTy::Unit
-        | VTy::Func
+        | VTy::Func(..)
         | VTy::Struct(_)
         | VTy::Result(..)
         | VTy::Array(_)
@@ -190,7 +195,7 @@ impl VTy {
             VTy::Bool => "bool".into(),
             VTy::Str => "string".into(),
             VTy::Unit => "()".into(),
-            VTy::Func => "func".into(),
+            VTy::Func(..) => "func".into(),
             VTy::Struct(s) => s.clone(),
             VTy::Result(t, e) => format!("result<{t}, {e}>"),
             VTy::Array(t) => format!("array<{}>", t.display_name()),
@@ -229,7 +234,8 @@ fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
             "bool" => VTy::Bool,
             "string" => VTy::Str,
             "unit" => VTy::Unit,
-            "func" => VTy::Func,
+            // `func` 关键字不能出现在类型槽；保留防御性分支但不伪造签名。
+            "func" => VTy::Other,
             _ => {
                 if structs.contains_key(n) {
                     VTy::Struct(n.clone())
@@ -271,7 +277,7 @@ fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
         "bool" => VTy::Bool,
         "string" => VTy::Str,
         "unit" => VTy::Unit,
-        "func" => VTy::Func,
+        "func" => VTy::Other,
         _ => {
             if structs.contains_key(name) {
                 VTy::Struct(name.to_string())
@@ -291,6 +297,7 @@ pub(crate) enum Slot {
 
 /// 词法帧: 作用域链 + globals/env 寄存器 + 本函数捕获表。
 /// terminated: 当前块是否已发射终结指令 (frontend 不公开该查询, 自行跟踪)。
+#[derive(Clone)]
 pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<String, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<String, VTy>>,
@@ -320,6 +327,9 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) ptr_ty: cranelift_codegen::ir::Type,
     /// 顶层绑定 → (字节偏移, 静态类型) — 槽区按类型尺寸对齐累积 (Phase 3a)
     pub(crate) globals_final: HashMap<String, (usize, VTy)>,
+    /// 顶层绑定按源码顺序对应的独立槽位。重名采用 last-wins 解析，但每个
+    /// 初始化器必须写自己的槽，不能把早期宽值写进末次窄槽。
+    pub(crate) top_slots: Vec<usize>,
     /// 槽区总字节数 (含尾随对齐)
     pub(crate) global_bytes: usize,
     pub(crate) next_fid: u32,
@@ -327,11 +337,6 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) fn_ids: Vec<FuncId>,
     /// 运行时函数 ID → 返回类型 (打印分派)
     pub(crate) fn_rets: Vec<VTy>,
-    /// 名字 → 声明返回类型 (具名调用的打印分派; 遮蔽近似, 语料内无歧义)
-    pub(crate) fn_ret_by_name: HashMap<String, VTy>,
-    /// 名字 → (参数静态类型, 返回类型) — 混合签名调用点构建 (Phase 3a);
-    /// func 绑定遮蔽近似同 fn_ret_by_name
-    pub(crate) fn_sig_by_name: HashMap<String, (Vec<VTy>, VTy)>,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
     /// 除零守卫 span 表: ID = 下标。JIT 定稿后拷入 SPAN_TABLE;
@@ -360,6 +365,7 @@ pub(crate) struct PendingFn {
 }
 
 pub fn execute(program: Program) -> AliasResult<i32> {
+    let _run_guard = EXECUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // import 只解析不执行 — 通知文本与黄金记录逐字节一致 (spec-notes §三.5)
     if !program.imports.is_empty() {
         eprintln!(
@@ -367,7 +373,8 @@ pub fn execute(program: Program) -> AliasResult<i32> {
             program.imports.len()
         );
     }
-    SPAN_TABLE.lock().expect("SPAN_TABLE 锁中毒").clear();
+    SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     let flag_builder = settings::builder();
     let isa = cranelift_native::builder()
@@ -383,12 +390,11 @@ pub fn execute(program: Program) -> AliasResult<i32> {
         ptr_ty: module.isa().pointer_type(),
         module: &mut module,
         globals_final: HashMap::new(),
+        top_slots: Vec::new(),
         global_bytes: 0,
         next_fid: 0,
         fn_ids: Vec::new(),
         fn_rets: Vec::new(),
-        fn_ret_by_name: HashMap::new(),
-        fn_sig_by_name: HashMap::new(),
         pending: VecDeque::new(),
         str_data: HashMap::new(),
         span_table: Vec::new(),
@@ -404,17 +410,22 @@ pub fn execute(program: Program) -> AliasResult<i32> {
     c.module
         .finalize_definitions()
         .map_err(|e| native_err(Span::default(), format!("JIT 定稿失败: {e}")))?;
-    *SPAN_TABLE.lock().expect("SPAN_TABLE 锁中毒") = span_table;
+    *SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner()) = span_table;
 
     // 定稿已完成; 模块存活至本次调用结束
     let entry_ptr = c.module.get_finalized_function(entry_fid);
     let entry: extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry_ptr) };
-    Ok(entry() as i32)
+    let code = entry() as i32;
+    if let Some(err) = RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        Err(err)
+    } else {
+        Ok(code)
+    }
 }
 
 /// AOT: 编译为 x86_64 COFF 目标文件字节流。
-/// 运行时 shim 区在同一 object 内定义 (Export), 经 kernel32/msvcrt 解析;
-/// 产物入口为 CRT mainCRTStartup 调用的导出 main(I32)。
+/// 运行时 shim 区在同一 object 内定义 (Export), 经 kernel32 解析;
+/// 产物入口为无 CRT 的 alias_start，并显式调用 ExitProcess。
 pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
     // import 只解析不执行 — 通知文本与黄金记录逐字节一致 (spec-notes §三.5)
     if !program.imports.is_empty() {
@@ -442,12 +453,11 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
         ptr_ty: module.isa().pointer_type(),
         module: &mut module,
         globals_final: HashMap::new(),
+        top_slots: Vec::new(),
         global_bytes: 0,
         next_fid: 0,
         fn_ids: Vec::new(),
         fn_rets: Vec::new(),
-        fn_ret_by_name: HashMap::new(),
-        fn_sig_by_name: HashMap::new(),
         pending: VecDeque::new(),
         str_data: HashMap::new(),
         span_table: Vec::new(),
@@ -533,12 +543,24 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             _ => None,
         }) {
             let vty = decl_vty(&b.ty, &c.struct_layouts);
-            // func 绑定的槽位存闭包对象 — 槽位类型恒为 Func (decl_vty 是其返回类型)
-            let slot_vty = if b.kind == BindKind::Func { VTy::Func } else { vty.clone() };
+            // func 槽位保存闭包对象，但静态投影携带完整签名，供局部遮蔽与
+            // 捕获后的间接调用精确选择 GPR/XMM ABI。
+            let slot_vty = if b.kind == BindKind::Func {
+                let Expr::FuncLit { params, .. } = &b.value else {
+                    return Err(native_err(b.span, "函数值尚未接入原生后端 (Phase 3)"));
+                };
+                VTy::Func(
+                    params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
+                    Box::new(vty.clone()),
+                )
+            } else {
+                vty.clone()
+            };
             let (sz, al) = size_align(&slot_vty);
             off = align_to(off, al);
             let slot = off;
             off += sz;
+            c.top_slots.push(slot);
             c.globals_final.insert(b.name.clone(), (slot, slot_vty));
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { params, .. } = &b.value else {
@@ -551,8 +573,6 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
                 let fid = c.declare_user_func_typed(&param_vtys, &vty, name)?;
                 c.fn_ids.push(fid);
                 c.fn_rets.push(vty.clone());
-                c.fn_ret_by_name.insert(b.name.clone(), vty.clone());
-                c.fn_sig_by_name.insert(b.name.clone(), (param_vtys, vty.clone()));
                 top_funcs.push((fid, slot, b));
                 if b.name == "main" {
                     main_slot_ret = Some((slot, vty));

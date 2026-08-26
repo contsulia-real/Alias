@@ -137,3 +137,15 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 | # | 变更 | 依据 | 安全性 |
 |---|------|------|--------|
 | M41 | **统一 `alias.cell.new(bytes)` 双后端契约**：JIT 宿主与 AOT shim 均按调用端 `size_align` 给出的字节数分配清零存储区，初值继续由调用端按声明宽度写入；移除遗留的“固定分配 8 字节并把参数当初值”实现 | WER dump 在 `alias.str.concat` 读到被污染的 `counter.tag` 指针；AOT 反汇编确认 16 字节 `counter` 实例只分配 8 字节，字段 `tag@+8` 越界写堆，导致 `methods.as` 间歇性 `0xC0000005` | 修复未定义行为，不改变合法程序语义；确定性单元测试冻结参数语义，`methods.as` AOT 高频运行与全量测试连续 5 轮验证 |
+| M42 | **Q④ 终裁：main 仅接受零参 `func i32`**；移除 bool/string/unit 退出映射，后端入口也做 i32 防御校验 | 用户终裁 | 非 i32 main 统一在 sema 阶段给出中文诊断；黄金记录覆盖 bool/string/unit 三种拒绝路径 |
+| M43 | **类型流与混型 ABI 修复**：函数值携带完整参数/返回类型；名字类型查找与地址查找同为最内层优先；顶层重名绑定各占独立物理槽；f32 经 I32 位型后扩入 8 字节载荷字；match 臂绑定参与结果类型投影，return/join 做宽度桥接 | 审计发现全局按名字猜函数签名、遮蔽时地址/类型可命中不同层，以及 f32→i64 非法 bitcast | 消除窄单元格越界读写、GPR/XMM ABI 错配与 F32 result/match/array verifier 失败；定向回归覆盖全部路径 |
+| M44 | **JIT 中止改为宿主可恢复错误**：除零、越界、空 pop、转换越界只记录首个 `AliasError`，生成代码逐帧零值退栈，`run()` 返回 Err；执行上下文串行化避免全局 span/error 串案 | `extern "C"` 宿主函数直接 `process::exit` 会杀死嵌入 Alias 的进程 | CLI 可观察 stderr/exit 不变；库调用在错误后仍能继续执行下一程序 |
+| M45 | **运行时空值与 AOT shim 加固**：空字符串/trim/concat 与空数组复制路径不再对 null 做零长度指针运算或内存拷贝；HeapAlloc 失败显式 exit 1；补齐 i64/u64/f32/f64 双后端 display，并统一浮点规范化输出 | Rust `from_raw_parts(null,0)` 与 C/Windows 零长度 memcpy 的 null 前提不安全；宽整数/浮点符号契约此前不完整 | 空值回归、混型结构体 self ABI、宽数值和浮点 JIT/AOT 逐字节 parity 覆盖 |
+| M46 | **不可信源码健壮性上限**：源码 8 MiB、token 200000、语法/类型/插值嵌套 128、表达式链 256；换行和一元链改迭代；整数解析 checked、科学计数法保留整数部并拒绝非有限值；i64 字面量不再先截成 i32 | 深递归可栈溢出，超长整数曾在 lexer 算术溢出，`1e5` 与宽整数被误解析/截断 | 全部失败均为中文 `AliasError`，不 panic；安全回归覆盖超深/超大输入与 2^31 以上字面量 |
+| M47 | **链接和输出路径竞态修复**：临时 COFF 名含 PID+时间+原子序号并以 create_new 独占创建，RAII 覆盖所有失败路径清理；build 只接受 `.as` 输入，禁止输入与 `.exe` 输出自覆盖 | 同进程并发 build 旧名仅含 PID，会互相覆盖；以 `.exe` 为输入会覆盖源文件 | 32 路并发临时对象单测验证唯一与清理；CLI 回归验证非 `.as` 输入原字节不变 |
+
+**终态验证**：168 个测试连续 5 轮全绿；每轮都把同一个 `methods.as` AOT
+产物重复执行 30 次并逐字节校验 13 行输出、空 stderr 与 exit 0；另有
+F32 result/match/array、混型结构体 self ABI、宽整数/非有限浮点、并发 JIT
+错误隔离、链接临时文件竞态和输入覆盖保护定向回归。`cargo check` 与
+`cargo clippy --all-targets` 均成功（仓库仍有既存 clippy 风格警告）。

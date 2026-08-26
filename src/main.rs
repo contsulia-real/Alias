@@ -14,6 +14,16 @@ fn main() -> ExitCode {
         }
     };
 
+    if cmd == "build"
+        && !std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("as"))
+    {
+        eprintln!("build 输入必须是 .as 源文件");
+        return ExitCode::from(2);
+    }
+
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
@@ -24,7 +34,8 @@ fn main() -> ExitCode {
 
     if cmd == "build" {
         // 产物与源文件同目录同名 .exe; 成功静默
-        let out = std::path::Path::new(&path).with_extension("exe");
+        let source_path = std::path::Path::new(&path);
+        let out = source_path.with_extension("exe");
         return match build(&path, &src, &out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

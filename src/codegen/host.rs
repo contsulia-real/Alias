@@ -1,6 +1,7 @@
 //! JIT 宿主运行时支持库 — 进程内注册的 extern "C" 实现。
 //! AOT 侧由 aot_shim.rs 以相同符号契约实现 (spec-notes §五)。
-use crate::codegen::SPAN_TABLE;
+use crate::codegen::{RUNTIME_ERROR, SPAN_TABLE};
+use crate::{AliasError, Span};
 use cranelift_jit::JITBuilder;
 
 /// 分配一个按声明类型定尺寸、清零的绑定/结构体存储区。
@@ -16,9 +17,8 @@ extern "C" fn alias_env_new(count: i32) -> i64 {
     Box::leak(slots).as_mut_ptr() as i64
 }
 
-extern "C" fn alias_globals_new(count: i32) -> i64 {
-    let slots = vec![0i64; count.max(0) as usize].into_boxed_slice();
-    Box::leak(slots).as_mut_ptr() as i64
+extern "C" fn alias_globals_new(bytes: i64) -> i64 {
+    alloc_bytes(bytes.max(1) as usize) as i64
 }
 
 /// 闭包对象 {code, env} — 泄漏, 与进程同寿命。
@@ -65,9 +65,13 @@ extern "C" fn alias_str_concat(a: i64, b: i64) -> i64 {
         let (pb, lb) = str_parts(b);
         let total = la + lb;
         let out = alloc_bytes(total);
-        std::ptr::copy_nonoverlapping(pa, out, la);
-        std::ptr::copy_nonoverlapping(pb, out.add(la), lb);
-        make_block(out as u64, total as u64) as i64
+        if la > 0 {
+            std::ptr::copy_nonoverlapping(pa, out, la);
+        }
+        if lb > 0 {
+            std::ptr::copy_nonoverlapping(pb, out.add(la), lb);
+        }
+        make_block(if total == 0 { 0 } else { out as u64 }, total as u64) as i64
     }
 }
 
@@ -76,7 +80,9 @@ extern "C" fn alias_str_cmp(a: i64, b: i64) -> i32 {
     unsafe {
         let (pa, la) = str_parts(a);
         let (pb, lb) = str_parts(b);
-        match std::slice::from_raw_parts(pa, la).cmp(std::slice::from_raw_parts(pb, lb)) {
+        let sa = if la == 0 { &[][..] } else { std::slice::from_raw_parts(pa, la) };
+        let sb = if lb == 0 { &[][..] } else { std::slice::from_raw_parts(pb, lb) };
+        match sa.cmp(sb) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
@@ -90,6 +96,73 @@ extern "C" fn alias_display_int(v: i32) -> i64 {
     let len = bytes.len();
     std::mem::forget(bytes);
     unsafe { make_block(ptr as u64, len as u64) as i64 }
+}
+
+fn display_owned(bytes: Vec<u8>) -> i64 {
+    let mut bytes = bytes.into_boxed_slice();
+    let ptr = bytes.as_mut_ptr();
+    let len = bytes.len();
+    std::mem::forget(bytes);
+    unsafe { make_block(ptr as u64, len as u64) as i64 }
+}
+
+extern "C" fn alias_display_i64(v: i64) -> i64 {
+    display_owned(v.to_string().into_bytes())
+}
+
+extern "C" fn alias_display_u64(v: u64) -> i64 {
+    display_owned(v.to_string().into_bytes())
+}
+
+fn display_float(v: f64) -> i64 {
+    if v.is_nan() {
+        return display_owned(b"NaN".to_vec());
+    }
+    if v == f64::INFINITY {
+        return display_owned(b"inf".to_vec());
+    }
+    if v == f64::NEG_INFINITY {
+        return display_owned(b"-inf".to_vec());
+    }
+    if v == 0.0 {
+        return display_owned(b"0".to_vec());
+    }
+    let negative = v.is_sign_negative();
+    let mut norm = v.abs();
+    let mut exp = 0i32;
+    while norm >= 10.0 {
+        norm /= 10.0;
+        exp += 1;
+    }
+    while norm < 1.0 {
+        norm *= 10.0;
+        exp -= 1;
+    }
+    let mut scaled = (norm * 1_000_000.0 + 0.5) as u64;
+    if scaled == 10_000_000 {
+        scaled = 1_000_000;
+        exp += 1;
+    }
+    let whole = scaled / 1_000_000;
+    let mut frac = format!("{:06}", scaled % 1_000_000);
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let sign = if negative { "-" } else { "" };
+    let s = if frac.is_empty() {
+        format!("{sign}{whole}e{exp}")
+    } else {
+        format!("{sign}{whole}.{frac}e{exp}")
+    };
+    display_owned(s.into_bytes())
+}
+
+extern "C" fn alias_display_f32(v: f32) -> i64 {
+    display_float(v as f64)
+}
+
+extern "C" fn alias_display_f64(v: f64) -> i64 {
+    display_float(v)
 }
 
 extern "C" fn alias_display_bool(v: i32) -> i64 {
@@ -185,11 +258,26 @@ extern "C" fn alias_abort_pop(span_id: i32) {
 }
 
 fn abort_with_span(span_id: i32, msg: &str) {
-    let table = SPAN_TABLE.lock().expect("SPAN_TABLE 锁中毒");
+    let table = SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner());
     let (line, col) = table.get(span_id.max(0) as usize).copied().unwrap_or((0, 0));
     drop(table);
-    eprintln!("错误 @ {line}:{col} — {msg}");
-    std::process::exit(1);
+    let span = if line == 0 || col == 0 {
+        Span::default()
+    } else {
+        Span { line, col, len: 1 }
+    };
+    let mut slot = RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(AliasError { msg: msg.into(), span });
+    }
+}
+
+extern "C" fn alias_runtime_failed() -> i32 {
+    RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()).is_some() as i32
+}
+
+extern "C" fn alias_abort_conv(span_id: i32) {
+    abort_with_span(span_id, "转换越界");
 }
 
 // ---- 内建 string 方法宿主实现 (P2c; AOT 侧 aot_shim.rs 同契约 IR shim) ----
@@ -204,6 +292,9 @@ extern "C" fn alias_str_len(s: i64) -> i32 {
 /// ASCII 范围大小写转换核心: 命中范围加 delta, 否则原样
 unsafe fn map_ascii(s: i64, lo: u8, hi: u8, delta: i32) -> i64 {
     let (p, l) = str_parts(s);
+    if l == 0 {
+        return make_block(0, 0) as i64;
+    }
     let out = alloc_bytes(l);
     for i in 0..l {
         let mut b = *p.add(i);
@@ -236,9 +327,13 @@ extern "C" fn alias_str_trim(s: i64) -> i64 {
             end -= 1;
         }
         let n = end - start;
-        let buf = alloc_bytes(n);
-        std::ptr::copy_nonoverlapping(p.add(start), buf, n);
-        make_block(buf as u64, n as u64) as i64
+        if n == 0 {
+            make_block(0, 0) as i64
+        } else {
+            let buf = alloc_bytes(n);
+            std::ptr::copy_nonoverlapping(p.add(start), buf, n);
+            make_block(buf as u64, n as u64) as i64
+        }
     }
 }
 
@@ -249,14 +344,15 @@ extern "C" fn alias_str_trim(s: i64) -> i64 {
 const ARR_HDR_BYTES: usize = 24;
 
 /// 泄漏头块 + cap×8 元素缓冲 (cap=0 → data_ptr 恒 null, 镜像空串契约)。
-extern "C" fn alias_arr_new(cap: i32) -> i64 {
+extern "C" fn alias_arr_new(cap: i32, elem_size: i32) -> i64 {
     unsafe {
         let hdr = alloc_bytes(ARR_HDR_BYTES) as *mut u64;
         let cap_u = cap.max(0) as u64;
         let data = if cap_u == 0 {
             std::ptr::null_mut()
         } else {
-            alloc_bytes(cap_u as usize * 8) as *mut u64
+            let elem_size = elem_size.max(1) as usize;
+            alloc_bytes(cap_u as usize * elem_size) as *mut u64
         };
         hdr.write_unaligned(data as u64);
         hdr.add(1).write_unaligned(0);
@@ -280,7 +376,9 @@ extern "C" fn alias_arr_push(arr: i64, v: i64) {
         if len == cap {
             let new_cap = if cap == 0 { 1 } else { cap * 2 };
             let grown = alloc_bytes(new_cap as usize * 8) as *mut u64;
-            std::ptr::copy_nonoverlapping(data, grown, len as usize);
+            if len > 0 {
+                std::ptr::copy_nonoverlapping(data, grown, len as usize);
+            }
             data = grown;
             hdr.write_unaligned(grown as u64);
             hdr.add(2).write_unaligned(new_cap);
@@ -316,6 +414,10 @@ pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.str.concat", alias_str_concat as *const u8);
     builder.symbol("alias.str.cmp", alias_str_cmp as *const u8);
     builder.symbol("alias.display.int", alias_display_int as *const u8);
+    builder.symbol("alias.display.i64", alias_display_i64 as *const u8);
+    builder.symbol("alias.display.u64", alias_display_u64 as *const u8);
+    builder.symbol("alias.display.f32", alias_display_f32 as *const u8);
+    builder.symbol("alias.display.f64", alias_display_f64 as *const u8);
     builder.symbol("alias.display.bool", alias_display_bool as *const u8);
     builder.symbol("alias.display.str", alias_display_str as *const u8);
     builder.symbol("alias.display.unit", alias_display_unit as *const u8);
@@ -327,6 +429,7 @@ pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.print.i32", alias_print_i32 as *const u8);
     builder.symbol("alias.print.bool", alias_print_bool as *const u8);
     builder.symbol("alias.abort_div", alias_abort_div as *const u8);
+    builder.symbol("alias.abort_conv", alias_abort_conv as *const u8);
     builder.symbol("alias.str.len", alias_str_len as *const u8);
     builder.symbol("alias.str.upper", alias_str_upper as *const u8);
     builder.symbol("alias.str.lower", alias_str_lower as *const u8);
@@ -340,6 +443,7 @@ pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.arr.pop", alias_arr_pop as *const u8);
     builder.symbol("alias.abort_oob", alias_abort_oob as *const u8);
     builder.symbol("alias.abort_pop", alias_abort_pop as *const u8);
+    builder.symbol("alias.runtime.failed", alias_runtime_failed as *const u8);
 }
 
 #[cfg(test)]

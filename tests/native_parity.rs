@@ -161,18 +161,18 @@ fn targeted_table() -> Vec<Targeted> {
             stderr: b"",
             exit: 3,
         },
-        // 字符串插值相等比较 → true → 退 0 (golden string_interpolation_equality)
+        // 字符串插值相等比较 → true (golden string_interpolation_equality)
         Targeted {
             name: "string_interpolation_equality",
-            src: "\nfunc bool main = () -> {\n    var i32 i = 4;\n    return 'n=$i' == 'n=4'\n}\n",
-            stdout: b"",
+            src: "\nfunc i32 main = () -> {\n    var i32 i = 4;\n    println ('n=$i' == 'n=4')\n    return 0\n}\n",
+            stdout: b"true\n",
             stderr: b"",
             exit: 0,
         },
-        // Q④ bool-main 映射: false → 1
+        // i32 main 的退出码映射保持原样
         Targeted {
-            name: "bool_main_false_exit_1",
-            src: "\nfunc bool main = () -> { return false }\n",
+            name: "i32_main_exit_1",
+            src: "\nfunc i32 main = () -> { return 1 }\n",
             stdout: b"",
             stderr: b"",
             exit: 1,

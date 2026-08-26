@@ -5,7 +5,7 @@
 //! 命名实参探测、match 文法 (ok/err 臂, file_wc.as 34-52 冻结形状)、
 //! 字符串插值子表达式切分、函数字面量判定与解析。
 
-use super::Parser;
+use super::{validate_nesting, Parser, MAX_EXPR_CHAIN};
 use crate::ast::{
     ArmBody, BinOp, Body, CallArg, CtorKind, Expr, MatchArm, Param, StrPartAst,
 };
@@ -30,10 +30,15 @@ impl Parser {
     ///   按方法中缀解释 (函数值传参须显式 f(g) — breaking change M38)
     fn parse_no_paren(&mut self) -> AliasResult<Expr> {
         let mut lhs = self.parse_comparison()?;
+        let mut chain = 0usize;
         loop {
             let span = self.span();
             match self.peek().cloned() {
                 Some(Tok::Ident(m)) => {
+                    chain += 1;
+                    if chain > MAX_EXPR_CHAIN {
+                        return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));
+                    }
                     // 内建名单 callee: Ident 实参无条件吞入 (println a);
                     // 实参后同行再无括号起点 → 链式限制报错 (≤1 参裁决)
                     let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
@@ -76,6 +81,10 @@ impl Parser {
                         Tok::Int(_) | Tok::Float(_) | Tok::Bool(_) | Tok::Str(_) | Tok::LParen | Tok::LBracket
                     ) =>
                 {
+                    chain += 1;
+                    if chain > MAX_EXPR_CHAIN {
+                        return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));
+                    }
                     let callee = match &lhs {
                         Expr::Ident(n, s) => Expr::Ident(n.clone(), *s),
                         _ => {
@@ -136,6 +145,7 @@ impl Parser {
 
     fn parse_additive(&mut self) -> AliasResult<Expr> {
         let mut lhs = self.parse_multiplicative()?;
+        let mut chain = 0usize;
         loop {
             let op = match self.peek() {
                 Some(Tok::Plus) => BinOp::Add,
@@ -143,6 +153,10 @@ impl Parser {
                 _ => break,
             };
             self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("加减表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
             let rhs = self.parse_multiplicative()?;
             let span = lhs.span();
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
@@ -152,6 +166,7 @@ impl Parser {
 
     fn parse_multiplicative(&mut self) -> AliasResult<Expr> {
         let mut lhs = self.parse_unary()?;
+        let mut chain = 0usize;
         loop {
             let op = match self.peek() {
                 Some(Tok::Star) => BinOp::Mul,
@@ -159,6 +174,10 @@ impl Parser {
                 _ => break,
             };
             self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("乘除表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
             let rhs = self.parse_unary()?;
             let span = lhs.span();
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
@@ -168,10 +187,12 @@ impl Parser {
 
     /// 后缀链主体: 从已解析的头部 expr 继续消费 .field/.method/[idx]/(args)/?
     fn parse_postfix_on(&mut self, mut expr: Expr) -> AliasResult<Expr> {
+        let mut chain = 0usize;
         loop {
             let span = self.span();
             match self.peek().cloned() {
                 Some(Tok::Dot) => {
+                    chain += 1;
                     self.bump();
                     let name = self.expect_ident()?;
                     if self.peek() == Some(&Tok::LParen) {
@@ -187,34 +208,46 @@ impl Parser {
                     }
                 }
                 Some(Tok::LBracket) => {
+                    chain += 1;
                     self.bump();
                     let idx = self.parse_expr()?;
                     self.expect(&Tok::RBracket)?;
                     expr = Expr::Index { recv: Box::new(expr), idx: Box::new(idx), span };
                 }
                 Some(Tok::LParen) => {
+                    chain += 1;
                     let args = self.parse_args()?;
                     expr = Expr::Call { callee: Box::new(expr), args, span };
                 }
                 // ? 传播糖 (P6): 与字段访问/调用同级的后缀
                 Some(Tok::Question) => {
+                    chain += 1;
                     self.bump();
                     expr = Expr::Propagate { expr: Box::new(expr), span };
                 }
                 _ => break,
+            }
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("后缀表达式超过 {MAX_EXPR_CHAIN} 项上限")));
             }
         }
         Ok(expr)
     }
 
     pub(super) fn parse_unary(&mut self) -> AliasResult<Expr> {
-        if self.peek() == Some(&Tok::Minus) {
-            let span = self.span();
+        let mut spans = Vec::new();
+        while self.peek() == Some(&Tok::Minus) {
+            if spans.len() >= MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("一元表达式超过 {MAX_EXPR_CHAIN} 层上限")));
+            }
+            spans.push(self.span());
             self.bump();
-            let expr = self.parse_unary()?;
-            return Ok(Expr::Neg { expr: Box::new(expr), span });
         }
-        self.parse_postfix()
+        let mut expr = self.parse_postfix()?;
+        for span in spans.into_iter().rev() {
+            expr = Expr::Neg { expr: Box::new(expr), span };
+        }
+        Ok(expr)
     }
 
     /// primary + 后缀链: .field / .method(args) / [idx] / (args) / ?
@@ -290,10 +323,11 @@ impl Parser {
                     match p {
                         StrPart::Lit(s) => ast_parts.push(StrPartAst::Lit(s)),
                         StrPart::Hole(toks) => {
-                            let sub_toks = toks
+                            let sub_toks: Vec<Token> = toks
                                 .into_iter()
                                 .map(|(tok, sp)| Token { tok, span: sp })
                                 .collect();
+                            validate_nesting(&sub_toks)?;
                             let mut sub = Parser { toks: sub_toks, pos: 0 };
                             let e = sub.parse_expr().map_err(|e| AliasError {
                                 msg: format!("插值内表达式错误: {}", e.msg),

@@ -99,7 +99,11 @@ fn ir_type_bits(b: u32) -> cranelift_codegen::ir::Type {
 /// 浮点位转换进 I64, 整数已为规范 I64, 字类型原样。
 pub(crate) fn storage_word(bcx: &mut FunctionBuilder, v: Value, vty: &VTy) -> Value {
     match vty {
-        VTy::F(_) => bcx.ins().bitcast(types::I64, MemFlagsData::new(), v),
+        VTy::F(FloatW::F32) => {
+            let bits = bcx.ins().bitcast(types::I32, MemFlagsData::new(), v);
+            bcx.ins().uextend(types::I64, bits)
+        }
+        VTy::F(FloatW::F64) => bcx.ins().bitcast(types::I64, MemFlagsData::new(), v),
         VTy::U(w) => match w.bits() {
             64 => v,
             b => {
@@ -122,7 +126,11 @@ pub(crate) fn storage_word(bcx: &mut FunctionBuilder, v: Value, vty: &VTy) -> Va
 /// 存储的即规范 I64 字 — 直通 (窄型已在写入端 norm_store 截断)。
 pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
     match vty {
-        VTy::F(w) => bcx.ins().bitcast(cl_type(&VTy::F(*w)), MemFlagsData::new(), raw),
+        VTy::F(FloatW::F32) => {
+            let bits = bcx.ins().ireduce(types::I32, raw);
+            bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits)
+        }
+        VTy::F(FloatW::F64) => bcx.ins().bitcast(types::F64, MemFlagsData::new(), raw),
         _ => raw,
     }
 }
@@ -131,7 +139,8 @@ pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> 
 fn store_elem(bcx: &mut FunctionBuilder, w: Value, addr: Value, elem_vty: &VTy) {
     match elem_vty {
         VTy::F(FloatW::F32) => {
-            let f = bcx.ins().bitcast(types::F32, MemFlagsData::new(), w);
+            let bits = bcx.ins().ireduce(types::I32, w);
+            let f = bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits);
             bcx.ins().store(MemFlagsData::new(), f, addr, 0);
         }
         VTy::F(FloatW::F64) => {
@@ -257,7 +266,8 @@ pub(crate) fn emit_body<M: Module>(
 ) -> AliasResult<()> {
     match body {
         Body::ArrowExpr(e) => {
-            let v = emit_expr(c, bcx, frame, e)?;
+            let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
+            let v = emit_expr_expected(c, bcx, frame, e, &expected)?;
             let v = coerce_ret(bcx, frame, v);
             bcx.ins().jump(ret_block, &[BlockArg::Value(v)]);
             frame.terminated = true;
@@ -281,24 +291,37 @@ pub(crate) fn emit_stmt<M: Module>(
 ) -> AliasResult<()> {
     match s {
         Stmt::Binding(b) => {
-            if b.kind == BindKind::Func {
-                c.fn_ret_by_name.insert(b.name.clone(), decl_vty(&b.ty, &c.struct_layouts));
-            }
             // insert-after-eval: 初始化器先求值, 名字后可见 (Q⑥ 顺序语义)
-            let v = emit_expr(c, bcx, frame, &b.value)?;
             if b.kind == BindKind::Func {
-                // func 绑定: 值即闭包对象, 存入局部单元格
-                emit_local_cell(c, bcx, frame, v, VTy::Func, &b.name)?;
+                let Expr::FuncLit { params, body, .. } = &b.value else {
+                    return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
+                };
+                let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
+                let param_vtys = params
+                    .iter()
+                    .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+                    .collect::<Vec<_>>();
+                let v = emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty.clone())?;
+                emit_local_cell(
+                    c,
+                    bcx,
+                    frame,
+                    v,
+                    VTy::Func(param_vtys, Box::new(ret_vty)),
+                    &b.name,
+                )?;
             } else {
-                emit_local_cell(c, bcx, frame, v, decl_vty(&b.ty, &c.struct_layouts), &b.name)?;
+                let vty = decl_vty(&b.ty, &c.struct_layouts);
+                let v = emit_expr_expected(c, bcx, frame, &b.value, &vty)?;
+                emit_local_cell(c, bcx, frame, v, vty, &b.name)?;
             }
             Ok(())
         }
         Stmt::FieldAssign { recv, field, value, .. } => {
             // 先值后目标 — 与简名赋值同序 (黄金记录冻结的求值顺序)
-            let v = emit_expr(c, bcx, frame, value)?;
-            let p = emit_expr(c, bcx, frame, recv)?;
             let fvty = field_vty(c, frame, recv, field)?;
+            let v = emit_expr_expected(c, bcx, frame, value, &fvty)?;
+            let p = emit_expr(c, bcx, frame, recv)?;
             let off = field_offset(c, frame, recv, field)?;
             let sv = norm_store(bcx, v, &fvty);
             bcx.ins().store(MemFlagsData::new(), sv, p, off);
@@ -306,10 +329,10 @@ pub(crate) fn emit_stmt<M: Module>(
         }
         Stmt::Assign { target, value, .. } => {
             // 先值后目标 — 黄金记录冻结的求值顺序
-            let v = emit_expr(c, bcx, frame, value)?;
+            let tvty = vty_of_name(c, frame, target);
+            let v = emit_expr_expected(c, bcx, frame, value, &tvty)?;
             match cell_addr(c, frame, target) {
                 Some(addr) => {
-                    let tvty = vty_of_name(c, frame, target);
                     write_cell(bcx, frame, &addr, v, &tvty);
                     Ok(())
                 }
@@ -324,8 +347,9 @@ pub(crate) fn emit_stmt<M: Module>(
             Ok(())
         }
         Stmt::Return { value, .. } => {
+            let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
             let v = match value {
-                Some(e) => emit_expr(c, bcx, frame, e)?,
+                Some(e) => emit_expr_expected(c, bcx, frame, e, &expected)?,
                 None => bcx.ins().iconst(types::I64, 0),
             };
             let v = coerce_ret(bcx, frame, v);
@@ -395,8 +419,9 @@ pub(crate) fn emit_expr<M: Module>(
 ) -> AliasResult<Value> {
     match e {
         Expr::Int(n, _) => {
-            // 字面量按 i32 语义承载 (槽位统一在 sema/绑定层完成, 存入即规范化)
-            Ok(bcx.ins().iconst(types::I64, *n as i32 as i64))
+            // AST 以 i64 承载；声明槽位负责后续截断。这里不得先经 i32，
+            // 否则合法 i64/u32/u64 字面量会被静默破坏。
+            Ok(bcx.ins().iconst(types::I64, *n))
         }
         Expr::Float(v, _) => Ok(bcx.ins().f64const(*v)),
         Expr::Bool(b, _) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
@@ -460,7 +485,7 @@ pub(crate) fn emit_expr<M: Module>(
             let idx32 = bcx.ins().ireduce(types::I32, idxw);
             let len64 = bcx.ins().load(types::I64, MemFlagsData::new(), arr, 8);
             let len32 = bcx.ins().ireduce(types::I32, len64);
-            emit_index_guard(c, bcx, idx32, len32, *span)?;
+            emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
             let dp = bcx.ins().load(types::I64, MemFlagsData::new(), arr, 0);
             let idx64 = bcx.ins().sextend(types::I64, idx32);
             let off = bcx.ins().imul_imm_s(idx64, esize as i64);
@@ -471,33 +496,11 @@ pub(crate) fn emit_expr<M: Module>(
         // 数组字面量 (Phase 2d): 头块分配 → 元素按书写序求值逐个入缓冲
         // (lhs-to-rhs 黄金冻结约定) → 回填 len; 元素步长按元素类型
         Expr::ArrayLit { elems, .. } => {
-            let n = elems.len() as i64;
             let elem_vty = elems
                 .first()
                 .map(|el| static_vty(c, frame, el))
                 .unwrap_or(VTy::Other);
-            // P3a 布局简化裁决: 缓冲统一 8 字节步长 — 窄元素由 norm_store/
-            // norm_load 在槽内规范化, 免除 shim 的运行时宽度分派
-            let esize = 8usize;
-            let cap = bcx.ins().iconst(types::I32, n);
-            let eszw = bcx.ins().iconst(types::I32, esize as i64);
-            let hdr = c.call_rt(
-                bcx,
-                "alias.arr.new",
-                &[types::I32, types::I32],
-                Some(types::I64),
-                &[cap, eszw],
-            )?;
-            for (i, el) in elems.iter().enumerate() {
-                let v = emit_expr(c, bcx, frame, el)?;
-                let dp = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
-                let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * esize as i64);
-                let sv = storage_word(bcx, v, &elem_vty);
-                store_elem(bcx, sv, addr, &elem_vty);
-            }
-            let lenw = bcx.ins().iconst(types::I64, n);
-            bcx.ins().store(MemFlagsData::new(), lenw, hdr, 8);
-            Ok(hdr)
+            emit_array_lit_typed(c, bcx, frame, elems, &elem_vty)
         }
         Expr::FuncLit { params, body, .. } => {
             emit_funclit_value(c, bcx, frame, params, body)
@@ -506,52 +509,8 @@ pub(crate) fn emit_expr<M: Module>(
         // never 臂 (return 收尾) 直接跳函数返回块, 不进 join —
         // 双臂皆 never 时无 join, 匹配值取哑字 (sema 已判其类型不可用)。
         Expr::Match { subject, arms, .. } => {
-            let subj = emit_expr(c, bcx, frame, subject)?;
-            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
-            let is_ok = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 0);
-            let ok_b = bcx.create_block();
-            let err_b = bcx.create_block();
-            let join_b = bcx.create_block();
-            let jv = bcx.append_block_param(join_b, types::I64);
-            bcx.ins().brif(is_ok, ok_b, &[], err_b, &[]);
-            bcx.seal_block(ok_b);
-            bcx.seal_block(err_b);
-
-            let ok_arm = arms
-                .iter()
-                .find(|a| a.ctor == CtorKind::Ok)
-                .unwrap_or_else(|| invariant_violation("match ok 臂存在 (sema 已校验)"));
-            let err_arm = arms
-                .iter()
-                .find(|a| a.ctor == CtorKind::Err)
-                .unwrap_or_else(|| invariant_violation("match err 臂存在 (sema 已校验)"));
-
-            let bind_vtys = match static_vty(c, frame, subject) {
-                VTy::Result(t, e) => (
-                    vty_of_type_name(&c.struct_layouts, &t),
-                    vty_of_type_name(&c.struct_layouts, &e),
-                ),
-                _ => (VTy::Other, VTy::Other),
-            };
-
-            bcx.switch_to_block(ok_b);
-            frame.terminated = false;
-            let ok_joined =
-                emit_match_arm(c, bcx, frame, ok_arm, bind_vtys.0, subj, join_b)?;
-            bcx.switch_to_block(err_b);
-            frame.terminated = false;
-            let err_joined =
-                emit_match_arm(c, bcx, frame, err_arm, bind_vtys.1, subj, join_b)?;
-
-            if ok_joined || err_joined {
-                bcx.seal_block(join_b);
-                bcx.switch_to_block(join_b);
-                frame.terminated = false;
-                Ok(jv)
-            } else {
-                ensure_current(bcx, frame);
-                Ok(bcx.ins().iconst(types::I64, 0))
-            }
+            let result_vty = static_vty(c, frame, e);
+            emit_match_typed(c, bcx, frame, subject, arms, &result_vty)
         }
         // expr? 脱糖 (P6): tag==1 → return err(载荷) — 即原样返回主语块
         // (tag 已为 1, 与重包一块可观察等价); 否则值 = 载荷。无需 join。
@@ -582,6 +541,147 @@ pub(crate) fn emit_expr<M: Module>(
             Ok(restore_word(bcx, raw, &pvty))
         }
     }
+}
+
+fn emit_match_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    subject: &Expr,
+    arms: &[MatchArm],
+    result_vty: &VTy,
+) -> AliasResult<Value> {
+    let subj = emit_expr(c, bcx, frame, subject)?;
+    let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+    let is_ok = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 0);
+    let ok_b = bcx.create_block();
+    let err_b = bcx.create_block();
+    let join_b = bcx.create_block();
+    let jv = bcx.append_block_param(join_b, types::I64);
+    bcx.ins().brif(is_ok, ok_b, &[], err_b, &[]);
+    bcx.seal_block(ok_b);
+    bcx.seal_block(err_b);
+
+    let ok_arm = arms
+        .iter()
+        .find(|a| a.ctor == CtorKind::Ok)
+        .unwrap_or_else(|| invariant_violation("match ok 臂存在 (sema 已校验)"));
+    let err_arm = arms
+        .iter()
+        .find(|a| a.ctor == CtorKind::Err)
+        .unwrap_or_else(|| invariant_violation("match err 臂存在 (sema 已校验)"));
+    let bind_vtys = match static_vty(c, frame, subject) {
+        VTy::Result(ok, err) => (
+            vty_of_type_name(&c.struct_layouts, &ok),
+            vty_of_type_name(&c.struct_layouts, &err),
+        ),
+        _ => (VTy::Other, VTy::Other),
+    };
+
+    bcx.switch_to_block(ok_b);
+    frame.terminated = false;
+    let ok_joined = emit_match_arm(
+        c,
+        bcx,
+        frame,
+        ok_arm,
+        bind_vtys.0,
+        result_vty,
+        subj,
+        join_b,
+    )?;
+    bcx.switch_to_block(err_b);
+    frame.terminated = false;
+    let err_joined = emit_match_arm(
+        c,
+        bcx,
+        frame,
+        err_arm,
+        bind_vtys.1,
+        result_vty,
+        subj,
+        join_b,
+    )?;
+
+    if ok_joined || err_joined {
+        bcx.seal_block(join_b);
+        bcx.switch_to_block(join_b);
+        frame.terminated = false;
+        Ok(restore_word(bcx, jv, result_vty))
+    } else {
+        ensure_current(bcx, frame);
+        Ok(bcx.ins().iconst(types::I64, 0))
+    }
+}
+
+/// 在声明/参数/返回等已知类型的语境中发射表达式。复合值必须把期望
+/// 类型递归传给内部载荷；仅在外层单元格做 norm_store 无法修正
+/// `array<f32> = [1.25]` 或 `result<f32, E> = ok(1.25)` 的载荷布局。
+pub(crate) fn emit_expr_expected<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    e: &Expr,
+    expected: &VTy,
+) -> AliasResult<Value> {
+    match (e, expected) {
+        (Expr::Match { subject, arms, .. }, _) => {
+            emit_match_typed(c, bcx, frame, subject, arms, expected)
+        }
+        (Expr::ArrayLit { elems, .. }, VTy::Array(elem)) => {
+            emit_array_lit_typed(c, bcx, frame, elems, elem)
+        }
+        (Expr::Call { callee, args, .. }, VTy::Result(ok, err)) => {
+            if let Expr::Ident(name, _) = callee.as_ref() {
+                if (name == "ok" || name == "err") && cell_addr(c, frame, name).is_none() {
+                    let payload = if name == "ok" {
+                        vty_of_type_name(&c.struct_layouts, ok)
+                    } else {
+                        vty_of_type_name(&c.struct_layouts, err)
+                    };
+                    return emit_result_ctor_typed(c, bcx, frame, name, args, &payload);
+                }
+            }
+            emit_expr(c, bcx, frame, e)
+        }
+        // 浮点字面量 AST 恒以 f64 承载；f32 语境须在进入复合字槽前降档。
+        (Expr::Float(..), VTy::F(FloatW::F32)) => {
+            let v = emit_expr(c, bcx, frame, e)?;
+            Ok(norm_store(bcx, v, expected))
+        }
+        _ => emit_expr(c, bcx, frame, e),
+    }
+}
+
+fn emit_array_lit_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    elems: &[Expr],
+    elem_vty: &VTy,
+) -> AliasResult<Value> {
+    let n = elems.len() as i64;
+    // 缓冲统一 8 字节步长；窄值与 f32 经存储字通道规范化。
+    let esize = 8usize;
+    let cap = bcx.ins().iconst(types::I32, n);
+    let eszw = bcx.ins().iconst(types::I32, esize as i64);
+    let hdr = c.call_rt(
+        bcx,
+        "alias.arr.new",
+        &[types::I32, types::I32],
+        Some(types::I64),
+        &[cap, eszw],
+    )?;
+    for (i, el) in elems.iter().enumerate() {
+        let v = emit_expr_expected(c, bcx, frame, el, elem_vty)?;
+        let dp = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+        let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * esize as i64);
+        let sv = storage_word(bcx, v, elem_vty);
+        store_elem(bcx, sv, addr, elem_vty);
+    }
+    let lenw = bcx.ins().iconst(types::I64, n);
+    bcx.ins().store(MemFlagsData::new(), lenw, hdr, 8);
+    Ok(hdr)
 }
 
 /// 二元运算发射: 按静态类型族分派 — 整数窄宽运算 (声明宽度 wrapping)、
@@ -617,7 +717,7 @@ fn emit_binary<M: Module>(
                     Add => bcx.ins().iadd(li, ri),
                     Sub => bcx.ins().isub(li, ri),
                     Mul => bcx.ins().imul(li, ri),
-                    _ => emit_div_guard(c, bcx, li, ri, true, w.bits(), span)?,
+                    _ => emit_div_guard(c, bcx, frame, li, ri, true, w.bits(), span)?,
                 };
                 Ok(widen_signed(bcx, v, wt))
             }
@@ -629,7 +729,7 @@ fn emit_binary<M: Module>(
                     Add => bcx.ins().iadd(li, ri),
                     Sub => bcx.ins().isub(li, ri),
                     Mul => bcx.ins().imul(li, ri),
-                    _ => emit_div_guard(c, bcx, li, ri, false, w.bits(), span)?,
+                    _ => emit_div_guard(c, bcx, frame, li, ri, false, w.bits(), span)?,
                 };
                 Ok(widen_unsigned(bcx, v, wt))
             }
@@ -717,6 +817,7 @@ pub(crate) fn emit_match_arm<M: Module>(
     frame: &mut Frame,
     arm: &MatchArm,
     bind_vty: VTy,
+    result_vty: &VTy,
     subj: Value,
     join_b: Block,
 ) -> AliasResult<bool> {
@@ -727,12 +828,15 @@ pub(crate) fn emit_match_arm<M: Module>(
     emit_local_cell(c, bcx, frame, payload, bind_vty, &arm.binding)?;
     let joined = match &arm.body {
         ArmBody::Value(e) => {
-            let v = emit_expr(c, bcx, frame, e)?;
-            bcx.ins().jump(join_b, &[BlockArg::Value(v)]);
+            let v = emit_expr_expected(c, bcx, frame, e, result_vty)?;
+            let word = storage_word(bcx, v, result_vty);
+            bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
             true
         }
         ArmBody::Ret(e) => {
-            let v = emit_expr(c, bcx, frame, e)?;
+            let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
+            let v = emit_expr_expected(c, bcx, frame, e, &expected)?;
+            let v = coerce_ret(bcx, frame, v);
             let rb = frame
                 .ret_block
                 .unwrap_or_else(|| invariant_violation("never 臂仅在函数体内可达 (sema 已校验)"));
@@ -750,7 +854,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 ensure_current(bcx, frame);
                 if i + 1 == n {
                     if let Stmt::ExprStmt { expr, .. } = s {
-                        tail = Some(emit_expr(c, bcx, frame, expr)?);
+                        tail = Some(emit_expr_expected(c, bcx, frame, expr, result_vty)?);
                         continue;
                     }
                 }
@@ -761,7 +865,8 @@ pub(crate) fn emit_match_arm<M: Module>(
             } else {
                 // 尾表达式 = 臂值; 其余收尾 (unit 臂) 规范字 0
                 let v = tail.unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
-                bcx.ins().jump(join_b, &[BlockArg::Value(v)]);
+                let word = storage_word(bcx, v, result_vty);
+                bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
                 true
             }
         }
@@ -862,7 +967,7 @@ pub(crate) fn display_word<M: Module>(
         }
         VTy::Str => c.call_rt(bcx, "alias.display.str", &[types::I64], Some(types::I64), &[w]),
         VTy::Unit => c.call_rt(bcx, "alias.display.unit", &[], Some(types::I64), &[]),
-        VTy::Func => c.call_rt(bcx, "alias.display.func", &[], Some(types::I64), &[]),
+        VTy::Func(..) => c.call_rt(bcx, "alias.display.func", &[], Some(types::I64), &[]),
         // 结构体值永不泄露内部布局 — 固定 "<struct>" (与 <func> 同规约)
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[], Some(types::I64), &[]),
         // 数组值永不泄露元素 — 固定 "<array>" (与 <struct> 对称, Phase 2d)
@@ -911,7 +1016,7 @@ pub(crate) fn emit_call<M: Module>(
             };
             let v = emit_expr(c, bcx, frame, &arg.value)?;
             let src = static_vty(c, frame, &arg.value);
-            return emit_convert(c, bcx, span, v, &src, &target);
+            return emit_convert(c, bcx, frame, span, v, &src, &target);
         }
         // typeof 内建 (Phase 3a): 求值取副作用, 返回静态类型名字面量块
         if name == "typeof" {
@@ -942,7 +1047,10 @@ pub(crate) fn emit_call<M: Module>(
                 return emit_result_ctor(c, bcx, frame, name, args);
             }
             match cell_addr(c, frame, name) {
-                Some(addr) => read_cell(bcx, frame, &addr, &VTy::Func),
+                Some(addr) => {
+                    let callee_vty = vty_of_name(c, frame, name);
+                    read_cell(bcx, frame, &addr, &callee_vty)
+                }
                 None => {
                     return Err(native_err(
                         span,
@@ -953,26 +1061,13 @@ pub(crate) fn emit_call<M: Module>(
         },
         _ => return Err(native_err(span, "函数值尚未接入原生后端 (Phase 3)")),
     };
-    // 具名被调方: 签名已知 → 混合调用; 否则多态退化全字约定
+    // 具名被调方的完整签名随词法类型流动，不按全局名字猜测。
     if let Expr::Ident(name, _) = callee {
-        let known = c.fn_sig_by_name.get(name).cloned();
-        return match known {
-            Some((param_vtys, ret_vty)) => {
+        return match vty_of_name(c, frame, name) {
+            VTy::Func(param_vtys, ret_vty) => {
                 call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
             }
-            None => {
-                let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
-                let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
-                let mut words: Vec<Value> = Vec::with_capacity(args.len() + 2);
-                words.push(bcx.use_var(frame.globals));
-                words.push(env);
-                for a in args {
-                    words.push(emit_expr(c, bcx, frame, &a.value)?);
-                }
-                let sig_ref = bcx.func.import_signature(c.user_sig(args.len()));
-                let inst = bcx.ins().call_indirect(sig_ref, code, &words);
-                Ok(first_result(bcx, inst))
-            }
+            _ => Err(native_err(span, format!("'{name}' 不是带签名的函数绑定"))),
         };
     }
     invariant_violation("被调方形态 (上方已分派)")
@@ -991,7 +1086,7 @@ fn call_closure<M: Module>(
 ) -> AliasResult<Value> {
     let mut words: Vec<Value> = Vec::with_capacity(args.len() + 2);
     for (a, pt) in args.iter().zip(param_vtys) {
-        let v = emit_expr(c, bcx, frame, &a.value)?;
+        let v = emit_expr_expected(c, bcx, frame, &a.value, pt)?;
         words.push(norm_store(bcx, v, pt));
     }
     let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
@@ -1008,7 +1103,49 @@ fn call_closure<M: Module>(
     let sig_ref = bcx.func.import_signature(sig);
     let inst = bcx.ins().call_indirect(sig_ref, code, &words);
     let raw = first_result(bcx, inst);
+    propagate_runtime_failure(c, bcx, frame)?;
     Ok(norm_load(bcx, raw, ret_vty))
+}
+
+fn jump_zero_return(bcx: &mut FunctionBuilder, frame: &Frame) {
+    let rb = frame
+        .ret_block
+        .unwrap_or_else(|| invariant_violation("运行时错误传播需要返回块"));
+    let [param] = bcx.block_params(rb) else {
+        invariant_violation("返回块恰有一个参数")
+    };
+    let ty = bcx.func.dfg.value_type(*param);
+    let zero = if ty == types::F32 {
+        bcx.ins().f32const(0.0)
+    } else if ty == types::F64 {
+        bcx.ins().f64const(0.0)
+    } else {
+        bcx.ins().iconst(ty, 0)
+    };
+    bcx.ins().jump(rb, &[BlockArg::Value(zero)]);
+}
+
+/// 被调函数若已记录 JIT 运行时错误，当前函数立即以零值退栈；AOT 的
+/// abort shim 自行 ExitProcess，因此无需额外检查。
+fn propagate_runtime_failure<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+) -> AliasResult<()> {
+    if c.is_aot {
+        return Ok(());
+    }
+    let failed = c.call_rt(bcx, "alias.runtime.failed", &[], Some(types::I32), &[])?;
+    let bad = bcx.ins().icmp_imm_s(IntCC::NotEqual, failed, 0);
+    let abort_b = bcx.create_block();
+    let ok_b = bcx.create_block();
+    bcx.ins().brif(bad, abort_b, &[], ok_b, &[]);
+    bcx.seal_block(abort_b);
+    bcx.seal_block(ok_b);
+    bcx.switch_to_block(abort_b);
+    jump_zero_return(bcx, frame);
+    bcx.switch_to_block(ok_b);
+    Ok(())
 }
 
 /// 转换内建名 → 目标静态投影 (与 sema conv_builtin_ty 同名单集)
@@ -1035,6 +1172,7 @@ pub(crate) fn conv_target_vty(name: &str) -> Option<VTy> {
 fn emit_convert<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
+    frame: &Frame,
     span: Span,
     v: Value,
     src: &VTy,
@@ -1063,12 +1201,12 @@ fn emit_convert<M: Module>(
         VTy::I(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, span, v, src, true, bits, wt)
+            emit_convert_to_int(c, bcx, frame, span, v, src, true, bits, wt)
         }
         VTy::U(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, span, v, src, false, bits, wt)
+            emit_convert_to_int(c, bcx, frame, span, v, src, false, bits, wt)
         }
         _ => invariant_violation("转换目标为数值族"),
     }
@@ -1079,6 +1217,7 @@ fn emit_convert<M: Module>(
 fn emit_convert_to_int<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
+    frame: &Frame,
     span: Span,
     v: Value,
     src: &VTy,
@@ -1109,7 +1248,7 @@ fn emit_convert_to_int<M: Module>(
         let above = bcx.ins().fcmp(FloatCC::GreaterThanOrEqual, f64v, hi_c);
         let bad_lo = bcx.ins().bor(nan, below);
         let bad = bcx.ins().bor(bad_lo, above);
-        emit_abort_branch(c, bcx, bad, "alias.abort_conv", span)?;
+        emit_abort_branch(c, bcx, frame, bad, "alias.abort_conv", span)?;
         let sat = if signed {
             bcx.ins().fcvt_to_sint(types::I64, f64v)
         } else {
@@ -1136,6 +1275,7 @@ fn emit_convert_to_int<M: Module>(
 fn emit_abort_branch<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
+    frame: &Frame,
     trap: Value,
     sym: &str,
     span: Span,
@@ -1152,7 +1292,7 @@ fn emit_abort_branch<M: Module>(
     let af = c.import_fn(sym, &[types::I32], None)?;
     let aref = c.module.declare_func_in_func(af, &mut bcx.func);
     bcx.ins().call(aref, &[aid]);
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+    jump_zero_return(bcx, frame);
 
     bcx.switch_to_block(ok_b);
     Ok(())
@@ -1178,7 +1318,7 @@ pub(crate) fn emit_construct<M: Module>(
             .map(|a| &a.value)
             .or_else(|| default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
-        let v = emit_expr(c, bcx, frame, expr)?;
+        let v = emit_expr_expected(c, bcx, frame, expr, fvty)?;
         let sv = norm_store(bcx, v, fvty);
         bcx.ins().store(MemFlagsData::new(), sv, ptr, *off);
     }
@@ -1200,9 +1340,26 @@ pub(crate) fn emit_result_ctor<M: Module>(
             format!("{name} 构造恰好接受 1 个参数"),
         ));
     };
-    let payload = emit_expr(c, bcx, frame, &arg.value)?;
     let pvty = static_vty(c, frame, &arg.value);
-    let pw = storage_word(bcx, payload, &pvty);
+    emit_result_ctor_typed(c, bcx, frame, name, args, &pvty)
+}
+
+fn emit_result_ctor_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    name: &str,
+    args: &[CallArg],
+    pvty: &VTy,
+) -> AliasResult<Value> {
+    let [arg] = args else {
+        return Err(native_err(
+            Span::default(),
+            format!("{name} 构造恰好接受 1 个参数"),
+        ));
+    };
+    let payload = emit_expr_expected(c, bcx, frame, &arg.value, pvty)?;
+    let pw = storage_word(bcx, payload, pvty);
     let n2 = bcx.ins().iconst(types::I32, 2);
     let blk = c.call_rt(bcx, "alias.env.new", &[types::I32], Some(types::I64), &[n2])?;
     let tag = if name == "ok" { 0i64 } else { 1i64 };
@@ -1240,7 +1397,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 let [a] = args else {
                     invariant_violation("push 元数 (sema 已校验)")
                 };
-                let v = emit_expr(c, bcx, frame, &a.value)?;
+                let v = emit_expr_expected(c, bcx, frame, &a.value, elem)?;
                 let sw = storage_word(bcx, v, elem);
                 c.call_rt(bcx, "alias.arr.push", &[types::I64, types::I64], None, &[rv, sw])?;
                 Ok(bcx.ins().iconst(types::I64, 0))
@@ -1259,7 +1416,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 let af = c.import_fn("alias.abort_pop", &[types::I32], None)?;
                 let aref = c.module.declare_func_in_func(af, &mut bcx.func);
                 bcx.ins().call(aref, &[aid]);
-                bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+                jump_zero_return(bcx, frame);
                 bcx.switch_to_block(ok_b);
                 let raw = c.call_rt(bcx, "alias.arr.pop", &[types::I64], Some(types::I64), &[rv])?;
                 Ok(restore_word(bcx, raw, elem))
@@ -1287,11 +1444,12 @@ pub(crate) fn emit_method_call<M: Module>(
         words.push(bcx.ins().iconst(types::I64, 0));
         words.push(norm_store(bcx, rv, &param_vtys[0]));
         for (a, pt) in args.iter().zip(param_vtys.iter().skip(1)) {
-            let v = emit_expr(c, bcx, frame, &a.value)?;
+            let v = emit_expr_expected(c, bcx, frame, &a.value, pt)?;
             words.push(norm_store(bcx, v, pt));
         }
         let inst = bcx.ins().call(fref, &words);
         let raw = first_result(bcx, inst);
+        propagate_runtime_failure(c, bcx, frame)?;
         return Ok(norm_load(bcx, raw, &ret_vty));
     }
     if tname == "string" {
@@ -1422,6 +1580,7 @@ pub(crate) fn new_span_id<M: Module>(c: &mut Compiler<M>, span: Span) -> i32 {
 pub(crate) fn emit_div_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
+    frame: &Frame,
     l: Value,
     r: Value,
     signed: bool,
@@ -1458,9 +1617,8 @@ pub(crate) fn emit_div_guard<M: Module>(
     let aid = bcx.ins().iconst(types::I32, span_id as i64);
     let af = c.import_fn("alias.abort_div", &[types::I32], None)?;
     let aref = c.module.declare_func_in_func(af, &mut bcx.func);
-    bcx.ins().call(aref, &[aid]); // 运行时侧 process exit(1)/ExitProcess, 不返回
-    // 块终结 + 不可达兜底: 正常控制流永不至此, 若抵达则主动中止
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+    bcx.ins().call(aref, &[aid]);
+    jump_zero_return(bcx, frame);
 
     bcx.switch_to_block(ok_b);
     Ok(if signed { bcx.ins().sdiv(l, r) } else { bcx.ins().udiv(l, r) })
@@ -1471,6 +1629,7 @@ pub(crate) fn emit_div_guard<M: Module>(
 fn emit_index_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
+    frame: &Frame,
     idx32: Value,
     len32: Value,
     span: Span,
@@ -1492,7 +1651,7 @@ fn emit_index_guard<M: Module>(
     let af = c.import_fn("alias.abort_oob", &[types::I32], None)?;
     let aref = c.module.declare_func_in_func(af, &mut bcx.func);
     bcx.ins().call(aref, &[aid]);
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+    jump_zero_return(bcx, frame);
 
     bcx.switch_to_block(ok_b);
     Ok(())

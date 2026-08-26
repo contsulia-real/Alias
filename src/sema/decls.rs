@@ -136,7 +136,7 @@ impl Checker {
         Ok(())
     }
 
-    /// Q④ main 校验: 存在 / 零参 / 返回 ∈ {i32,bool,string,unit}。
+    /// Q④ main 校验: 存在 / 零参 / 返回必须为 i32。
     /// kind 非 Func 或初始化非函数值的 main 不入候选 — 与迁移前判定
     /// 的判定一致, 同样落入「找不到顶层 func main」。
     pub(super) fn validate_main(&mut self) -> AliasResult<()> {
@@ -155,12 +155,12 @@ impl Checker {
                         span: bspan,
                     });
                 }
-                if matches!(*ret, Ty::Int(IntW::W32) | Ty::Bool | Ty::Str | Ty::Unit) {
+                if matches!(*ret, Ty::Int(IntW::W32)) {
                     Ok(())
                 } else {
                     Err(AliasError {
                         msg: format!(
-                            "顶层 func main 返回类型必须是 i32/bool/string/unit, 实际 {}",
+                            "顶层 func main 返回类型必须是 i32, 实际 {}",
                             ret.name()
                         ),
                         span: bspan,
@@ -170,7 +170,7 @@ impl Checker {
             // 多态函数值做 main: 签名不可知, 归入返回类型非法
             _ => Err(AliasError {
                 msg: format!(
-                    "顶层 func main 返回类型必须是 i32/bool/string/unit, 实际 {}",
+                    "顶层 func main 返回类型必须是 i32, 实际 {}",
                     sig.name()
                 ),
                 span: bspan,

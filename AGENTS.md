@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-24
-**Git:** 非 git 仓库（无 commit/branch 信息）
+**Generated:** 2026-08-26
+**Git:** `main` 分支
 
 ## OVERVIEW
 
@@ -15,10 +15,10 @@ D:\Project\Alias\
 │   ├── main.rs      # CLI 壳：run|build 子命令（裸单参 = run）→ 退出码 clamp 到 0–255
 │   ├── lib.rs       # 编排器 run()/build() + 统一错误类型 AliasError/Span(file:line:col)
 │   ├── lexer.rs     # lex(src) -> Vec<Token>；含字符串插值 StrPart 切分
-│   ├── parser.rs    # parse(tokens) -> Program；import 解析后暂存不执行
+│   ├── parser/      # parse(tokens) -> Program；含递归/表达式链深度守卫
 │   ├── ast.rs       # AST 纯数据定义（Expr/Stmt/BindKind/BinOp…）
-│   ├── sema.rs      # 静态语义层 check()：作用域链 + 内部类型推断 + 全量检查（Phase 1）
-│   ├── codegen.rs   # Cranelift 双形态后端：JIT + AOT shim 区；单元格/闭包/字符串值模型 + span-ID 中止存根（cranelift-* 唯一触点）
+│   ├── sema/        # 静态语义层 check()：作用域链 + 内部类型推断 + 全量检查
+│   ├── codegen/     # Cranelift 双形态后端：共享发射器 + JIT host + AOT shim
 │   └── linker.rs    # rust-lld 子进程封装：SDK 发现 + 链接参数（AOT 链接唯一拥有者）
 ├── demos/*.as       # Alias 语言示例程序；count_to_ten.as 被 smoke.rs include_str! 复用为测试
 ├── tests/smoke.rs   # Phase 1 集成冒烟测试，直接调库接口 run()
@@ -30,6 +30,7 @@ D:\Project\Alias\
 ├── tests/method_laws.rs # Phase 2c 扩展方法法律：正负矩阵断言精确中文消息+行:列
 ├── tests/array_laws.rs # Phase 2d array<T> 法律：正负矩阵 + 运行时中止子进程用例
 ├── tests/aot_parity.rs # Phase 5 AOT 奇偶：build 产物 vs JIT 三元组逐字节一致
+├── tests/security_regressions.rs # 内存安全、资源上限、宿主存活与覆盖保护回归
 ├── docs/spec-notes.md # 规范冻结：display 表、Q①–Q⑥ 裁决、Q③ 落空规则、§五 运行时契约、§六 AOT 形态
 ├── MIGRATION.md     # 迁移记录：每个语义变化一行，引用裁决编号
 ├── Cargo.toml       # [dependencies] = cranelift-* 0.135 (唯一第三方依赖, codegen.rs 独占)
@@ -57,7 +58,7 @@ D:\Project\Alias\
 | `codegen::execute` | fn | codegen.rs | 编译 Program 为原生代码并进程内执行；入口 wrapper 先求值顶层绑定再调 main |
 | `emit_expr` / `emit_stmt` | fn | codegen.rs | 表达式/语句发射核心（单元格值模型 + 闭包创建） |
 | `methods` / `method_rets` | field | codegen.rs | 方法表：(接收者,方法名)→FuncId 静态分派 + 返回类型投影 (Phase 2c) |
-| `SPAN_TABLE` / `FN_PTRS` | static | codegen.rs | span-ID 中止回查表 / 运行时函数指针表 |
+| `SPAN_TABLE` / `RUNTIME_ERROR` | static | codegen/mod.rs | JIT span-ID 回查表 / 可恢复运行时错误槽 |
 | `AliasError`/`Span` | struct | lib.rs:14/20 | 错误统一携带 file:line:col |
 
 ## CONVENTIONS
@@ -71,6 +72,8 @@ D:\Project\Alias\
 - **存储/闭包语义**：`alias.cell.new(bytes)` 按声明类型尺寸分配清零存储区；每个绑定一泄漏堆单元格，闭包 env 持捕获单元格指针（引用捕获）——cond 闭包须读到外层变量最新值，见 codegen 模块头值模型说明。
 - **方法语义**：`public? func <Ret> <RecvType>.<name>` 定义扩展方法；self 是隐式 val 绑定（不在参数表）；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖——见 spec-notes 附录五。
 - **数组语义**：实例 = 泄漏头块 {data_ptr,len,cap}，引用语义（别名共享）；下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop 不可定义——见 spec-notes 附录六。
+- **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。
+- **运行时错误**：JIT host 记录 `AliasError` 并安全退回 `run()`；AOT shim 输出中文诊断后 `ExitProcess(1)`。宿主函数不得直接终止编译器进程。
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -82,7 +85,7 @@ D:\Project\Alias\
 
 - 语言语法风格：`func i32 main = () -> {...}`、`var i32 x = 1;`——绑定名后强制类型槽，`=` 连接名与函数体。
 - 无括号调用 (P2e 泛化): 语句入口裸名吞一个 unary 实参（通用，不限内建）；表达式内 `ident unary` 吞参调用、`expr Ident [unary]` 方法中缀（`a plus b` ≡ `a.plus(b)`）。铁律: 无括号绑定紧于二元运算 — `dup 5 + 1` 报错，须 `(dup 5) + 1`; 函数值传参须显式 `f(g)`; 零参调用必须括号 `five()`。
-- main 可返回 i32 或 bool：bool true→退出码 0，false→1。
+- main 必须零参且只允许返回 i32；其它返回类型在 sema 阶段拒绝。
 - 字符串插值用单引号：`'n=$i'`。
 - demos/ 即测试夹具：smoke.rs 用 include_str! 直接跑 demo 文件。
 
@@ -97,6 +100,7 @@ cargo build                           # 构建
 
 ## NOTES
 
-- 非 git 仓库；无 CI、无 lint 配置、无 Makefile——构建全靠 cargo 默认行为。
-- 整数运算用 i64 承载但对外称 i32，算术用 wrapping_* 变体（不 panic）。
-- 除零是运行时错误而非 panic（codegen.rs Div 显式守卫 → span-ID 中止存根，INT_MIN÷-1 同守卫）。
+- 无 CI、无 lint 配置、无 Makefile——构建全靠 cargo 默认行为。
+- 数值类型含 i8/i16/i32/i64、u8/u16/u32/u64、f32/f64；跨类型混算禁止，显式转换走 `to_*` 内建。
+- 除零是运行时错误而非 panic（`codegen/emit.rs` 显式守卫 → span-ID 中止存根，INT_MIN÷-1 同守卫）。
+- 输入上限：源码 8 MiB、200000 token、语法/类型/插值嵌套 128 层、表达式链 256 项。

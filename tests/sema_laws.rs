@@ -226,14 +226,14 @@ fn tightened_q1_ordered_comparison_on_bool() {
 /// Q① 正向控制: EqEq 对 bool 仍合法。
 #[test]
 fn q1_bool_equality_still_legal() {
-    let src = "\nfunc bool main = () -> {\n    return true == true\n}\n";
+    let src = "\nfunc i32 main = () -> {\n    val bool ok = true == true\n    while ok == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run("t.as", src).unwrap(), 0);
 }
 
 /// Q① 正向控制: string 有序比较合法 (运行时字典序语义不变)。
 #[test]
 fn q1_string_ordering_still_legal() {
-    let src = "\nfunc bool main = () -> {\n    return 'a' < 'b'\n}\n";
+    let src = "\nfunc i32 main = () -> {\n    val bool ok = 'a' < 'b'\n    while ok == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run("t.as", src).unwrap(), 0);
 }
 
@@ -269,11 +269,22 @@ fn tightened_q4_main_no_params() {
     );
 }
 
-/// Q④ 正向控制: string main 合法且静默退 0 (退出映射: string→0 不打印)。
+/// Q④ 裁决: main 的唯一合法返回类型是 i32。
 #[test]
-fn q4_string_main_exits_zero() {
-    let src = "\nfunc string main = () -> return 'hi'\n";
-    assert_eq!(run("t.as", src).unwrap(), 0);
+fn tightened_q4_non_i32_main_rejected() {
+    for (ty, value, actual) in [
+        ("bool", "true", "bool"),
+        ("string", "'hi'", "string"),
+        ("unit", "()", "()"),
+    ] {
+        let src = format!("\nfunc {ty} main = () -> return {value}\n");
+        let e = fail(&src);
+        assert_eq!(
+            e.msg,
+            format!("顶层 func main 返回类型必须是 i32, 实际 {actual}")
+        );
+        assert_eq!((e.span.line, e.span.col), (2, 1));
+    }
 }
 
 /// Q⑤ 裁决: 缺 main 时 Display 省略位置前缀 — 锁定新输出形态。

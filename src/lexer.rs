@@ -76,18 +76,35 @@ struct Lexer<'a> {
     line: u32,
     col: u32,
     paren_depth: u32,
+    interp_depth: u16,
 }
 
+const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOKENS: usize = 200_000;
+
 pub fn lex(src: &str) -> AliasResult<Vec<Token>> {
+    if src.len() > MAX_SOURCE_BYTES {
+        return Err(AliasError {
+            msg: format!("源文件超过 {} MiB 上限", MAX_SOURCE_BYTES / 1024 / 1024),
+            span: Span { line: 1, col: 1, len: 1 },
+        });
+    }
     let mut lx = Lexer {
         src: src.as_bytes(),
         pos: 0,
         line: 1,
         col: 1,
         paren_depth: 0,
+        interp_depth: 0,
     };
     let mut out = Vec::new();
     while let Some(t) = lx.next_token()? {
+        if out.len() >= MAX_TOKENS {
+            return Err(AliasError {
+                msg: format!("源文件 token 数超过 {MAX_TOKENS} 上限"),
+                span: t.span,
+            });
+        }
         out.push(t);
     }
     Ok(out)
@@ -155,21 +172,22 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> AliasResult<Option<Token>> {
-        self.skip_trivia();
-        let Some(c) = self.peek() else { return Ok(None) };
-        let start_span = self.span_here(1);
-
-        // 换行处理: 顶层发 Newline, 括号内当空白吞掉
-        if c == b'\n' {
+        // 用循环吞掉被抑制的换行，避免恶意空行在词法器自身形成递归栈。
+        loop {
+            self.skip_trivia();
+            let Some(c) = self.peek() else { return Ok(None) };
+            let start_span = self.span_here(1);
+            if c != b'\n' {
+                break;
+            }
             self.bump();
-            if self.paren_depth > 0 {
-                return self.next_token();
+            if self.paren_depth == 0 && !self.newline_is_continuation() {
+                return Ok(Some(Token { tok: Tok::Newline, span: start_span }));
             }
-            if self.newline_is_continuation() {
-                return self.next_token();
-            }
-            return Ok(Some(Token { tok: Tok::Newline, span: start_span }));
         }
+
+        let c = self.peek().expect("上方已排除 EOF");
+        let start_span = self.span_here(1);
 
         let tok = match c {
             b'0'..=b'9' => self.lex_int()?,
@@ -194,10 +212,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_int(&mut self) -> AliasResult<Tok> {
-        let mut n: i64 = 0;
+        let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
-                n = n * 10 + (c - b'0') as i64;
                 self.bump();
             } else {
                 break;
@@ -205,45 +222,51 @@ impl<'a> Lexer<'a> {
         }
         // 浮点字面量 (Phase 3a): 数字后跟 '.' + 数字 (排除方法链 `.` 后非数字
         // 的形态 — 5.foo 非法, 5 .len() 不受影响因 Dot 前有空格由 parser 处理)
+        let mut is_float = false;
         if self.peek() == Some(b'.')
             && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false)
         {
+            is_float = true;
             self.bump(); // .
-            let mut frac = String::from("0.");
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
-                    frac.push(c as char);
                     self.bump();
                 } else {
                     break;
                 }
             }
-            // 科学计数法: e/E [+/-] digits
-            if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+        }
+        // 科学计数法既允许 1e5，也允许 1.25e-3。
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            is_float = true;
+            self.bump();
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
                 self.bump();
-                let mut exp = String::from("e");
-                if matches!(self.peek(), Some(b'+') | Some(b'-')) {
-                    exp.push(self.peek().unwrap() as char);
-                    self.bump();
-                }
-                let mut any = false;
-                while let Some(c) = self.peek() {
-                    if c.is_ascii_digit() {
-                        exp.push(c as char);
-                        any = true;
-                        self.bump();
-                    } else {
-                        break;
-                    }
-                }
-                if !any {
-                    return self.err("浮点指数缺少数字 — 例如 1e5");
-                }
-                frac.push_str(&exp);
             }
-            let v: f64 = frac.parse().unwrap_or(f64::NAN);
+            let exp_start = self.pos;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.bump();
+            }
+            if self.pos == exp_start {
+                return self.err("浮点指数缺少数字 — 例如 1e5");
+            }
+        }
+        let text = std::str::from_utf8(&self.src[start..self.pos])
+            .map_err(|_| AliasError { msg: "数值字面量编码无效".into(), span: self.span_here(1) })?;
+        if is_float {
+            let v: f64 = text.parse().map_err(|_| AliasError {
+                msg: "浮点字面量格式无效".into(),
+                span: self.span_here((self.pos - start) as u32),
+            })?;
+            if !v.is_finite() {
+                return self.err("浮点字面量超出 f64 表示范围");
+            }
             return Ok(Tok::Float(v));
         }
+        let n = text.parse::<i64>().map_err(|_| AliasError {
+            msg: "整数字面量超出 i64 表示范围".into(),
+            span: self.span_here((self.pos - start) as u32),
+        })?;
         Ok(Tok::Int(n))
     }
 
@@ -368,7 +391,13 @@ impl<'a> Lexer<'a> {
                     match self.peek() {
                         Some(b'{') => {
                             self.bump();
-                            let toks = self.lex_hole_until_rbrace()?;
+                            if self.interp_depth >= 128 {
+                                return self.err("字符串插值嵌套超过 128 层上限");
+                            }
+                            self.interp_depth += 1;
+                            let result = self.lex_hole_until_rbrace();
+                            self.interp_depth -= 1;
+                            let toks = result?;
                             if !lit.is_empty() {
                                 parts.push(StrPart::Lit(std::mem::take(&mut lit)));
                             }

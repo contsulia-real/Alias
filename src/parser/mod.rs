@@ -28,8 +28,32 @@ use crate::lexer::{Tok, Token};
 use crate::{AliasError, AliasResult, Span};
 
 pub fn parse(tokens: Vec<Token>) -> AliasResult<Program> {
+    validate_nesting(&tokens)?;
     let mut p = Parser { toks: tokens, pos: 0 };
     p.parse_program()
+}
+
+pub(super) const MAX_EXPR_CHAIN: usize = 256;
+const MAX_NESTING: usize = 128;
+
+fn validate_nesting(tokens: &[Token]) -> AliasResult<()> {
+    let mut depth = 0usize;
+    for t in tokens {
+        match t.tok {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+            Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                depth = depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+        if depth > MAX_NESTING {
+            return Err(AliasError {
+                msg: format!("语法嵌套超过 {MAX_NESTING} 层上限"),
+                span: t.span,
+            });
+        }
+    }
+    Ok(())
 }
 
 struct Parser {
@@ -102,6 +126,13 @@ impl Parser {
 
     /// 类型表达式: i32 / bool / string / array<string> / sender<string> 等
     fn parse_type(&mut self) -> AliasResult<TypeExpr> {
+        self.parse_type_at_depth(0)
+    }
+
+    fn parse_type_at_depth(&mut self, depth: usize) -> AliasResult<TypeExpr> {
+        if depth >= MAX_NESTING {
+            return Err(self.err_here(format!("类型嵌套超过 {MAX_NESTING} 层上限")));
+        }
         let name = match self.peek().cloned() {
             Some(Tok::Ident(n)) => {
                 self.bump();
@@ -117,7 +148,7 @@ impl Parser {
         if self.eat(&Tok::Lt) {
             let mut args = Vec::new();
             loop {
-                args.push(self.parse_type()?);
+                args.push(self.parse_type_at_depth(depth + 1)?);
                 if self.eat(&Tok::Comma) {
                     continue;
                 }

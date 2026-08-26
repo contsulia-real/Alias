@@ -13,7 +13,9 @@
 
 | 运行时值 | 变体 (`interp.rs:14-20`) | 显示字节 | 备注 |
 |---|---|---|---|
-| 整数 | `Int(i64)` | 十进制表示 (如 `48`, `-3`) | 内部 i64 承载, 对外语义称 i32 |
+| 有符号整数 | `i8/i16/i32/i64` | 十进制表示 (如 `48`, `-3`) | 按声明宽度 wrapping |
+| 无符号整数 | `u8/u16/u32/u64` | 无符号十进制表示 | 按声明宽度 wrapping |
+| 浮点 | `f32/f64` | 规范化十进制科学计数法；零为 `0` | JIT/AOT 使用同一舍入规则 |
 | 布尔 | `Bool(bool)` | `true` / `false` | 小写字面量 |
 | 字符串 | `Str(String)` | 原文字节 | **不加引号、不转义**, 与源码字面量形态无关 |
 | 函数值 | `Func(Rc<FuncValue>)` | `<func>` | 永不泄露闭包/参数信息 |
@@ -30,7 +32,7 @@
 | Q① | `true < false` 静默求值为 `false` (`src/interp.rs:317`, bool 分支 `_ => false`) | **改编译错误**: 有序比较仅限同型 i32/i64 与 string; EqEq/NotEq 对 bool 仍合法 | Phase 1 以 `tightened_*` 测试锁定; 现状不入黄金记录 |
 | Q② | 函数参数隐式为 val 绑定 (`src/interp.rs:354`, `mutable: false`) | **保留**运行时语义; 编译期拒绝对参数赋值 | `closure_reference_capture_latest_value` (间接依赖) |
 | Q③ | 声明返回非 unit 的函数块体落空时静默得 `Unit` (`src/interp.rs:363`, `Ok(_) => Ok(Value::Unit)`) | **编译错误**: 声明返回非 unit 的函数控制流必须可达 return; 仅 unit 可落空 | Phase 1 锁定 |
-| Q④ | main 返回 string/unit 时静默退 0 (`src/interp.rs:122`, `Ok(_) => Ok(0)`) | **sema 校验 main**: 存在/func/零参/返回∈`{i32,bool,string,unit}`; 退出映射: i32→原样 (clamp 在进程边界)、bool true→0 false→1、unit→0、string→0 (**不打印**)。其余类型编译错误 | `bool_main_true_exit_0`、`bool_main_false_exit_1`、`exit_code_clamped_to_255` |
+| Q④ | 历史实现允许 bool/string/unit main | **收紧**: main 必须存在、是零参 func，且唯一合法返回类型为 `i32`; 其它返回类型在 sema 阶段编译错误。进程边界仍把 i32 clamp 到 0–255 | `bool_main_rejected`、`string_main_rejected`、`unit_main_rejected`、`exit_code_clamped_to_255` |
 | Q⑤ | 缺 main 报 `@ 0:0` (`src/interp.rs:116`, `Span::default()`) | **修复**: Span 为 default 时 Display 省略位置前缀, 只报「找不到顶层 func main」 | 现状由 `missing_main_error` 冻结; 修复落地时该行随 MIGRATION 条目同步改写 |
 | Q⑥ | 顶层绑定按序求值、先于 main、可有副作用 (`src/interp.rs:96-113`) | **保留顺序语义**: 生成的入口 wrapper 先按序求值顶层初始化再调用用户 main | `top_level_side_effect_ordering` |
 
@@ -63,7 +65,7 @@
 |---|---|
 | `count_to_ten_demo` | demo 夹具 + import 通知 + 循环顺序 |
 | `arithmetic_exit_48` | i32 main 返回值即退出码 |
-| `bool_main_true_exit_0` / `bool_main_false_exit_1` | Q④ bool 映射 |
+| `bool_main_rejected` / `string_main_rejected` / `unit_main_rejected` | Q④ main 仅 i32 |
 | `string_interpolation_equality` | 插值 `'n=$i'` + 字符串相等 |
 | `division_by_zero_error` | 除零消息 + 0 起始列号 |
 | `display_func_and_unit` | display 表 `<func>` / `()` |
@@ -132,15 +134,16 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | 符号 | 签名 | 语义 |
 |------|------|------|
 | alias.cell.new | (bytes:i64)→i64 | 泄漏并清零 bytes 字节存储区；绑定/结构体值由调用端按声明宽度写入 |
-| alias.env.new / alias.globals.new | (i32)→i64 | 泄漏 n×8 字节槽区 |
+| alias.env.new | (i32)→i64 | 泄漏 n×8 字节捕获槽区 |
+| alias.globals.new | (bytes:i64)→i64 | 泄漏并清零按混型布局计算的顶层槽区 |
 | alias.closure.new | (i64,i64)→i64 | 泄漏 {code,env} 16 字节闭包对象 |
 | alias.str.new | (ptr,i32)→i64 | 复制字节 → 泄漏块 {data_ptr,len} |
 | alias.str.concat | (i64,i64)→i64 | 拼接新块 |
 | alias.str.cmp | (i64,i64)→i32 | 字典序字节比较 -1/0/1 |
-| alias.display.int/bool/unit/func/str | 各型→i64 | Value::display 规则 (§display 表) |
+| alias.display.int/i64/u64/f32/f64/bool/unit/func/str | 各型→i64 | Value::display 规则 (§display 表) |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
 | alias.println/print.i32/bool | (i32) | 经 display 复用 |
-| alias.abort_div | (i32) | span-ID 查表 → stderr「错误 @ L:C — 除以零」→ exit 1 |
+| alias.abort_div/oob/pop/conv | (i32) | span-ID 查表；JIT 记录 AliasError 并退回宿主，AOT 输出诊断后 exit 1 |
 
 字符串表示: 泄漏 16 字节块 {data_ptr: u64, len: u64}; data_ptr 为 null
 当且仅当 len=0。字节一律复制进块 — 统一所有权。
@@ -148,13 +151,21 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 ## §六 AOT 形态
 
 - CLI: `alias run <source.as>` (JIT) / `alias build <source.as>` (AOT exe,
-  与源同目录同名 .exe, 成功静默); 裸 `alias <source.as>` = run。
+  与源同目录同名 .exe, 成功静默); 裸 `alias <source.as>` = run。build 只接受
+  `.as` 扩展名，避免输入路径与输出 `.exe` 指向同一文件。
 - 产物依赖: 仅 kernel32.lib (GetStdHandle/WriteFile/ExitProcess/
   HeapAlloc/GetProcessHeap/RtlMoveMemory)。**无 CRT**:
   入口为导出 alias_start (显式 ExitProcess 传退出码),
   十进制转换与字节比较由 shim IR 实现。
 - 已知限制: cranelift-object 不写 .pdata/.xdata — SEH 展开穿越
   Alias 帧暂不支持; console 程序无碍。
+
+## §六.1 编译输入健壮性边界
+
+- 源码最大 8 MiB，token 最大 200000。
+- `()`、`[]`、`{}` 的组合语法嵌套、泛型类型嵌套和字符串插值嵌套最大 128 层。
+- 加减、乘除、后缀、无括号调用与连续一元负号最大 256 项/层。
+- 超限、i64 整数字面量越界、非有限浮点字面量都返回带 span 的中文编译错误，不得 panic 或栈溢出。
 
 ---
 
@@ -177,7 +188,7 @@ stmt        := ... | recv "." IDENT "=" expr                    字段赋值语�
 
 | 主题 | 裁决 |
 |------|------|
-| 值模型 | 实例 = 泄漏 n×8 字节槽区 (复用 alias.env.new 符号), 字段按声明序偏移 idx*8 存 64 位规范字; 变量持实例指针 |
+| 值模型 | 实例 = `alias.cell.new(bytes)` 分配的泄漏槽区；字段按自身 size/align 排布并含填充，变量持实例指针 |
 | 引用语义 | 赋值/传参/闭包捕获共享同一实例 — 经任一别名写字段, 其余别名立即可见 |
 | 可变性 | 字段级: var 字段可写与绑定自身 val/var 无关; val 字段写 → 「'{f}' 是 val 字段, 不可赋值」; 绑定重指仍受绑定 val/var 管辖 |
 | 构造 | 全命名实参; 缺省字段取声明默认值; 必填字段缺失/重复/未知/类型不符各有独立诊断; 实参按声明序求值 |

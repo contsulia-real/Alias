@@ -1,8 +1,10 @@
 use super::*;
 pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
-    for (scope, vtys) in frame.scopes.iter().zip(frame.locals_vty.iter()) {
-        if scope.contains_key(name) {
-            return vtys.get(name).cloned().unwrap_or(VTy::Other);
+    // 必须与 cell_addr 一样从最内层向外层解析；地址与类型若命中不同绑定，
+    // 窄单元格会被按外层宽类型读写，直接造成原生堆越界。
+    for vtys in frame.locals_vty.iter().rev() {
+        if let Some(vty) = vtys.get(name) {
+            return vty.clone();
         }
     }
     if let Some(v) = frame.caps_vty.get(name) {
@@ -26,7 +28,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         Expr::Bool(..) => VTy::Bool,
         Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
-        Expr::FuncLit { .. } => VTy::Func,
+        Expr::FuncLit { params, body, .. } => VTy::Func(
+            params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
+            Box::new(infer_ret_vty(c, frame, params, body)),
+        ),
         // 算术结果 = 操作数族 (sema 已保证同族同宽); 比较恒 Bool
         Expr::Binary { op, lhs, rhs, .. } => match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
@@ -76,9 +81,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 if name == "typeof" {
                     return VTy::Str;
                 }
-                c.fn_ret_by_name
-                    .get(name)
-                    .cloned()
+                match vty_of_name(c, frame, name) {
+                    VTy::Func(_, ret) => Some(*ret),
+                    _ => None,
+                }
                     // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
                     .or_else(|| {
                         c.struct_layouts
@@ -87,17 +93,55 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     })
                     .unwrap_or(VTy::Other)
             }
-            Expr::FuncLit { .. } => VTy::Other,
-            _ => VTy::Other,
+            Expr::FuncLit { params, body, .. } => infer_ret_vty(c, frame, params, body),
+            other => match static_vty(c, frame, other) {
+                VTy::Func(_, ret) => *ret,
+                _ => VTy::Other,
+            },
         },
         // expr? 的静态类型 = 主语 T 侧反解 (打印 f(x)? 所需)
         Expr::Propagate { expr, .. } => match static_vty(c, frame, expr) {
             VTy::Result(t, _) => vty_of_type_name(&c.struct_layouts, &t),
             _ => VTy::Other,
         },
-        // match 表达式的臂绑定不在当前帧 — 静态投影保守回退 Other
-        // (直接打印 match 值被拒; 经声明绑定中转后打印不受影响)
-        Expr::Match { .. } => VTy::Other,
+        // match 的公共值类型由首个产值臂投影。臂绑定只在臂内可见，
+        // 因此必须把 result 的 T/E 临时压入类型作用域；直接在外层帧投影
+        // `ok(v) -> v` 会把 v 误判为 Other，随后把原生 F32 送进 I64 join。
+        Expr::Match { subject, arms, .. } => {
+            let payloads = match static_vty(c, frame, subject) {
+                VTy::Result(ok, err) => Some((
+                    vty_of_type_name(&c.struct_layouts, &ok),
+                    vty_of_type_name(&c.struct_layouts, &err),
+                )),
+                _ => None,
+            };
+            arms.iter()
+                .find_map(|arm| {
+                    let value = match &arm.body {
+                        ArmBody::Value(e) => Some(e.as_ref()),
+                        ArmBody::Block(stmts) => match stmts.last() {
+                            Some(Stmt::ExprStmt { expr, .. }) => Some(expr),
+                            _ => None,
+                        },
+                        ArmBody::Ret(_) => None,
+                    }?;
+                    let mut arm_frame = frame.clone();
+                    arm_frame.scopes.push(HashMap::new());
+                    let mut types = HashMap::new();
+                    if let Some((ok, err)) = &payloads {
+                        types.insert(
+                            arm.binding.clone(),
+                            match arm.ctor {
+                                CtorKind::Ok => ok.clone(),
+                                CtorKind::Err => err.clone(),
+                            },
+                        );
+                    }
+                    arm_frame.locals_vty.push(types);
+                    Some(static_vty(c, &arm_frame, value))
+                })
+                .unwrap_or(VTy::Other)
+        }
         // 方法调用 (Phase 2c): 用户方法回查发射期返回类型表;
         // 内建字符串方法按冻结签名投影 — 链式调用由此逐级流动;
         // 数组内建三件套 (Phase 2d) 按冻结签名投影

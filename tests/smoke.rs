@@ -53,12 +53,13 @@ func i32 main = () -> {
 #[test]
 fn string_interpolation() {
     let src = r#"
-func bool main = () -> {
+func i32 main = () -> {
     var i32 i = 4;
-    return 'n=$i' == 'n=4'
+    val bool ok = 'n=$i' == 'n=4'
+    while ok == false { return 1 }
+    return 0
 }
 "#;
-    // main 返回 bool: true → 退出码 0
     assert_eq!(run("t.as", src).unwrap(), 0);
 }
 
