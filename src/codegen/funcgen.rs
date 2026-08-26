@@ -59,24 +59,13 @@ impl<'m, M: Module> Compiler<'m, M> {
 
     pub(crate) fn import_runtime(&mut self, name: &str) -> AliasResult<FuncId> {
         let contract = runtime_contract(name)?;
-        let available = if self.is_aot {
-            contract.backends.aot
-        } else {
-            contract.backends.jit
-        };
-        if !available {
-            return Err(native_err(
-                Span::default(),
-                format!("内部: runtime 符号 '{}' 不支持当前后端", contract.symbol),
-            ));
-        }
         let sig = contract.signature(self.cc, self.ptr_ty);
         self.module
             .declare_function(contract.symbol, Linkage::Import, &sig)
             .map_err(|e| native_err(Span::default(), format!("内部: runtime 声明失败 {e}")))
     }
 
-    /// 调外部/运行时符号的单返回值调用辅助 (JIT 宿主符号与 AOT shim 同名)
+    /// 调用原生 runtime 符号的单返回值辅助。
     pub(crate) fn call_rt(
         &mut self,
         bcx: &mut FunctionBuilder,
@@ -199,8 +188,7 @@ impl<'m, M: Module> Compiler<'m, M> {
 
     /// 入口 wrapper: Q⑥ 顶层初始化按序求值 (insert-after-eval 可见性),
     /// 随后间接调用 i32 main 闭包并把返回值映射为进程退出码。
-    /// JIT: 名 alias_entry 返回 I64 由宿主读取;
-    /// AOT: 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
+    /// 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
     /// 链接参数 /ENTRY:alias_start (linker.rs 单一拥有者)。
     pub(crate) fn compile_entry(
         &mut self,
@@ -214,27 +202,10 @@ impl<'m, M: Module> Compiler<'m, M> {
                 "内部: sema 未将 main 收紧为 i32",
             ));
         }
-        let mut entry_sig = Signature::new(self.cc);
-        entry_sig.returns.push(AbiParam::new(if self.is_aot {
-            types::I32
-        } else {
-            types::I64
-        }));
+        let entry_sig = Signature::new(self.cc);
         let fid = self
             .module
-            .declare_function(
-                if self.is_aot {
-                    "alias_start"
-                } else {
-                    "alias_entry"
-                },
-                if self.is_aot {
-                    Linkage::Export
-                } else {
-                    Linkage::Local
-                },
-                &entry_sig,
-            )
+            .declare_function("alias_start", Linkage::Export, &entry_sig)
             .map_err(|e| native_err(Span::default(), format!("内部: 入口声明失败 {e}")))?;
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, fid.as_u32()), entry_sig);
@@ -251,8 +222,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         let globals_v = bcx.declare_var(types::I64);
         bcx.def_var(globals_v, gword);
         let abort_ret = bcx.create_block();
-        let abort_ty = if self.is_aot { types::I32 } else { types::I64 };
-        let abort_code = bcx.append_block_param(abort_ret, abort_ty);
+        let _abort_code = bcx.append_block_param(abort_ret, types::I32);
         let mut frame = Frame {
             scopes: vec![HashMap::new()],
             locals_vty: vec![HashMap::new()],
@@ -268,7 +238,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         // 顶层槽位偏移在编译期已知 → 记录供 slot_of 解析 (init 语境)
         frame.init_ctx = true;
 
-        // 名字随项序增长可见 — 镜像解释器逐项插入 (insert-after-eval);
+        // 名字随项序增长可见 — 按源码逐项插入 (insert-after-eval);
         // 方法不是绑定, 不参与初始化序列
         for (binding_index, b) in items
             .iter()
@@ -324,30 +294,21 @@ impl<'m, M: Module> Compiler<'m, M> {
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
         let code_word = norm_load(&mut bcx, raw, &main_ret);
-        if self.is_aot {
-            // 无 CRT 环境: 显式 ExitProcess 传递退出码 (返回值无人接收)
-            let exit_code = bcx.ins().ireduce(types::I32, code_word);
-            let ep = self.import_external("ExitProcess", &[types::I32], None)?;
-            let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
-            bcx.ins().call(epr, &[exit_code]);
-            bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
-        } else {
-            bcx.ins().return_(&[code_word]);
-        }
+        // 无 CRT 环境：原生产物传递完整 i32；CLI 外壳负责 0..255 映射。
+        let exit_code = bcx.ins().ireduce(types::I32, code_word);
+        let ep = self.import_external("ExitProcess", &[types::I32], None)?;
+        let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
+        bcx.ins().call(epr, &[exit_code]);
+        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
 
-        // JIT abort 宿主只记录 AliasError，发射代码沿此块安全退回 Rust；
-        // AOT abort shim 正常不会返回，兜底仍以错误码终止进程。
+        // abort runtime 正常不会返回，兜底仍以错误码终止进程。
         bcx.switch_to_block(abort_ret);
         bcx.seal_block(abort_ret);
-        if self.is_aot {
-            let ep = self.import_external("ExitProcess", &[types::I32], None)?;
-            let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
-            let one = bcx.ins().iconst(types::I32, 1);
-            bcx.ins().call(epr, &[one]);
-            bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
-        } else {
-            bcx.ins().return_(&[abort_code]);
-        }
+        let ep = self.import_external("ExitProcess", &[types::I32], None)?;
+        let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
+        let one = bcx.ins().iconst(types::I32, 1);
+        bcx.ins().call(epr, &[one]);
+        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
         bcx.finalize(self.module.target_config());
         if let Err(ve) = ctx.verify_if(self.module.isa()) {
             eprintln!("[内部验证失败] {}", ve);
@@ -446,7 +407,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         );
     }
 
-    // 直取函数地址 (func_addr) — JIT/Object 双后端通用, 免运行时指针表
+    // 直取函数地址 (func_addr)，免运行时指针表
     let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
     let code = bcx.ins().func_addr(c.ptr_ty, fref);
     let cn = c.import_runtime("alias.closure.new")?;

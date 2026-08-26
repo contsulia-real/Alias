@@ -1,7 +1,7 @@
-//! Phase 5 AOT 奇偶校验 — build 产出的独立可执行文件必须与 JIT 路径
+//! 唯一原生编译管线测试 — build 持久产物与 run 临时产物必须
 //! 对同一源程序产生逐字节一致的三元组 (stdout/stderr/exit)。
 //!
-//! 政策: 期望值来自对 JIT 路径的实际探测 (黄金记录背书), 禁止凭记忆断言。
+//! 政策: 期望值来自冻结黄金记录，禁止凭记忆断言。
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +12,7 @@ static TMP_SEQ: AtomicUsize = AtomicUsize::new(0);
 fn build_and_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
     let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "alias_aot_{}_{n}_{}",
+        "alias_native_build_{}_{n}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -43,10 +43,10 @@ fn build_and_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
     (run.stdout, run.stderr, run.status.code().unwrap_or(-1))
 }
 
-fn jit_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
+fn run_command(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
     let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "alias_jit_{}_{n}_{}",
+        "alias_native_run_{}_{n}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -93,10 +93,10 @@ fn nested_closure_program(depth: usize) -> String {
     )
 }
 
-/// 同一 AOT 产物重复执行，专门捕获依赖地址/时序的间歇性崩溃。
+/// 同一原生产物重复执行，专门捕获依赖地址/时序的间歇性崩溃。
 fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32)> {
     let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("alias_aot_repeat_{}_{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("alias_native_repeat_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("创建临时目录失败");
     let src_path = dir.join("prog.as");
     let exe_path = dir.join("prog.exe");
@@ -113,7 +113,7 @@ fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32
 
     let mut out = Vec::with_capacity(runs);
     for _ in 0..runs {
-        let run = Command::new(&exe_path).output().expect("运行 AOT 产物失败");
+        let run = Command::new(&exe_path).output().expect("运行原生产物失败");
         out.push((run.stdout, run.stderr, run.status.code().unwrap_or(-1)));
     }
     let _ = std::fs::remove_file(&exe_path);
@@ -122,15 +122,43 @@ fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32
     out
 }
 
+/// 架构门禁：run 必须经过链接器。把链接器路径指向不存在文件后，命令必须
+/// 在链接阶段失败；若未来有人塞回进程内执行捷径，本测试会立即暴露。
 #[test]
-fn aot_matches_jit_arithmetic_and_loops() {
-    let src = "func i32 main = () -> {\n    var i32 x = 6;\n    increase x\n    val i32 y = x * 7;\n    return y - 1\n}\n";
-    assert_eq!(build_and_run(src).2, jit_run(src).2);
-    assert_eq!(build_and_run(src).0, jit_run(src).0);
+fn run_requires_the_native_link_step() {
+    let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let dir =
+        std::env::temp_dir().join(format!("alias_native_link_gate_{}_{n}", std::process::id()));
+    std::fs::create_dir(&dir).expect("创建临时目录失败");
+    let source = dir.join("program.as");
+    let missing_linker = dir.join("missing-rust-lld.exe");
+    std::fs::write(&source, "func i32 main = () -> return 0\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_alias"))
+        .args(["run", source.to_str().unwrap()])
+        .env("ALIAS_RUST_LLD", &missing_linker)
+        .output()
+        .expect("启动 Alias 编译器失败");
+
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_dir(dir);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("无法执行链接器"),
+        "run 没有在链接阶段失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
-fn aot_matches_jit_print_int() {
+fn run_matches_build_artifact_for_arithmetic_and_loops() {
+    let src = "func i32 main = () -> {\n    var i32 x = 6;\n    increase x\n    val i32 y = x * 7;\n    return y - 1\n}\n";
+    assert_eq!(build_and_run(src).2, run_command(src).2);
+    assert_eq!(build_and_run(src).0, run_command(src).0);
+}
+
+#[test]
+fn build_artifact_prints_integers() {
     // exit 48 用例的打印版: 输出可观察
     let src = "func i32 main = () -> {\n    var i32 i = 0;\n    for i < 3 {\n        increase i\n        println i\n    }\n    return 0\n}\n";
     let (so, se, code) = build_and_run(src);
@@ -140,14 +168,14 @@ fn aot_matches_jit_print_int() {
 }
 
 #[test]
-fn aot_matches_jit_i32_main_one() {
+fn run_matches_build_artifact_for_i32_main_one() {
     let src = "func i32 main = () -> return 1\n";
     assert_eq!(build_and_run(src).2, 1);
-    assert_eq!(jit_run(src).2, 1);
+    assert_eq!(run_command(src).2, 1);
 }
 
 #[test]
-fn aot_div_zero_aborts_with_span() {
+fn build_artifact_div_zero_aborts_with_span() {
     // 除零: 运行时错误 → stderr 带 span + 退出码 1 (span-ID 表数据段回查)
     let src = "func i32 main = () -> {\n    val i32 z = 0;\n    return 5 / z\n}\n";
     let (_, se, code) = build_and_run(src);
@@ -160,7 +188,7 @@ fn aot_div_zero_aborts_with_span() {
 }
 
 #[test]
-fn methods_aot_same_binary_is_stable() {
+fn methods_same_native_binary_is_stable() {
     let expected = "忠犬\nABC\nabc\n3\nhi\n[]\n[plain]\n3\nHi!\n5\n7\nc(7)\n7\n".as_bytes();
     for (index, (stdout, stderr, code)) in
         build_once_and_run_many(include_str!("../demos/methods.as"), 100)
@@ -174,39 +202,39 @@ fn methods_aot_same_binary_is_stable() {
 }
 
 #[test]
-fn aot_matches_jit_wide_and_float_display() {
+fn run_matches_build_artifact_for_wide_and_float_display() {
     let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = max + one\n    val u64 b = to_u64(-1)\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
-    let jit = jit_run(src);
+    let run = run_command(src);
     assert!(
-        String::from_utf8_lossy(&jit.0).contains("-9223372036854775808\n18446744073709551615\n")
+        String::from_utf8_lossy(&run.0).contains("-9223372036854775808\n18446744073709551615\n")
     );
-    assert_eq!(build_and_run(src), jit);
+    assert_eq!(build_and_run(src), run);
 }
 
 #[test]
-fn aot_matches_jit_non_finite_float_display() {
+fn run_matches_build_artifact_for_non_finite_float_display() {
     let src = "func i32 main = () -> {\n    val f64 zero = 0.0\n    val f64 one = 1.0\n    println (zero / zero)\n    println (one / zero)\n    println (-one / zero)\n    return 0\n}\n";
-    let jit = jit_run(src);
-    assert_eq!(jit.0, b"NaN\ninf\n-inf\n");
-    assert_eq!(build_and_run(src), jit);
+    let run = run_command(src);
+    assert_eq!(run.0, b"NaN\ninf\n-inf\n");
+    assert_eq!(build_and_run(src), run);
 }
 
 #[test]
-fn aot_matches_jit_f32_result_match_and_array() {
+fn run_matches_build_artifact_for_f32_result_match_and_array() {
     let src = "func result<f32, string> get = () -> {\n    val f32 initial = 1.25\n    return ok(initial)\n}\nfunc i32 main = () -> {\n    val result<f32, string> r = get()\n    val f32 zero = 0.0\n    val f32 x = match r {\n        err(e) -> zero\n        ok(v) -> v\n    }\n    var array<f32> values = [x]\n    val f32 middle = 1.5\n    val f32 last = 2.5\n    values.push(middle)\n    values.push(last)\n    println values[0]\n    println values[1]\n    println values.pop()\n    return 0\n}\n";
-    assert_eq!(build_and_run(src), jit_run(src));
+    assert_eq!(build_and_run(src), run_command(src));
 }
 
 #[test]
-fn aot_matches_jit_mixed_struct_layout_and_self_abi() {
+fn run_matches_build_artifact_for_mixed_struct_layout_and_self_abi() {
     let src = "struct mixed {\n    var i8 small = 1\n    val f64 wide = 2.5\n    var i16 tail = 3\n    val string tag = 'm'\n}\npublic func string mixed.label = () -> return '${self.tag}:${self.small}:${self.wide}:${self.tail}'\nfunc i32 main = () -> {\n    val mixed value = mixed()\n    value.small = 7\n    value.tail = 9\n    println value.label()\n    return 0\n}\n";
-    let jit = jit_run(src);
-    assert_eq!(jit.2, 0);
-    assert_eq!(build_and_run(src), jit);
+    let run = run_command(src);
+    assert_eq!(run.2, 0);
+    assert_eq!(build_and_run(src), run);
 }
 
 #[test]
-fn aot_matches_jit_layout_permutation_matrix() {
+fn run_matches_build_artifact_for_layout_permutation_matrix() {
     let src = r#"
 struct a { val i8 x = 7 val f64 y = 2.5 val i16 z = 9 val string s = 'a' }
 struct b { val string s = 'b' val i8 x = 8 val f32 y = 1.25 val i64 z = 99 }
@@ -224,13 +252,13 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    let jit = jit_run(src);
-    assert_eq!(jit.2, 0);
-    assert_eq!(build_and_run(src), jit);
+    let run = run_command(src);
+    assert_eq!(run.2, 0);
+    assert_eq!(build_and_run(src), run);
 }
 
 #[test]
-fn aot_matches_jit_numeric_boundary_matrix() {
+fn run_matches_build_artifact_for_numeric_boundary_matrix() {
     let src = r#"
 func i32 main = () -> {
     val i8 a = 127
@@ -264,26 +292,26 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    let jit = jit_run(src);
+    let run = run_command(src);
     assert_eq!(
-        jit.0,
+        run.0,
         b"-128\n0\n-32768\n0\n-2147483648\n-9223372036854775808\n0\n"
     );
-    assert_eq!(build_and_run(src), jit);
+    assert_eq!(build_and_run(src), run);
 }
 
 #[test]
-fn aot_matches_jit_deep_transitive_closure_chain() {
+fn run_matches_build_artifact_for_deep_transitive_closure_chain() {
     let depth = 16;
     let src = nested_closure_program(depth);
-    let jit = jit_run(&src);
-    assert_eq!(jit.2, 7 + (1..=depth as i32).sum::<i32>());
-    assert_eq!(build_and_run(&src), jit);
+    let run = run_command(&src);
+    assert_eq!(run.2, 7 + (1..=depth as i32).sum::<i32>());
+    assert_eq!(build_and_run(&src), run);
 }
 
 #[test]
-fn aot_demo_corpus_parity() {
-    // 机械枚举 demos/ 下可运行语料, 双形态三元组逐字节一致。
+fn run_and_build_demo_corpus_match() {
+    // 机械枚举 demos/ 下可运行语料，两条 CLI 工作流三元组逐字节一致。
     // forward-spec demos (recursion/file_wc/producer_consumer/helper)
     // 在 sema 处以相同错误拒绝, 天然满足 parity — 但 build 的错误
     // 报告发生在编译器进程而非产物, 故此处仅校验 count_to_ten 与
@@ -305,10 +333,10 @@ fn aot_demo_corpus_parity() {
         {
             runnable += 1;
             let src = std::fs::read_to_string(&path).unwrap();
-            let jit = jit_run(&src);
-            let aot = build_and_run(&src);
-            assert_eq!(aot.0, jit.0, "{name} stdout 不一致");
-            assert_eq!(aot.2, jit.2, "{name} exit 不一致");
+            let run = run_command(&src);
+            let built = build_and_run(&src);
+            assert_eq!(built.0, run.0, "{name} stdout 不一致");
+            assert_eq!(built.2, run.2, "{name} exit 不一致");
         }
     }
     assert!(runnable >= 2, "可运行 demo 数量异常: {runnable}");

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// aot_shim — AOT 运行时 shim 区: kernel32 符号契约的 IR 实现。
-// 与 host.rs (JIT 宿主) 逐符号对齐; 发射顺序必须先于 compile_program
+// native_runtime — 唯一原生运行时: kernel32 符号契约的 IR 实现。
+// 发射顺序必须先于 compile_program
 // (用户代码 Import 声明与同名 Export 定义经 cranelift-module 合并)。
 // ---------------------------------------------------------------------------
 use super::*;
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// ASCII 空白字符集 (trim 判定)
 const TRIM_SET: &[u8] = b" \t\r\n";
 // ---------------------------------------------------------------------------
-// AOT 运行时 shim 区 — 与 JIT 宿主函数逐符号对齐 (模块头契约)
+// 原生运行时区 (模块头契约)
 //
 // 依赖面: kernel32.lib (GetStdHandle/WriteFile/ExitProcess/HeapAlloc/
 // GetProcessHeap/RtlMoveMemory)。
@@ -28,8 +28,8 @@ const TRIM_SET: &[u8] = b" \t\r\n";
 // 同名 Export 定义经 cranelift-module 符号合并为同一 FuncId。
 // ---------------------------------------------------------------------------
 
-/// AOT 外部符号集 (链接期经导入库解析)
-struct AotExterns {
+/// 原生程序外部符号集 (链接期经导入库解析)
+struct NativeExterns {
     get_std_handle: FuncId,
     write_file: FuncId,
     exit_process: FuncId,
@@ -80,12 +80,6 @@ fn declare_runtime_shim<M: Module>(
     &'static RuntimeContract,
 )> {
     let contract = runtime_contract(name)?;
-    if !contract.backends.aot {
-        return Err(native_err(
-            Span::default(),
-            format!("内部: runtime '{}' 没有 AOT 契约", contract.symbol),
-        ));
-    }
     let sig = contract.signature(c.cc, c.ptr_ty);
     let fid = c
         .module
@@ -94,17 +88,16 @@ fn declare_runtime_shim<M: Module>(
     if !c.runtime_defined.insert(contract.symbol) {
         return Err(native_err(
             Span::default(),
-            format!("内部: AOT shim 重复定义 '{}'", contract.symbol),
+            format!("内部: runtime 重复定义 '{}'", contract.symbol),
         ));
     }
     Ok((fid, sig, contract))
 }
 
-fn validate_aot_runtime_coverage<M: Module>(c: &Compiler<'_, M>) -> AliasResult<()> {
+fn validate_native_runtime_coverage<M: Module>(c: &Compiler<'_, M>) -> AliasResult<()> {
     validate_contract_table().map_err(|msg| native_err(Span::default(), msg))?;
     let expected = RUNTIME_CONTRACTS
         .iter()
-        .filter(|contract| contract.backends.aot)
         .map(|contract| contract.symbol)
         .collect::<std::collections::HashSet<_>>();
     if c.runtime_defined != expected {
@@ -119,7 +112,7 @@ fn validate_aot_runtime_coverage<M: Module>(c: &Compiler<'_, M>) -> AliasResult<
             .collect::<Vec<_>>();
         return Err(native_err(
             Span::default(),
-            format!("内部: AOT shim 与 runtime 契约表不一致，缺失 {missing:?}，多余 {extra:?}"),
+            format!("内部: 原生 runtime 与契约表不一致，缺失 {missing:?}，多余 {extra:?}"),
         ));
     }
     Ok(())
@@ -137,7 +130,7 @@ pub(crate) fn emit_is_trim_byte(bcx: &mut FunctionBuilder, b: Value) -> Value {
 
 /// ASCII 大小写映射 shim (upper/lower 共用体): 逐字节范围 icmp + select
 /// 平移, 写入新缓冲; 空串短路产出 null 数据指针块 (§五契约)。
-/// 与 JIT 宿主 str_map_ascii 同语义 — 双后端逐字节对齐。
+/// upper/lower 共用同一实现，输出必须逐字节稳定。
 pub(crate) fn emit_case_shim<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
@@ -366,7 +359,7 @@ fn static_string_block<M: Module>(
 }
 
 /// 纯 IR 浮点显示：规范化为一位整数、六位四舍五入有效小数和十进制指数，
-/// 例如 12.34 -> 1.234e1。F32 先按其真实位宽升档，双后端共用同一算法。
+/// 例如 12.34 -> 1.234e1。F32 先按其真实位宽升档后进入同一算法。
 fn emit_float_display_shim<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
@@ -701,7 +694,7 @@ pub(crate) fn define_span_data<M: Module>(
 fn emit_span_abort<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
-    ext: &AotExterns,
+    ext: &NativeExterns,
     span_data: cranelift_module::DataId,
     static_ids: &HashMap<&str, cranelift_module::DataId>,
     suffix: &str,
@@ -780,8 +773,8 @@ fn emit_span_abort<M: Module>(
         .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
 }
 
-pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
-    let ext = AotExterns {
+pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
+    let ext = NativeExterns {
         get_std_handle: c.import_external("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
         write_file: c.import_external(
             "WriteFile",
@@ -1066,7 +1059,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         true
     });
 
-    // ---- 内建字符串方法 (Phase 2c): 与 JIT 宿主函数同符号同契约 ----
+    // ---- 内建字符串方法 (Phase 2c) ----
     shim!(c, "alias.str.len", |bcx, a| {
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let t = bcx.ins().ireduce(types::I32, l);
@@ -1185,7 +1178,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         true
     });
 
-    // ---- 内建数组方法 (Phase 2d): 与 JIT 宿主函数同符号同契约 ----
+    // ---- 内建数组方法 (Phase 2d) ----
     // 头块 {data_ptr, len, cap} 24 字节; pop 空守卫在发射层 — shim 按契约假定非空
     shim!(c, "alias.arr.new", |bcx, a| {
         let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
@@ -1589,5 +1582,5 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         18,
     )?;
 
-    validate_aot_runtime_coverage(c)
+    validate_native_runtime_coverage(c)
 }

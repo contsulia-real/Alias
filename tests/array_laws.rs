@@ -8,8 +8,8 @@
 //! - 内建 len/push/pop 编译器提供; pop 空数组运行时中止
 //!
 //! 列号语义: token span col = 可视列-1 (lexer.rs span_here 先例)。
-//! JIT 库路径把运行时中止转成 AliasError；这里仍走 CLI 子进程，以逐字节
-//! 锁定用户可见的 stderr 与退出码 (native_parity 先例)。
+//! 运行时中止只能由已编译进程产生；这里走 CLI 子进程，逐字节锁定
+//! 用户可见的 stderr 与退出码 (native_parity 先例)。
 //!
 //! allow: SIZE_OK — 法律表为纯数据矩阵 (项目先例 sema_laws.rs 同注)。
 

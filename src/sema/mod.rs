@@ -6,7 +6,7 @@
 //! 铁律 (违者即宪法违规):
 //! - 推断类型永不外泄到语法或诊断 — 用户只见到声明类型与运行时类型名 (D3)
 //! - 迁移检查的中文消息逐字节保留, span 与运行时原报错一致 (D4)
-//! - 解释器仍是 sema 所接受程序的行为权威; 运行时检查原样保留, Phase 4 才删
+//! - sema 通过后交给唯一原生编译管线；运行时检查由生成代码与 runtime 承担
 //! - 单错误契约: 首个诊断即返回, 与迁移前 fail-fast 求值顺序一致
 //!
 //! 模块划分 (纯机械拆分, 无逻辑改动):
@@ -113,7 +113,7 @@ struct Checker {
     methods: HashMap<String, HashMap<String, MethodInfo>>,
 }
 
-/// Phase 1 入口: 对整个 Program 做全量静态检查。通过则程序交由解释器执行。
+/// 对整个 Program 做全量静态检查。通过后交给原生代码生成器。
 pub fn check(program: &Program) -> AliasResult<()> {
     let mut ck = Checker {
         fn_ret: Vec::new(),

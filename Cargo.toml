@@ -3,13 +3,12 @@ name = "alias"
 version = "0.1.0"
 edition = "2021"
 
-# Alias 编译器: lexer -> parser -> sema -> Cranelift 原生代码生成 (进程内 JIT 执行)
-# Phase 4 完成: 解释器已物理删除, 编译器为唯一后端; 黄金记录见 tests/golden.rs
+# Alias 编译器: lexer -> parser -> sema -> Cranelift COFF -> rust-lld -> 原生 exe
+# 所有执行都先完成目标文件生成与链接；不存在进程内执行后端。
 
 [dependencies]
 cranelift-codegen = "0.135.0"
 cranelift-frontend = "0.135.0"
-cranelift-jit = "0.135.0"
 cranelift-module = "0.135.0"
 cranelift-native = "0.135.0"
 cranelift-object = "0.135.0"

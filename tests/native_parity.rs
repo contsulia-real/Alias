@@ -1,6 +1,6 @@
 //! Phase 4 编译器黄金基线测试 — 机械枚举 demos/ 语料 + 定向黄金用例。
 //!
-//! 迁移后仅存编译后端 (Phase 4 删除解释器), P3 的双后端 diff 不再可能;
+//! 当前只有 COFF + rust-lld 原生编译后端；
 //! 按迁移政策改为**黄金基线断言**: 语料仍由 `std::fs::read_dir` 机械枚举
 //! (禁手写列表), 每个 demo 断言冻结的三元组 (stdout 字节/stderr 字节/
 //! 退出码)。基线来自 Phase 4 切换时的实际探测 — 新增 demo 必须显式
@@ -45,15 +45,14 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: b"",
             exit: 11,
         },
-        // Phase 2a struct 演练夹具 (M23; 探测冻结 — JIT/AOT 双形态 parity 同源)
+        // Phase 2a struct 演练夹具 (M23; 探测冻结)
         Baseline {
             file: "structs.as",
             stdout: b"42\n7\n100\n3\n555\n565\n565\n9\n565\ntrue\n565\n<struct>\n",
             stderr: b"",
             exit: 0,
         },
-        // Phase 2b result/match/?/转义 演练夹具 (M26; 探测冻结 — JIT/AOT
-        // 双形态 parity 同源, 见 aot_parity 语料)
+        // Phase 2b result/match/?/转义演练夹具 (M26; 探测冻结)
         Baseline {
             file: "result_match.as",
             stdout: "100/4 = 25\nprobe(5) = 20\nprobe(0) 出错: n 为零\n3\n999\n行数不能为负\n<ok>\n<err>\ntab:[\t]\nnl:[\n]\nquotes:['\"]\nbackslash:[\\]\nNUL 可比较: true\nn 为零\n".as_bytes(),
@@ -68,14 +67,14 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: "错误 @ 34:10 — 未定义的绑定 'open'\n".as_bytes(),
             exit: 1,
         },
-        // Phase 2c 演练夹具 (M31/M32; 探测冻结 — JIT/AOT 双形态 parity 同源)
+        // Phase 2c 演练夹具 (M31/M32; 探测冻结)
         Baseline {
             file: "methods.as",
             stdout: "忠犬\nABC\nabc\n3\nhi\n[]\n[plain]\n3\nHi!\n5\n7\nc(7)\n7\n".as_bytes(),
             stderr: b"",
             exit: 0,
         },
-        // Phase 2d array<T> 演练夹具 (M36; 探测冻结 — JIT/AOT 双形态 parity 同源)
+        // Phase 2d array<T> 演练夹具 (M36; 探测冻结)
         Baseline {
             file: "arrays.as",
             stdout: "10\n30\n6\n7\n5\n5\n4\n4\n5\n99\n5\n2\n3\n50\n忠\n3\n犬bc\n<array>\n".as_bytes(),

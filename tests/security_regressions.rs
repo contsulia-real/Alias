@@ -2,6 +2,24 @@
 
 use alias::run;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static CASE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+fn run_cli(src: &str) -> std::process::Output {
+    let seq = CASE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("alias-security-{}-{seq}", std::process::id()));
+    std::fs::create_dir(&dir).expect("创建临时目录失败");
+    let source = dir.join("case.as");
+    std::fs::write(&source, src).expect("写入临时源码失败");
+    let output = Command::new(env!("CARGO_BIN_EXE_alias"))
+        .args(["run", source.to_str().unwrap()])
+        .output()
+        .expect("启动 Alias 编译器失败");
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_dir(dir);
+    output
+}
 
 #[test]
 fn narrow_shadow_uses_the_inner_cell_type() {
@@ -22,17 +40,18 @@ fn empty_string_and_empty_array_paths_do_not_dereference_null() {
 }
 
 #[test]
-fn runtime_abort_returns_an_error_without_killing_the_host() {
+fn runtime_abort_terminates_only_the_compiled_program() {
     let bad = "func i32 main = () -> return 1 / 0\n";
-    let err = run("bad.as", bad).expect_err("除零必须报错");
-    assert_eq!(err.msg, "除以零");
+    let output = run_cli(bad);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stderr, "错误 @ 1:29 — 除以零\n".as_bytes());
 
     let good = "func i32 main = () -> return 7\n";
     assert_eq!(run("good.as", good).unwrap(), 7);
 }
 
 #[test]
-fn concurrent_jit_runtime_errors_do_not_mix_span_tables() {
+fn concurrent_native_compilations_keep_span_tables_isolated() {
     let threads = (0..12)
         .map(|padding| {
             std::thread::spawn(move || {
@@ -40,15 +59,18 @@ fn concurrent_jit_runtime_errors_do_not_mix_span_tables() {
                     "{}func i32 main = () -> return 1 / 0\n",
                     "\n".repeat(padding)
                 );
-                let err = run("concurrent.as", &src).expect_err("除零必须报错");
-                (padding + 1, err)
+                let output = run_cli(&src);
+                (padding + 1, output)
             })
         })
         .collect::<Vec<_>>();
     for thread in threads {
-        let (line, err) = thread.join().unwrap();
-        assert_eq!(err.msg, "除以零");
-        assert_eq!(err.span.line as usize, line);
+        let (line, output) = thread.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("错误 @ {line}:29 — 除以零\n")
+        );
     }
 }
 

@@ -365,7 +365,7 @@ pub(crate) fn emit_expr<M: Module>(
         }
         Expr::Call { callee, args, span } => emit_call(c, bcx, frame, callee, args, *span),
         // Phase 2c: 静态分派 — 接收者字为首个实参, 直调内部函数;
-        // 内建字符串方法落运行时符号 (双后端同契约)
+        // 内建字符串方法落统一 runtime 符号
         Expr::MethodCall {
             recv,
             name,
@@ -835,7 +835,7 @@ pub(crate) fn str_literal_handle<M: Module>(
 
 /// 按静态类型把在途值 display 成字符串块 (Value::display 逐字节规则)。
 /// 数值族: 窄宽整数复用 i32 通道 (规范形已在值域内); u32/u64 走无符号
-/// 通道; 浮点双后端同一定点格式 (6 位小数去尾零 — 消除跨后端打印不对称)。
+/// 通道；浮点使用统一格式 (6 位小数去尾零)。
 pub(crate) fn display_word<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -993,7 +993,6 @@ fn call_closure<M: Module>(
     let sig_ref = bcx.func.import_signature(sig);
     let inst = bcx.ins().call_indirect(sig_ref, code, &words);
     let raw = first_result(bcx, inst);
-    propagate_runtime_failure(c, bcx, frame)?;
     Ok(norm_load(bcx, raw, ret_vty))
 }
 
@@ -1013,29 +1012,6 @@ fn jump_zero_return(bcx: &mut FunctionBuilder, frame: &Frame) {
         bcx.ins().iconst(ty, 0)
     };
     bcx.ins().jump(rb, &[BlockArg::Value(zero)]);
-}
-
-/// 被调函数若已记录 JIT 运行时错误，当前函数立即以零值退栈；AOT 的
-/// abort shim 自行 ExitProcess，因此无需额外检查。
-fn propagate_runtime_failure<M: Module>(
-    c: &mut Compiler<M>,
-    bcx: &mut FunctionBuilder,
-    frame: &Frame,
-) -> AliasResult<()> {
-    if c.is_aot {
-        return Ok(());
-    }
-    let failed = c.call_rt(bcx, "alias.runtime.failed", &[])?;
-    let bad = bcx.ins().icmp_imm_s(IntCC::NotEqual, failed, 0);
-    let abort_b = bcx.create_block();
-    let ok_b = bcx.create_block();
-    bcx.ins().brif(bad, abort_b, &[], ok_b, &[]);
-    bcx.seal_block(abort_b);
-    bcx.seal_block(ok_b);
-    bcx.switch_to_block(abort_b);
-    jump_zero_return(bcx, frame);
-    bcx.switch_to_block(ok_b);
-    Ok(())
 }
 
 /// 转换内建名 → 目标静态投影 (与 sema conv_builtin_ty 同名单集)
@@ -1272,7 +1248,7 @@ pub(crate) fn emit_method_call<M: Module>(
 ) -> AliasResult<Value> {
     let rv = emit_expr(c, bcx, frame, recv)?;
     let svt = static_vty(c, frame, recv);
-    // 数组内建三件套 (Phase 2d): len/push/pop 落运行时符号 (双后端同契约);
+    // 数组内建三件套 (Phase 2d): len/push/pop 落统一 runtime 符号;
     // 元素步长按元素类型; pop 的空数组守卫在发射层 (span-ID 中止存根)
     if let VTy::Array(elem) = &svt {
         // 统一 8 字节步长 (P3a 布局简化裁决, 同 ArrayLit)
@@ -1334,7 +1310,6 @@ pub(crate) fn emit_method_call<M: Module>(
         }
         let inst = bcx.ins().call(fref, &words);
         let raw = first_result(bcx, inst);
-        propagate_runtime_failure(c, bcx, frame)?;
         return Ok(norm_load(bcx, raw, &ret_vty));
     }
     if tname == "string" {

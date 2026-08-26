@@ -1,4 +1,4 @@
-//! 后端破坏性测试：固定种子随机 AST、边界值、深层闭包与并发 JIT。
+//! 原生编译破坏性测试：固定种子随机 AST、边界值、深层闭包与并发编译执行。
 
 use alias::run;
 
@@ -140,7 +140,7 @@ fn deep_transitive_closure_capture_chain_is_stable() {
 }
 
 #[test]
-fn concurrent_successful_jit_runs_keep_values_isolated() {
+fn concurrent_native_runs_keep_values_isolated() {
     let workers = (0..16)
         .map(|id| {
             std::thread::spawn(move || {

@@ -1,4 +1,4 @@
-//! Alias 原生代码生成后端 — Cranelift 双形态: JIT (进程内执行) + AOT (COFF 目标文件)。
+//! Alias 唯一原生代码生成后端 — Cranelift 发射 COFF，rust-lld 链接为 exe。
 //!
 //! 所有权律 (迁移计划依赖清单): 本模块是 cranelift-* API 的**唯一触点**;
 //! ast/sema/lib/linker 不见任何 cranelift 类型。
@@ -21,7 +21,7 @@
 //!   {code,env} 16 字节, env = 捕获单元格指针数组 (恒 8B/槽)。
 //!   函数值的参数/返回投影随词法作用域流动，不按全局名字猜签名。
 //! - **字符串 = 泄漏 16 字节块 {data_ptr: u64, len: u64}**; data_ptr 为 null
-//!   当且仅当 len = 0。JIT 宿主函数与 AOT shim 区实现同一符号契约
+//!   当且仅当 len = 0。原生 runtime 区实现统一符号契约
 //!   (spec-notes §五): alias.str.new/concat/cmp、alias.display.*、
 //!   alias.print*/println.*、alias.cell.new、alias.env.new、
 //!   alias.globals.new、alias.closure.new、alias.abort_div。
@@ -41,7 +41,7 @@
 //!   容量时换新缓冲 (2x 或 +1) 复制旧元素, 旧块泄漏 (泄漏即 GC);
 //!   下标读带越界守卫 → span-ID 中止存根; 打印 → 固定 "<array>"。
 //!
-//! AOT 形态 (Phase 5): compile_to_object 发射 x86_64 COFF;
+//! 原生编译形态: compile_to_object 发射 x86_64 COFF;
 //! 运行时 shim 区在同一 object 内定义 (Export), 仅经 kernel32.lib
 //! 解析 GetStdHandle/WriteFile/ExitProcess/HeapAlloc/GetProcessHeap/
 //! RtlMoveMemory。入口为 alias_start 并显式 ExitProcess，无 CRT。
@@ -49,18 +49,17 @@
 //! — console 程序无碍; SEH 展开穿越 Alias 帧暂不支持。
 //!
 //! 已知有意缺口 (MIGRATION.md M10/M12): 函数体对未定义名的引用在编译期
-//! 报错 (解释器为运行时); 打印静态类型不可知的表达式被拒绝。
+//! 报错；打印静态类型不可知的表达式被拒绝。
 //!
 //! allow: SIZE_OK — 依赖清单强制 codegen/ 为 cranelift 唯一拥有者。
 
-// 子模块划分 (纯机械拆分): host=JIT 宿主实现; emit=表达式/语句发射;
+// 子模块划分 (纯机械拆分): emit=表达式/语句发射;
 // funcgen=函数/方法/闭包定义与捕获扫描; types_proj=静态类型投影;
-// aot_shim=AOT 运行时 shim 区 (kernel32 符号契约)。
+// native_runtime=原生运行时区 (kernel32 符号契约)。
 mod abi;
-mod aot_shim;
 mod emit;
 mod funcgen;
-mod host;
+mod native_runtime;
 mod runtime;
 mod types_proj;
 
@@ -75,27 +74,16 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) use abi::*;
-use aot_shim::{define_span_data, emit_runtime_shims};
 pub(crate) use emit::*;
 pub(crate) use funcgen::*;
-use host::register_host_fns;
+use native_runtime::{define_span_data, emit_native_runtime};
 pub(crate) use runtime::*;
 pub(crate) use types_proj::*;
-
-/// 除零中止存根的 span 回查表: ID → (line, col)。
-/// 仅 JIT 路径使用 (宿主 abort 读); AOT 路径以只读数据段内嵌同一表
-/// (见 define_span_data / abort shim)。
-pub(crate) static SPAN_TABLE: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
-/// JIT 运行时错误通过返回通道交还给库调用者；不得从宿主函数内 process::exit。
-pub(crate) static RUNTIME_ERROR: std::sync::Mutex<Option<AliasError>> = std::sync::Mutex::new(None);
-/// SPAN_TABLE/RUNTIME_ERROR 是单次执行上下文，串行化 execute 避免并发串案。
-static EXECUTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 名字解析: 局部 SSA 变量(持单元格指针)或顶层槽区偏移。
 #[derive(Clone, Copy)]
@@ -129,7 +117,7 @@ pub(crate) struct Frame {
 
 /// 顶层初始化器语境可见性由 env.scopes[0] 渐增插入实现 (insert-after-eval),
 /// 函数体语境则全量可见 — 与迁移前逐项插入语义一致。
-/// M: JITModule | ObjectModule — 发射机器经 Module trait 单份共享。
+/// M 当前为 ObjectModule；保留 Module 泛型使发射器不依赖具体对象容器。
 pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) module: &'m mut M,
     pub(crate) cc: cranelift_codegen::isa::CallConv,
@@ -148,8 +136,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) fn_rets: Vec<VTy>,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
-    /// 除零守卫 span 表: ID = 下标。JIT 定稿后拷入 SPAN_TABLE;
-    /// AOT 序列化为只读数据段供 abort shim 回查。
+    /// 除零守卫 span 表: ID = 下标，序列化为只读数据段供 abort runtime 回查。
     pub(crate) span_table: Vec<(u32, u32)>,
     /// 结构体布局表 (Phase 2a): 由 Program 项预扫描登记
     struct_layouts: StructTable,
@@ -160,9 +147,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     method_rets: HashMap<(String, String), VTy>,
     /// 方法混合签名 (Phase 3a): (接收者, 名) → (参数类型含 self, 返回类型)
     method_sigs: HashMap<(String, String), (Vec<VTy>, VTy)>,
-    /// AOT 模式: 入口为导出的 main(I32); JIT: alias_entry(I64) 宿主读取
-    is_aot: bool,
-    /// AOT shim 实际定义集合；完成发射后与 runtime 契约表做精确覆盖校验。
+    /// 原生 runtime 实际定义集合；完成发射后与契约表做精确覆盖校验。
     runtime_defined: HashSet<&'static str>,
 }
 
@@ -175,72 +160,8 @@ pub(crate) struct PendingFn {
     ret_vty: VTy,
 }
 
-pub fn execute(program: Program) -> AliasResult<i32> {
-    let _run_guard = EXECUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // import 只解析不执行 — 通知文本与黄金记录逐字节一致 (spec-notes §三.5)
-    if !program.imports.is_empty() {
-        eprintln!(
-            "[alias] 注意: {} 条 import 已解析但标准库尚未接入 (Phase 5 前)",
-            program.imports.len()
-        );
-    }
-    SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    *RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
-    let flag_builder = settings::builder();
-    let isa = cranelift_native::builder()
-        .map_err(|e| native_err(Span::default(), format!("ISA 探测失败: {e}")))?
-        .finish(settings::Flags::new(flag_builder))
-        .map_err(|e| native_err(Span::default(), format!("ISA 构造失败: {e}")))?;
-    let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
-    register_host_fns(&mut jb);
-    let mut module = JITModule::new(jb);
-
-    let mut c = Compiler {
-        cc: module.isa().default_call_conv(),
-        ptr_ty: module.isa().pointer_type(),
-        module: &mut module,
-        globals_final: HashMap::new(),
-        top_slots: Vec::new(),
-        global_bytes: 0,
-        next_fid: 0,
-        fn_ids: Vec::new(),
-        fn_rets: Vec::new(),
-        pending: VecDeque::new(),
-        str_data: HashMap::new(),
-        span_table: Vec::new(),
-        struct_layouts: HashMap::new(),
-        methods: HashMap::new(),
-        method_rets: HashMap::new(),
-        method_sigs: HashMap::new(),
-        is_aot: false,
-        runtime_defined: HashSet::new(),
-    };
-
-    let entry_fid = compile_program(&mut c, &program.items)?;
-    let span_table = std::mem::take(&mut c.span_table);
-    c.module
-        .finalize_definitions()
-        .map_err(|e| native_err(Span::default(), format!("JIT 定稿失败: {e}")))?;
-    *SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner()) = span_table;
-
-    // 定稿已完成; 模块存活至本次调用结束
-    let entry_ptr = c.module.get_finalized_function(entry_fid);
-    let entry: extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry_ptr) };
-    let code = entry() as i32;
-    if let Some(err) = RUNTIME_ERROR
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-    {
-        Err(err)
-    } else {
-        Ok(code)
-    }
-}
-
-/// AOT: 编译为 x86_64 COFF 目标文件字节流。
-/// 运行时 shim 区在同一 object 内定义 (Export), 经 kernel32 解析;
+/// 编译为 x86_64 COFF 目标文件字节流。
+/// 原生 runtime 在同一 object 内定义 (Export), 经 kernel32 解析;
 /// 产物入口为无 CRT 的 alias_start，并显式调用 ExitProcess。
 pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
     // import 只解析不执行 — 通知文本与黄金记录逐字节一致 (spec-notes §三.5)
@@ -281,11 +202,10 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
         methods: HashMap::new(),
         method_rets: HashMap::new(),
         method_sigs: HashMap::new(),
-        is_aot: true,
         runtime_defined: HashSet::new(),
     };
 
-    emit_runtime_shims(&mut c)?;
+    emit_native_runtime(&mut c)?;
     compile_program(&mut c, &program.items)?;
 
     let span_table = std::mem::take(&mut c.span_table);
@@ -298,7 +218,7 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
         .map_err(|e| native_err(Span::default(), format!("COFF 发射失败: {e}")))
 }
 
-/// 双后端共享编排: pass1 全局槽位 → pass2 函数体 → 入口 wrapper → 排空派生队列。
+/// 原生编译编排: pass1 全局槽位 → pass2 函数体 → 入口 wrapper → 排空派生队列。
 fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasResult<FuncId> {
     // ---- pass 0: 结构体布局由 ABI 层两阶段统一计算 ----
     c.struct_layouts = build_struct_layouts(items);

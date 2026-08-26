@@ -9,6 +9,8 @@ pub mod parser;
 pub mod sema;
 
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 编译期/运行期错误的统一载体。
 /// 宪法要求"报错提供详细信息": 从第一天起就带 file:line:col。
@@ -34,25 +36,85 @@ impl fmt::Display for AliasError {
         if self.span == Span::default() {
             write!(f, "{}", self.msg)
         } else {
-            write!(f, "错误 @ {}:{} — {}", self.span.line, self.span.col, self.msg)
+            write!(
+                f,
+                "错误 @ {}:{} — {}",
+                self.span.line, self.span.col, self.msg
+            )
         }
     }
 }
 
 pub type AliasResult<T> = Result<T, AliasError>;
 
-/// 唯一编排入口: lex → parse → sema → 原生代码生成 (进程内 JIT 执行)。
-/// Phase 4 起编译器为唯一后端; 函数签名与迁移前逐字一致 (smoke.rs 依赖)。
-pub fn run(_path: &str, src: &str) -> AliasResult<i32> {
-    let tokens = lexer::lex(src)?;
-    let program = parser::parse(tokens)?;
-    sema::check(&program)?;
-    codegen::execute(program)
+static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct TempExecutable {
+    dir: PathBuf,
+    path: PathBuf,
 }
 
-/// AOT 编排: 同一前端管线 → COFF 目标文件 → rust-lld 链接出独立可执行文件。
-/// 成功时产物行为与 run() 对同一源程序的行为逐字节一致 (tests/aot_parity.rs)。
-pub fn build(_path: &str, src: &str, out_exe: &std::path::Path) -> AliasResult<()> {
+impl TempExecutable {
+    fn create() -> AliasResult<Self> {
+        let base = std::env::temp_dir();
+        for _ in 0..128 {
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = base.join(format!(
+                "alias_run_{}_{tick:032x}_{seq:016x}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    let path = dir.join("program.exe");
+                    return Ok(Self { dir, path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(AliasError {
+                        msg: format!("无法创建临时编译目录 {}: {e}", dir.display()),
+                        span: Span::default(),
+                    })
+                }
+            }
+        }
+        Err(AliasError {
+            msg: "无法分配唯一临时编译目录".into(),
+            span: Span::default(),
+        })
+    }
+}
+
+impl Drop for TempExecutable {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// 编译并运行：完整执行 lex → parse → sema → COFF → rust-lld → 临时 exe，
+/// 随后启动该原生进程。不存在 AST 求值或进程内机器码执行路径。
+pub fn run(path: &str, src: &str) -> AliasResult<i32> {
+    let executable = TempExecutable::create()?;
+    build(path, src, &executable.path)?;
+    let status = std::process::Command::new(&executable.path)
+        .status()
+        .map_err(|e| AliasError {
+            msg: format!("无法启动编译产物 {}: {e}", executable.path.display()),
+            span: Span::default(),
+        })?;
+    let code = status.code().ok_or_else(|| AliasError {
+        msg: "编译产物被外部信号终止".into(),
+        span: Span::default(),
+    })?;
+    Ok(code)
+}
+
+/// 唯一编译管线：前端 → COFF 目标文件 → rust-lld → 独立原生可执行文件。
+pub fn build(_path: &str, src: &str, out_exe: &Path) -> AliasResult<()> {
     let tokens = lexer::lex(src)?;
     let program = parser::parse(tokens)?;
     sema::check(&program)?;

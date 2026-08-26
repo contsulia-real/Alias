@@ -28,11 +28,11 @@ sema 通过的程序其运行时行为与 Phase 0 黄金记录完全一致 (gold
 | 项 | 内容 |
 |---|---|
 | 问题 | 原生代码生成; D5 禁自研 VM |
-| 版本 | cranelift-{codegen,frontend,jit,module,native} = **0.135.0** (crates.io 最新稳定, 五包同轨发布), Cargo.lock 锚定版本+哈希 |
-| 拥有者 | `src/codegen.rs` 唯一触点 cranelift-* API — ast/sema/interp/lib 零 cranelift 类型 (已核验) |
+| 版本 | cranelift-{codegen,frontend,module,native,object} = **0.135.0**，Cargo.lock 锚定版本+哈希 |
+| 拥有者 | `src/codegen/` 唯一触点 cranelift-* API — ast/sema/lib/linker 零 cranelift 类型 (已核验) |
 | 来源 | crates.io 经 rsproxy 镜像; 默认 features, 无 feature 传递引入 wasm/其他后端 |
-| 安全边界 | 进程内 JIT 执行本地生成代码; 无网络/文件系统能力引入; 宿主函数仅 print/abort/槽区分配 |
-| 演练路径 | `cargo run -- --backend native demos/hello_native.as` 端到端即真实产品路径 |
+| 安全边界 | 编译器只生成 COFF 并调用 rust-lld；生成代码只在独立原生进程中运行 |
+| 演练路径 | `cargo run -- demos/hello_native.as` 完整编译临时 exe 后运行 |
 
 ### 行为记录
 
@@ -153,3 +153,16 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 传递捕获、16 路并发 JIT、F32 result/match/array、链接临时文件竞态和输入
 覆盖保护定向回归。`cargo check` 与 `cargo clippy --all-targets` 均成功
 （仓库仍有既存 clippy 风格警告）。
+
+## Phase 7 — 唯一原生编译管线 (2026-08-27)
+
+| # | 变更 | 依据 | 安全性 |
+|---|------|------|--------|
+| M51 | **物理删除进程内代码执行后端**：移除 `cranelift-jit`、`codegen/host.rs`、`codegen::execute`、全局 span/error 槽、执行串行锁和 `alias.runtime.failed`；`Compiler` 不再携带后端模式位 | 用户终裁：Alias 只有完整编译行为，不允许进程内执行生成代码 | Cargo 依赖树和 `src/` 均无进程内执行入口；runtime 契约由唯一原生实现精确覆盖 |
+| M52 | **run 改为完整编译工作流**：`run(path,src)` 与 `build` 共用 `lex → parse → sema → COFF → rust-lld`，前者把产物放入唯一临时目录、启动独立 exe 后清理；运行时错误由子进程打印并以 1 退出 | `run` 只是便捷命令，不得成为第二执行后端 | 缺失链接器时 `run` 必须失败的架构门禁阻止旁路；并发编译以独立临时目录和链接器独占目标文件隔离 |
+| M53 | **术语和测试收敛**：`aot_shim.rs` 更名 `native_runtime.rs`，`aot_parity.rs` 更名 `native_pipeline.rs`；对照对象改为 run 临时产物与 build 持久产物，同一 methods 原生产物仍高频执行 100 次 | 删除双形态后继续保留旧名会误导维护者，也无法证明 run 真的走链接 | 源码、测试、Cargo 清单和当前规范不再含双后端分支或宿主 runtime；黄金三元组保持不变 |
+
+**终态验证（2026-08-27）**：179 个测试连续 5 轮全绿；每轮均验证 `run`
+缺失链接器时失败、run/build 原生产物逐字节一致、16 路并发完整编译及同一
+`methods.as` exe 重复执行 100 次。`cargo check`、`cargo clippy --all-targets`
+和依赖/符号静态审计均通过；Clippy 仅保留非阻断风格警告。

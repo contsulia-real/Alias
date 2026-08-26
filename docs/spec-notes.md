@@ -1,6 +1,6 @@
 # Alias 规范笔记 — Phase 0 规范冻结
 
-**状态**: 规范性文档 (normative)。本文与 `tests/golden.rs` 共同构成解释器的行为契约。
+**状态**: 规范性文档 (normative)。本文与 `tests/golden.rs` 共同构成语言行为契约。
 **权威链**: `.omo/plans/compiler-migration.md` (用户已裁决 D1–D5 + Q①–Q⑥) → 本文固化 → `tests/golden.rs` 逐字节执行。
 **冻结日期**: 2026-08-24。此后任何改动若使黄金记录变红, 必须先修订本文并说明裁决依据。
 
@@ -8,14 +8,14 @@
 
 ## 一、Value::display 渲染格式表 (规范性)
 
-来源: `src/interp.rs:23-31` (`impl Value::display`)。字符串插值的洞 (`'n=$i'`) 与
+来源: `src/codegen/emit.rs` 的 display 分派与 `codegen/native_runtime.rs`。字符串插值的洞 (`'n=$i'`) 与
 内建 `println`/`print` 的输出一律经过此表, 无第二渲染路径。
 
-| 运行时值 | 变体 (`interp.rs:14-20`) | 显示字节 | 备注 |
+| 运行时值 | 静态类型 | 显示字节 | 备注 |
 |---|---|---|---|
 | 有符号整数 | `i8/i16/i32/i64` | 十进制表示 (如 `48`, `-3`) | 按声明宽度 wrapping |
 | 无符号整数 | `u8/u16/u32/u64` | 无符号十进制表示 | 按声明宽度 wrapping |
-| 浮点 | `f32/f64` | 规范化十进制科学计数法；零为 `0` | JIT/AOT 使用同一舍入规则 |
+| 浮点 | `f32/f64` | 规范化十进制科学计数法；零为 `0` | 原生 runtime 统一舍入规则 |
 | 布尔 | `Bool(bool)` | `true` / `false` | 小写字面量 |
 | 字符串 | `Str(String)` | 原文字节 | **不加引号、不转义**, 与源码字面量形态无关 |
 | 函数值 | `Func(Rc<FuncValue>)` | `<func>` | 永不泄露闭包/参数信息 |
@@ -29,12 +29,12 @@
 
 | # | 现状 (位置) | 裁决 | 黄金锚点 |
 |---|---|---|---|
-| Q① | `true < false` 静默求值为 `false` (`src/interp.rs:317`, bool 分支 `_ => false`) | **改编译错误**: 有序比较仅限同型 i32/i64 与 string; EqEq/NotEq 对 bool 仍合法 | Phase 1 以 `tightened_*` 测试锁定; 现状不入黄金记录 |
-| Q② | 函数参数隐式为 val 绑定 (`src/interp.rs:354`, `mutable: false`) | **保留**运行时语义; 编译期拒绝对参数赋值 | `closure_reference_capture_latest_value` (间接依赖) |
-| Q③ | 声明返回非 unit 的函数块体落空时静默得 `Unit` (`src/interp.rs:363`, `Ok(_) => Ok(Value::Unit)`) | **编译错误**: 声明返回非 unit 的函数控制流必须可达 return; 仅 unit 可落空 | Phase 1 锁定 |
+| Q① | 历史实现曾允许 `true < false` | **编译错误**: 有序比较仅限同型 i32/i64 与 string; EqEq/NotEq 对 bool 仍合法 | Phase 1 以 `tightened_*` 测试锁定 |
+| Q② | 函数参数为隐式 val 绑定 | **保留**运行时语义; 编译期拒绝对参数赋值 | `closure_reference_capture_latest_value` (间接依赖) |
+| Q③ | 历史实现允许声明返回非 unit 的函数块体落空 | **编译错误**: 声明返回非 unit 的函数控制流必须可达 return; 仅 unit 可落空 | Phase 1 锁定 |
 | Q④ | 历史实现允许 bool/string/unit main | **收紧**: main 必须存在、是零参 func，且唯一合法返回类型为 `i32`; 其它返回类型在 sema 阶段编译错误。进程边界仍把 i32 clamp 到 0–255 | `bool_main_rejected`、`string_main_rejected`、`unit_main_rejected`、`exit_code_clamped_to_255` |
-| Q⑤ | 缺 main 报 `@ 0:0` (`src/interp.rs:116`, `Span::default()`) | **修复**: Span 为 default 时 Display 省略位置前缀, 只报「找不到顶层 func main」 | 现状由 `missing_main_error` 冻结; 修复落地时该行随 MIGRATION 条目同步改写 |
-| Q⑥ | 顶层绑定按序求值、先于 main、可有副作用 (`src/interp.rs:96-113`) | **保留顺序语义**: 生成的入口 wrapper 先按序求值顶层初始化再调用用户 main | `top_level_side_effect_ordering` |
+| Q⑤ | 缺 main 使用 `Span::default()` | **修复**: Span 为 default 时 Display 省略位置前缀, 只报「找不到顶层 func main」 | `missing_main_error` |
+| Q⑥ | 顶层绑定按序求值、先于 main、可有副作用 | **保留顺序语义**: 生成的入口 wrapper 先按序求值顶层初始化再调用用户 main | `top_level_side_effect_ordering` |
 
 ## 三、已冻结的观察事实 (规范性, 黄金记录逐字节背书)
 
@@ -51,11 +51,11 @@
    (`src/main.rs:5-19`; 占位符原为 `<script.as>`, M18 术语清理改为 `<source.as>`)。
 5. **import 通知**: import 只解析不执行, 向 stderr 打印
    「[alias] 注意: {n} 条 import 已解析但标准库尚未接入 (Phase 5 前)\n」
-   (`src/interp.rs:89-94`)。该文本已进黄金记录, Phase 5 接入标准库前不得变动。
+   (`src/codegen/mod.rs`)。该文本已进黄金记录, Phase 5 接入标准库前不得变动。
 6. **count_to_ten 打印 1..10**: demo 循环体先 `increase i` 再 `println i`,
    故 stdout 为 `1\n…\n10\n` — 不是直觉的 0..9。以实际字节为准。
 7. **除零是运行时错误**: 「除以零」, span 取除号左侧操作数
-   (`src/interp.rs:301-305`), 退出码 FAILURE(1), 非 panic。
+   (`src/codegen/emit.rs`), 退出码 FAILURE(1), 非 panic。
 
 ## 四、黄金记录索引
 
@@ -90,8 +90,8 @@
 
 # 附录 — Phase 1 Sema 层规范 (2026-08-24 增补)
 
-管线自此为 lex → parse → **sema** → execute (`src/lib.rs run`)。sema 通过的
-程序, 解释器仍是行为权威; 运行时检查原样保留 (Phase 4 才删)。
+当前管线为 lex → parse → **sema** → COFF → rust-lld → exe。sema 通过的
+程序只允许进入完整原生编译管线；运行时检查由生成代码与原生 runtime 承担。
 
 ## 一、Q③ 严格落空规则 (规范性, 2026-08-24 用户终裁)
 
@@ -118,7 +118,7 @@ val/var 绑定的类型槽表示初始化值的类型 (D3: 声明↔初始化一
 
 | 检查 | 归属 | 消息来源 |
 |---|---|---|
-| 未定义绑定/val 重赋值/incdec 四错/二元操作数/Neg/循环条件/元数/调非函数/顶层 return | sema (前移) + 运行时保留 | interp.rs 原文逐字节 |
+| 未定义绑定/val 重赋值/incdec 四错/二元操作数/Neg/循环条件/元数/调非函数/顶层 return | sema (前移) + 运行时守卫 | 黄金消息逐字节冻结 |
 | 声明↔初始化/实参↔形参/return↔声明/未知类型名/泛型形状 | sema 独有 | 新消息, 风格对齐 |
 | Q① bool 有序比较 / Q③ 落空 / Q④ main 形状 / Q② 参数赋值 | sema 收紧 | 新消息或沿用原文 |
 | MethodCall/Field/Index 占位、除零、import 通知 | 仅运行时 | 黄金记录冻结 |
@@ -127,14 +127,13 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 不下钻保证 surfaced 错误与现状逐字节一致。
 
 
-# 附录二 — Phase 5 AOT 运行时契约 (规范性, 2026-08-25)
+# 附录二 — 原生运行时契约 (规范性, 2026-08-27)
 
-## §五 运行时符号契约 (JIT 宿主函数与 AOT shim 逐字节对齐)
+## §五 运行时符号契约
 
 规范的机器可检查版本位于 `src/codegen/runtime.rs::RUNTIME_CONTRACTS`。
-每个表项同时声明参数、返回值、每条边的可空性和 JIT/AOT 实现覆盖；调用点
-只给符号与实参，由该表生成 Cranelift 签名。JIT host 注册集合与表中 `jit`
-集合精确相等，AOT shim 实际定义集合与表中 `aot` 集合精确相等。
+每个表项同时声明参数、返回值和每条边的可空性；调用点只给符号与实参，
+由该表生成 Cranelift 签名。`native_runtime.rs` 实际定义集合必须与契约表精确相等。
 `nullable` 只允许在契约明确标注的边上出现：空串输入指针、零长度 stdout
 指针、无捕获 closure env 及可承载引用的数组载荷字。
 
@@ -153,9 +152,8 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | alias.display.struct/array/result | ()→i64 / ()→i64 / (i32)→i64 | 复合值固定显示或按 result tag 显示 |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
 | alias.println/print.i32/bool | (i32) | 经 display 复用 |
-| alias.abort_div/oob/pop/conv | (i32) | span-ID 查表；JIT 记录 AliasError 并退回宿主，AOT 输出诊断后 exit 1 |
-| alias.runtime.failed | ()→i32 | 仅 JIT：查询当前执行是否已有运行时错误 |
-| rt.heap.alloc / rt.write.dec / rt.write.stdout | AOT 内部契约 | 仅 AOT：零初始化分配、十进制写和 stdout 写 |
+| alias.abort_div/oob/pop/conv | (i32) | span-ID 查表；编译产物输出诊断后 exit 1 |
+| rt.heap.alloc / rt.write.dec / rt.write.stdout | 内部契约 | 零初始化分配、十进制写和 stdout 写 |
 
 字符串表示: 泄漏 16 字节块 {data_ptr: u64, len: u64}; data_ptr 为 null
 当且仅当 len=0。字节一律复制进块 — 统一所有权。
@@ -173,11 +171,15 @@ f32/f64 始终使用对应浮点寄存器，进入载荷字时才按位装箱。
 另写宽度或偏移表；用户函数和间接闭包调用统一由 `user_signature` 加入
 `globals/env` 两个隐藏 I64 参数并生成显式参数/返回 ABI。
 
-## §六 AOT 形态
+## §六 唯一原生编译形态
 
-- CLI: `alias run <source.as>` (JIT) / `alias build <source.as>` (AOT exe,
-  与源同目录同名 .exe, 成功静默); 裸 `alias <source.as>` = run。build 只接受
+- CLI: `alias run <source.as>` 先生成并链接临时 exe 后启动；`alias build <source.as>`
+  输出与源同目录同名 exe（成功静默）；裸 `alias <source.as>` = run。build 只接受
   `.as` 扩展名，避免输入路径与输出 `.exe` 指向同一文件。
+- 禁止进程内执行：编译器不加载或调用生成的机器码，也不提供宿主 runtime；
+  两个命令共享同一 `compile_to_object → link_exe` 管线。
+- 库接口 `run(path,src)` 的 `Err` 只表示词法、语法、语义、代码生成、链接或
+  进程启动失败；编译产物自身的运行时中止由子进程输出诊断，返回其退出码 1。
 - 产物依赖: 仅 kernel32.lib (GetStdHandle/WriteFile/ExitProcess/
   HeapAlloc/GetProcessHeap/RtlMoveMemory)。**无 CRT**:
   入口为导出 alias_start (显式 ExitProcess 传退出码),
@@ -222,7 +224,7 @@ stmt        := ... | recv "." IDENT "=" expr                    字段赋值语�
 | 类型槽 | 已登记结构体名合法 (`val stat s = ...` / `func stat mk = ...`); 未登记 → 「未知类型名」; 声明前不可见 (与绑定同序) |
 | 边界 | 无泛型 (result<T,E> 等仍按 Phase 5+ 拒绝); 无方法调用; struct 仅顶层可定义 |
 
-锁定: tests/struct_laws.rs (22 用例) + demos/structs.as 双形态 parity。
+锁定: tests/struct_laws.rs (22 用例) + demos/structs.as 原生产物黄金记录。
 
 ---
 
@@ -266,10 +268,10 @@ escape      := \n | \t | \r | \\ | \' | \" | \0 | \$        字面量与插值 L
   `return err(payload)` 可观察等价)。
 - **打印**: result 值经 println/print/插值 → 运行时 tag 定 `<ok>`/`<err>`
   (display 表新增行, 与 `<func>`/`<struct>` 对称; 载荷永不泄露)。
-- JIT 宿主与 AOT shim 同契约符号: alias.display.result(I32)→I64。
+- 原生 runtime 契约符号: alias.display.result(I32)→I64。
 
-锁定: tests/result_laws.rs (22 用例) + demos/result_match.as 双形态 parity
-(native_parity 黄金基线 + aot_parity 语料)。
+锁定: tests/result_laws.rs (22 用例) + demos/result_match.as 原生管线一致性
+(native_parity 黄金基线 + native_pipeline 语料)。
 
 ---
 
@@ -306,14 +308,14 @@ postfix     := ... | postfix "." IDENT "(" args ")"    (真语义, 占位退役)
   `fn(globals, env, self, args...) -> word`; 调用点直调, env 传哑字 0
   (方法无捕获, 自由名经 globals 参数可达); self 以单元格承载 —
   结构体引用语义穿透方法边界。
-- **内建四件套双后端同符号**: alias.str.len(I64)→I32 /
-  alias.str.upper·lower·trim(I64)→I64。JIT 宿主函数 + AOT IR shim:
+- **内建四件套统一 runtime 符号**: alias.str.len(I64)→I32 /
+  alias.str.upper·lower·trim(I64)→I64。原生 IR runtime:
   upper/lower = 逐字节范围 icmp + select 平移写新缓冲;
   trim = 双边界扫描 + RtlMoveMemory 子块复制; 无 CRT 调用。
 - **空串结果 data_ptr 恒 null** (§五契约); 非空结果字节一律复制进新块。
 
-锁定: tests/method_laws.rs (26 用例) + demos/methods.as 双形态 parity
-(native_parity 黄金基线 + aot_parity 语料)。
+锁定: tests/method_laws.rs (26 用例) + demos/methods.as 原生管线一致性
+(native_parity 黄金基线 + native_pipeline 语料)。
 
 ---
 
@@ -351,7 +353,7 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
   发射期把守卫点行:列登记入 span 表, 运行时按 ID 回查打印
   「错误 @ L:C — {下标越界|pop 空数组}」→ exit 1。span 记账点:
   下标取 `[` token, pop 取方法调用 `.` token (parser 既有 span 语义)。
-- **双后端同符号** (§五 契约扩充):
+- **统一 runtime 符号** (§五 契约扩充):
 
 | 符号 | 签名 | 语义 |
 |------|------|------|
@@ -362,11 +364,11 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 | alias.display.array | ()→i64 | 固定 "<array>" 块 |
 | alias.abort_oob / alias.abort_pop | (i32) | span-ID 中止存根 (消息后缀不同) |
 
-- AOT shim 无 CRT 调用: 增长复制走 RtlMoveMemory, 分配走 rt.heap.alloc
-  (HeapAlloc); JIT 宿主以 Rust 等价实现同一布局与增长策略。
+- 原生 runtime 无 CRT 调用: 增长复制走 RtlMoveMemory，分配走 rt.heap.alloc
+  (HeapAlloc)。
 
-锁定: tests/array_laws.rs (21 用例) + demos/arrays.as 双形态 parity
-(native_parity 黄金基线 + aot_parity 语料)。
+锁定: tests/array_laws.rs (21 用例) + demos/arrays.as 原生管线一致性
+(native_parity 黄金基线 + native_pipeline 语料)。
 
 # 附录八 — 无括号文法泛化 (P2e, 规范性)
 
