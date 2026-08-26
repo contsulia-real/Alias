@@ -241,7 +241,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
-        // 退出映射 (Q④): i32→norm / bool true→0 false→1 / string·unit→0
+        // 退出映射 (Q④): i32→原样 / bool true→0 false→1 / string·unit→0
         let code_word: Value = match &main_ret {
             VTy::Bool => {
                 let is_true = bcx.ins().icmp_imm_s(IntCC::Equal, raw, 1);
@@ -249,10 +249,8 @@ impl<'m, M: Module> Compiler<'m, M> {
                 let f = bcx.ins().iconst(types::I64, 1);
                 bcx.ins().select(is_true, t, f)
             }
-            _ => {
-                // Q④: i32→原样 / bool 已上分支 / string·unit→norm(直通)
-                norm_load(&mut bcx, raw, &main_ret)
-            }
+            VTy::Str | VTy::Unit => bcx.ins().iconst(types::I64, 0),
+            _ => norm_load(&mut bcx, raw, &main_ret),
         };
         if self.is_aot {
             // 无 CRT 环境: 显式 ExitProcess 传递退出码 (返回值无人接收)
