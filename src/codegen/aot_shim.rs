@@ -386,9 +386,15 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     // ---- 分配器: cell / env / globals / closure ----
     shim!(c, "alias.cell.new", vec![types::I64], Some(types::I64), |bcx, a| {
-        let sz = bcx.ins().iconst(types::I64, 8);
-        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![sz]);
-        bcx.ins().store(MemFlagsData::new(), a[0], p, 0);
+        // 参数是调用端按 size_align 算出的字节数；HeapAlloc 的
+        // HEAP_ZERO_MEMORY 保证绑定/结构体存储区初始清零，值由调用端写入。
+        let p = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![types::I64],
+            Some(c.ptr_ty),
+            vec![a[0]]
+        );
         bcx.ins().return_(&[p]);
         true
     });

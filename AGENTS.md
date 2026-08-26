@@ -68,7 +68,7 @@ D:\Project\Alias\
   - val 绑定不可重新赋值
 - **Phase 路线图**：代码按阶段演进。当前 Phase 2d 完成（struct / result / 扩展方法 / array<T> 落地；AOT exe 为双形态之一）；标准库接入 = Phase 5+。未实现特性报错信息里标注对应 Phase。
 - **中文报错**：所有面向用户的错误消息为简体中文。
-- **闭包语义**：每个绑定一泄漏堆单元格，闭包 env 持捕获单元格指针（引用捕获）——cond 闭包须读到外层变量最新值，见 codegen.rs 模块头值模型说明。
+- **存储/闭包语义**：`alias.cell.new(bytes)` 按声明类型尺寸分配清零存储区；每个绑定一泄漏堆单元格，闭包 env 持捕获单元格指针（引用捕获）——cond 闭包须读到外层变量最新值，见 codegen 模块头值模型说明。
 - **方法语义**：`public? func <Ret> <RecvType>.<name>` 定义扩展方法；self 是隐式 val 绑定（不在参数表）；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖——见 spec-notes 附录五。
 - **数组语义**：实例 = 泄漏头块 {data_ptr,len,cap}，引用语义（别名共享）；下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop 不可定义——见 spec-notes 附录六。
 

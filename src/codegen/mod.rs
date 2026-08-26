@@ -26,8 +26,9 @@
 //!   alias.print*/println.*、alias.cell.new、alias.env.new、
 //!   alias.globals.new、alias.closure.new、alias.abort_div。
 //!   字面量字节亦复制进块 — 统一所有权, 免生命周期论证。
-//! - **结构体实例 (Phase 2a) = 泄漏 n×8 字节槽区** (复用 alias.env.new),
-//!   字段按声明序偏移 idx*8 存规范字; 变量持实例指针 — 引用语义:
+//! - **结构体实例 (Phase 2a/P3a) = 按字段 size_align 排布的泄漏槽区**
+//!   (复用 alias.cell.new(bytes)); 字段按声明序对齐并存声明宽度;
+//!   变量持实例指针 — 引用语义:
 //!   赋值/传参/闭包捕获共享同一实例。构造 = 全命名实参按声明序求值
 //!   (缺省字段取声明默认值); 打印 → 固定 "<struct>" (与 <func> 对称)。
 //! - **result 实例 (Phase 2b) = 泄漏 2×8 字节块 {tag, payload}**:

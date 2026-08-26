@@ -131,3 +131,9 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 | M38 | 表达式位置无括号: `ident unary` 吞参调用 (val a = dup 5); breaking: `f g` 现解析为方法中缀 f.g() — 函数值传参须显式 f(g) | 用户裁决 | 全套件重探, 语料零破坏 (无此形态) |
 | M39 | 方法中缀: `expr Ident [unary]` → lhs.m([arg]), 左结合链; 内建名单 {println,print,increase,decrease} 的 Ident 实参优先吞参 (println a 不被劫持为方法) | 用户裁决 a.plus(b)≡a plus b | method_laws/array_laws 全绿回归 |
 | M40 | hello_native.as 基线轮换: `println wrap 'yo'` 由「误打印 <func>」修复为真实调用 "[yo]" — 旧行为是静默 bug | P2e 修复价值实证 | 探测后冻结政策 |
+
+## P3a 稳定性修复 (2026-08-26)
+
+| # | 变更 | 依据 | 安全性 |
+|---|------|------|--------|
+| M41 | **统一 `alias.cell.new(bytes)` 双后端契约**：JIT 宿主与 AOT shim 均按调用端 `size_align` 给出的字节数分配清零存储区，初值继续由调用端按声明宽度写入；移除遗留的“固定分配 8 字节并把参数当初值”实现 | WER dump 在 `alias.str.concat` 读到被污染的 `counter.tag` 指针；AOT 反汇编确认 16 字节 `counter` 实例只分配 8 字节，字段 `tag@+8` 越界写堆，导致 `methods.as` 间歇性 `0xC0000005` | 修复未定义行为，不改变合法程序语义；确定性单元测试冻结参数语义，`methods.as` AOT 高频运行与全量测试连续 5 轮验证 |

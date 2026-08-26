@@ -131,7 +131,7 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 
 | 符号 | 签名 | 语义 |
 |------|------|------|
-| alias.cell.new | (i64)→i64 | 泄漏 8 字节单元格, 存初值 |
+| alias.cell.new | (bytes:i64)→i64 | 泄漏并清零 bytes 字节存储区；绑定/结构体值由调用端按声明宽度写入 |
 | alias.env.new / alias.globals.new | (i32)→i64 | 泄漏 n×8 字节槽区 |
 | alias.closure.new | (i64,i64)→i64 | 泄漏 {code,env} 16 字节闭包对象 |
 | alias.str.new | (ptr,i32)→i64 | 复制字节 → 泄漏块 {data_ptr,len} |

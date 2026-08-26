@@ -3,8 +3,12 @@
 use crate::codegen::SPAN_TABLE;
 use cranelift_jit::JITBuilder;
 
-extern "C" fn alias_cell_new(init: i64) -> i64 {
-    Box::into_raw(Box::new(init)) as i64
+/// 分配一个按声明类型定尺寸、清零的绑定/结构体存储区。
+///
+/// 调用端负责随后按静态类型写入；参数是字节数，不是初值。这个契约必须与
+/// AOT shim 保持一致，否则大于 8 字节的结构体会越界写堆。
+extern "C" fn alias_cell_new(bytes: i64) -> i64 {
+    alloc_bytes(bytes.max(1) as usize) as i64
 }
 
 extern "C" fn alias_env_new(count: i32) -> i64 {
@@ -336,4 +340,19 @@ pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
     builder.symbol("alias.arr.pop", alias_arr_pop as *const u8);
     builder.symbol("alias.abort_oob", alias_abort_oob as *const u8);
     builder.symbol("alias.abort_pop", alias_abort_pop as *const u8);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::alias_cell_new;
+
+    #[test]
+    fn cell_new_treats_argument_as_zeroed_byte_count() {
+        let cell = alias_cell_new(16) as *const u64;
+        let first = unsafe { cell.read_unaligned() };
+        assert_eq!(
+            first, 0,
+            "alias.cell.new 必须把参数解释为字节数并返回清零存储区"
+        );
+    }
 }
