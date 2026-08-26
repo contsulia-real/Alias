@@ -56,10 +56,12 @@
 // 子模块划分 (纯机械拆分): host=JIT 宿主实现; emit=表达式/语句发射;
 // funcgen=函数/方法/闭包定义与捕获扫描; types_proj=静态类型投影;
 // aot_shim=AOT 运行时 shim 区 (kernel32 符号契约)。
+mod abi;
 mod aot_shim;
 mod emit;
 mod funcgen;
 mod host;
+mod runtime;
 mod types_proj;
 
 use crate::ast::*;
@@ -75,14 +77,16 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
-use std::collections::{HashMap, HashSet};
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 
+pub(crate) use abi::*;
 use aot_shim::{define_span_data, emit_runtime_shims};
 pub(crate) use emit::*;
 pub(crate) use funcgen::*;
-pub(crate) use types_proj::*;
 use host::register_host_fns;
+pub(crate) use runtime::*;
+pub(crate) use types_proj::*;
 
 /// 除零中止存根的 span 回查表: ID → (line, col)。
 /// 仅 JIT 路径使用 (宿主 abort 读); AOT 路径以只读数据段内嵌同一表
@@ -92,201 +96,6 @@ pub(crate) static SPAN_TABLE: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mut
 pub(crate) static RUNTIME_ERROR: std::sync::Mutex<Option<AliasError>> = std::sync::Mutex::new(None);
 /// SPAN_TABLE/RUNTIME_ERROR 是单次执行上下文，串行化 execute 避免并发串案。
 static EXECUTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-// ---------------------------------------------------------------------------
-// 静态类型投影 — 打印分派 / 字宽转换 / 调用返回类型所需
-// ---------------------------------------------------------------------------
-
-/// 数值静态投影 (Phase 3a): 宽度词汇表与 sema 共享单源 (sema::types),
-/// cranelift 类型映射由本模块 [`cl_type`] 独占 (所有权律)。
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum VTy {
-    /// 有符号整数 — 规范在途形 = sext 到 I64
-    I(IntW),
-    /// 无符号整数 — 规范在途形 = zext 到 I64; 存储与比较按无符号谓词
-    U(UIntW),
-    /// 浮点 — 双通道原生值 (F32/F64 寄存器表示, 不位打包)
-    F(FloatW),
-    Bool,
-    Str,
-    Unit,
-    /// 闭包对象指针 + 完整静态签名。签名必须随词法作用域/捕获表流动，
-    /// 不能按名字从全局表猜测，否则局部遮蔽与浮点 ABI 会发生类型混淆。
-    Func(Vec<VTy>, Box<VTy>),
-    /// 结构体实例 — 携带结构体名供字段偏移回查与打印分派
-    Struct(String),
-    /// result<T,E> 实例 (Phase 2b) — 携带类型名供臂绑定静态投影;
-    /// 打印只看运行时 tag (<ok>/<err>), 名字不参与显示
-    Result(String, String),
-    /// array<T> 实例 (Phase 2d) — 携带元素静态投影供下标读的
-    /// 打印分派与字段偏移回查; 打印 → 固定 "<array>"
-    Array(Box<VTy>),
-    Other,
-}
-
-/// VTy → cranelift 类型单一映射点 (所有权律: 全编译器唯一)。
-/// 无符号与有符号共享同宽表示 (谓词区分); 引用/字类型恒 I64。
-pub(crate) fn cl_type(v: &VTy) -> cranelift_codegen::ir::Type {
-    match v {
-        VTy::I(w) => match w {
-            IntW::W8 => types::I8,
-            IntW::W16 => types::I16,
-            IntW::W32 => types::I32,
-            IntW::W64 => types::I64,
-        },
-        VTy::U(w) => match w {
-            UIntW::U8 => types::I8,
-            UIntW::U16 => types::I16,
-            UIntW::U32 => types::I32,
-            UIntW::U64 => types::I64,
-        },
-        VTy::F(w) => match w {
-            FloatW::F32 => types::F32,
-            FloatW::F64 => types::F64,
-        },
-        _ => types::I64,
-    }
-}
-
-/// 存储尺寸与对齐 (字节): 单元格/槽位/结构体字段/数组元素统一按此布局。
-pub(crate) fn size_align(v: &VTy) -> (usize, usize) {
-    match v {
-        VTy::I(IntW::W8) | VTy::U(UIntW::U8) => (1, 1),
-        VTy::I(IntW::W16) | VTy::U(UIntW::U16) => (2, 2),
-        VTy::I(IntW::W32) | VTy::U(UIntW::U32) | VTy::F(FloatW::F32) => (4, 4),
-        VTy::I(IntW::W64)
-        | VTy::U(UIntW::U64)
-        | VTy::F(FloatW::F64)
-        | VTy::Bool
-        | VTy::Str
-        | VTy::Unit
-        | VTy::Func(..)
-        | VTy::Struct(_)
-        | VTy::Result(..)
-        | VTy::Array(_)
-        | VTy::Other => (8, 8),
-    }
-}
-
-fn align_to(off: usize, align: usize) -> usize {
-    off.div_ceil(align) * align
-}
-
-impl VTy {
-    /// 运行时词汇表 (D3) — typeof 内建同名输出, 与 sema Ty::name 对齐
-    pub(crate) fn display_name(&self) -> String {
-        match self {
-            VTy::I(w) => match w {
-                IntW::W8 => "i8".into(),
-                IntW::W16 => "i16".into(),
-                IntW::W32 => "i32".into(),
-                IntW::W64 => "i64".into(),
-            },
-            VTy::U(w) => match w {
-                UIntW::U8 => "u8".into(),
-                UIntW::U16 => "u16".into(),
-                UIntW::U32 => "u32".into(),
-                UIntW::U64 => "u64".into(),
-            },
-            VTy::F(w) => match w {
-                FloatW::F32 => "f32".into(),
-                FloatW::F64 => "f64".into(),
-            },
-            VTy::Bool => "bool".into(),
-            VTy::Str => "string".into(),
-            VTy::Unit => "()".into(),
-            VTy::Func(..) => "func".into(),
-            VTy::Struct(s) => s.clone(),
-            VTy::Result(t, e) => format!("result<{t}, {e}>"),
-            VTy::Array(t) => format!("array<{}>", t.display_name()),
-            VTy::Other => "未知".into(),
-        }
-    }
-
-    pub(crate) fn is_numeric(&self) -> bool {
-        matches!(self, VTy::I(_) | VTy::U(_) | VTy::F(_))
-    }
-}
-
-/// 结构体布局: 字段 (名, 默认值, 静态类型, 字节偏移) 按声明序 +
-/// 实例总尺寸 (含尾随对齐)。sema 已校验全覆盖/类型/重名。
-#[derive(Clone)]
-pub(crate) struct StructLayout {
-    pub(crate) fields: Vec<(String, Option<Expr>, VTy, i32)>,
-    pub(crate) size: i32,
-}
-
-type StructTable = HashMap<String, StructLayout>;
-
-fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
-    match te {
-        TypeExpr::Named(n) => match n.as_str() {
-            "i8" => VTy::I(IntW::W8),
-            "i16" => VTy::I(IntW::W16),
-            "i32" => VTy::I(IntW::W32),
-            "i64" => VTy::I(IntW::W64),
-            "u8" => VTy::U(UIntW::U8),
-            "u16" => VTy::U(UIntW::U16),
-            "u32" => VTy::U(UIntW::U32),
-            "u64" => VTy::U(UIntW::U64),
-            "f32" => VTy::F(FloatW::F32),
-            "f64" => VTy::F(FloatW::F64),
-            "bool" => VTy::Bool,
-            "string" => VTy::Str,
-            "unit" => VTy::Unit,
-            // `func` 关键字不能出现在类型槽；保留防御性分支但不伪造签名。
-            "func" => VTy::Other,
-            _ => {
-                if structs.contains_key(n) {
-                    VTy::Struct(n.clone())
-                } else {
-                    VTy::Other
-                }
-            }
-        },
-        TypeExpr::Generic(n, args) => {
-            if n == "result" && args.len() == 2 {
-                VTy::Result(args[0].display(), args[1].display())
-            } else if n == "array" && args.len() == 1 {
-                VTy::Array(Box::new(decl_vty(&args[0], structs)))
-            } else {
-                VTy::Other
-            }
-        }
-    }
-}
-
-/// 类型显示名 → 静态投影 (match 臂绑定回查用): result<T,E> 的 T/E 名
-/// 经 decl_vty 同一词汇表反解; array<T> 显示名递归反解 (Phase 2d);
-/// 其余未知形态 → Other (打印被拒)
-fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
-    if let Some(inner) = name.strip_prefix("array<").and_then(|s| s.strip_suffix('>')) {
-        return VTy::Array(Box::new(vty_of_type_name(structs, inner)));
-    }
-    match name {
-        "i8" => VTy::I(IntW::W8),
-        "i16" => VTy::I(IntW::W16),
-        "i32" => VTy::I(IntW::W32),
-        "i64" => VTy::I(IntW::W64),
-        "u8" => VTy::U(UIntW::U8),
-        "u16" => VTy::U(UIntW::U16),
-        "u32" => VTy::U(UIntW::U32),
-        "u64" => VTy::U(UIntW::U64),
-        "f32" => VTy::F(FloatW::F32),
-        "f64" => VTy::F(FloatW::F64),
-        "bool" => VTy::Bool,
-        "string" => VTy::Str,
-        "unit" => VTy::Unit,
-        "func" => VTy::Other,
-        _ => {
-            if structs.contains_key(name) {
-                VTy::Struct(name.to_string())
-            } else {
-                VTy::Other
-            }
-        }
-    }
-}
 
 /// 名字解析: 局部 SSA 变量(持单元格指针)或顶层槽区偏移。
 #[derive(Clone, Copy)]
@@ -353,6 +162,8 @@ pub(crate) struct Compiler<'m, M: Module> {
     method_sigs: HashMap<(String, String), (Vec<VTy>, VTy)>,
     /// AOT 模式: 入口为导出的 main(I32); JIT: alias_entry(I64) 宿主读取
     is_aot: bool,
+    /// AOT shim 实际定义集合；完成发射后与 runtime 契约表做精确覆盖校验。
+    runtime_defined: HashSet<&'static str>,
 }
 
 pub(crate) struct PendingFn {
@@ -403,6 +214,7 @@ pub fn execute(program: Program) -> AliasResult<i32> {
         method_rets: HashMap::new(),
         method_sigs: HashMap::new(),
         is_aot: false,
+        runtime_defined: HashSet::new(),
     };
 
     let entry_fid = compile_program(&mut c, &program.items)?;
@@ -416,7 +228,11 @@ pub fn execute(program: Program) -> AliasResult<i32> {
     let entry_ptr = c.module.get_finalized_function(entry_fid);
     let entry: extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry_ptr) };
     let code = entry() as i32;
-    if let Some(err) = RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(err) = RUNTIME_ERROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
         Err(err)
     } else {
         Ok(code)
@@ -466,6 +282,7 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
         method_rets: HashMap::new(),
         method_sigs: HashMap::new(),
         is_aot: true,
+        runtime_defined: HashSet::new(),
     };
 
     emit_runtime_shims(&mut c)?;
@@ -483,25 +300,12 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
 
 /// 双后端共享编排: pass1 全局槽位 → pass2 函数体 → 入口 wrapper → 排空派生队列。
 fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasResult<FuncId> {
-    // ---- pass 0: 结构体布局登记 (构造/字段访问发射所需; sema 已校验合法性) ----
-    for item in items {
-        if let Item::StructDef(sd) = item {
-            let layouts = &c.struct_layouts;
-            let mut fields = Vec::with_capacity(sd.fields.len());
-            let mut off = 0usize;
-            let mut max_align = 1usize;
-            for f in &sd.fields {
-                let vty = decl_vty(&f.ty, layouts);
-                let (sz, al) = size_align(&vty);
-                off = align_to(off, al);
-                max_align = max_align.max(al);
-                fields.push((f.name.clone(), f.default.clone(), vty, off as i32));
-                off += sz;
-            }
-            let size = align_to(off, max_align) as i32;
-            c.struct_layouts.insert(sd.name.clone(), StructLayout { fields, size });
-        }
-    }
+    // ---- pass 0: 结构体布局由 ABI 层两阶段统一计算 ----
+    c.struct_layouts = build_struct_layouts(items);
+    debug_assert!(c
+        .struct_layouts
+        .values()
+        .all(|layout| (layout.size as usize).is_multiple_of(layout.align)));
 
     // ---- pass 0.5: 方法声明 (Phase 2c) — 静态分派目标登记;
     //      体延至 pass 2 之后定义 (彼时 globals_final 已齐,
@@ -522,8 +326,7 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             .chain(params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)))
             .collect();
         let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
-        let fid =
-            c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv}>{mname}"))?;
+        let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv}>{mname}"))?;
         let key = (recv.clone(), mname.clone());
         c.methods.insert(key.clone(), fid);
         c.method_rets.insert(key.clone(), ret_vty.clone());
@@ -550,7 +353,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
                     return Err(native_err(b.span, "函数值尚未接入原生后端 (Phase 3)"));
                 };
                 VTy::Func(
-                    params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
+                    params
+                        .iter()
+                        .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+                        .collect(),
                     Box::new(vty.clone()),
                 )
             } else {
@@ -566,8 +372,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
                 let Expr::FuncLit { params, .. } = &b.value else {
                     return Err(native_err(b.span, "函数值尚未接入原生后端 (Phase 3)"));
                 };
-                let param_vtys: Vec<VTy> =
-                    params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect();
+                let param_vtys: Vec<VTy> = params
+                    .iter()
+                    .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+                    .collect();
                 let name = format!("u{}", c.next_fid);
                 c.next_fid += 1;
                 let fid = c.declare_user_func_typed(&param_vtys, &vty, name)?;
@@ -600,8 +408,11 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let Some((recv, _)) = &b.receiver else {
             unreachable!("pending_methods 只收带接收者的绑定");
         };
-        let self_param =
-            Param { ty: TypeExpr::Named(recv.clone()), name: "self".into(), span: b.span };
+        let self_param = Param {
+            ty: TypeExpr::Named(recv.clone()),
+            name: "self".into(),
+            span: b.span,
+        };
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
@@ -622,7 +433,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
 }
 
 pub(crate) fn native_err(span: Span, msg: impl Into<String>) -> AliasError {
-    AliasError { msg: msg.into(), span }
+    AliasError {
+        msg: msg.into(),
+        span,
+    }
 }
 
 /// 内部不变式违例 (sema 之后不应可达) — 编译器 bug 走 panic, 不伪装成用户错误。

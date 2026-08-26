@@ -18,7 +18,7 @@ D:\Project\Alias\
 │   ├── parser/      # parse(tokens) -> Program；含递归/表达式链深度守卫
 │   ├── ast.rs       # AST 纯数据定义（Expr/Stmt/BindKind/BinOp…）
 │   ├── sema/        # 静态语义层 check()：作用域链 + 内部类型推断 + 全量检查
-│   ├── codegen/     # Cranelift 双形态后端：共享发射器 + JIT host + AOT shim
+│   ├── codegen/     # Cranelift 双形态后端：abi/runtime 单源 + 共享发射器 + JIT host + AOT shim
 │   └── linker.rs    # rust-lld 子进程封装：SDK 发现 + 链接参数（AOT 链接唯一拥有者）
 ├── demos/*.as       # Alias 语言示例程序；count_to_ten.as 被 smoke.rs include_str! 复用为测试
 ├── tests/smoke.rs   # Phase 1 集成冒烟测试，直接调库接口 run()
@@ -31,9 +31,10 @@ D:\Project\Alias\
 ├── tests/array_laws.rs # Phase 2d array<T> 法律：正负矩阵 + 运行时中止子进程用例
 ├── tests/aot_parity.rs # Phase 5 AOT 奇偶：build 产物 vs JIT 三元组逐字节一致
 ├── tests/security_regressions.rs # 内存安全、资源上限、宿主存活与覆盖保护回归
+├── tests/destructive_codegen.rs # 固定种子随机 AST、数值边界、深层闭包、并发 JIT
 ├── docs/spec-notes.md # 规范冻结：display 表、Q①–Q⑥ 裁决、Q③ 落空规则、§五 运行时契约、§六 AOT 形态
 ├── MIGRATION.md     # 迁移记录：每个语义变化一行，引用裁决编号
-├── Cargo.toml       # [dependencies] = cranelift-* 0.135 (唯一第三方依赖, codegen.rs 独占)
+├── Cargo.toml       # [dependencies] = cranelift-* 0.135 (唯一第三方依赖, codegen/ 独占)
 └── .cargo/config.toml # windows-msvc 目标用 rust-lld linker
 ```
 
@@ -42,7 +43,8 @@ D:\Project\Alias\
 | 任务 | 位置 | 备注 |
 |------|------|------|
 | 加语言特性 | ast.rs → parser.rs → sema.rs → codegen.rs | 按此顺序四处联动，入口链不变 |
-| 加内建函数 | codegen.rs `emit_call` 的裸 Ident 特判 + 宿主函数注册 | increase/decrease/println/print 均为名字特判, 打印经宿主函数; 字符串内建 len/upper/lower/trim 走方法表 + alias.str.* 运行时符号 (双后端同契约) |
+| 加内建函数 | `codegen/emit.rs` + `codegen/runtime.rs` + host/shim 实现 | 先在 `RUNTIME_CONTRACTS` 登记签名、可空性和后端覆盖；调用点不得手写 runtime 签名 |
+| 改值 ABI/布局 | `codegen/abi.rs` | `VTy::abi()`、用户函数签名、存储字转换、结构体字段布局的唯一真相源；其它模块不得复制宽度表 |
 | 改错误信息格式 | lib.rs `AliasError::Display` | 运行时错误经 span-ID 中止存根/编译期 AliasError 携带 |
 | 加语法 | lexer.rs Tok + parser.rs | 词法与语法分离改动 |
 | 验证语义 | tests/smoke.rs + demos/ | 每条用例对应一条"宪法"裁决 |
@@ -55,9 +57,11 @@ D:\Project\Alias\
 | `lex` | fn | lexer.rs:75 | 源码 → Token 流 |
 | `parse` | fn | parser.rs:15 | Token → Program AST |
 | `sema::check` | fn | sema.rs | 静态全量检查：迁移检查前移 + Q①③④② 收紧 + D3 一致性矩阵 |
-| `codegen::execute` | fn | codegen.rs | 编译 Program 为原生代码并进程内执行；入口 wrapper 先求值顶层绑定再调 main |
-| `emit_expr` / `emit_stmt` | fn | codegen.rs | 表达式/语句发射核心（单元格值模型 + 闭包创建） |
-| `methods` / `method_rets` | field | codegen.rs | 方法表：(接收者,方法名)→FuncId 静态分派 + 返回类型投影 (Phase 2c) |
+| `codegen::execute` | fn | codegen/mod.rs | 编译 Program 为原生代码并进程内执行；入口 wrapper 先求值顶层绑定再调 main |
+| `VTy::abi` / `build_struct_layouts` | fn | codegen/abi.rs | 寄存器、存储、对齐、参数/返回和字段布局单源 |
+| `RUNTIME_CONTRACTS` | table | codegen/runtime.rs | runtime 参数/返回/可空性/JIT-AOT 覆盖单源 |
+| `emit_expr` / `emit_stmt` | fn | codegen/emit.rs | 表达式/语句发射核心（单元格值模型 + 闭包创建） |
+| `methods` / `method_rets` | field | codegen/mod.rs | 方法表：(接收者,方法名)→FuncId 静态分派 + 返回类型投影 (Phase 2c) |
 | `SPAN_TABLE` / `RUNTIME_ERROR` | static | codegen/mod.rs | JIT span-ID 回查表 / 可恢复运行时错误槽 |
 | `AliasError`/`Span` | struct | lib.rs:14/20 | 错误统一携带 file:line:col |
 
@@ -73,6 +77,8 @@ D:\Project\Alias\
 - **方法语义**：`public? func <Ret> <RecvType>.<name>` 定义扩展方法；self 是隐式 val 绑定（不在参数表）；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖——见 spec-notes 附录五。
 - **数组语义**：实例 = 泄漏头块 {data_ptr,len,cap}，引用语义（别名共享）；下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop 不可定义——见 spec-notes 附录六。
 - **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。
+- **ABI/布局单源**：每种 `VTy` 的规范寄存器类型、实际存储类型/宽度/对齐、参数/返回类型及载荷字编码只在 `codegen/abi.rs` 定义；结构体先登记全部名字再由同层计算字段偏移和尾随填充。
+- **runtime 契约单源**：所有 `alias.*` 与内部 `rt.*` 符号必须进入 `RUNTIME_CONTRACTS`；JIT host 注册和 AOT shim 定义集合与表做精确相等校验，缺失、重复、多余或调用参数类型漂移均为编译器错误。
 - **运行时错误**：JIT host 记录 `AliasError` 并安全退回 `run()`；AOT shim 输出中文诊断后 `ExitProcess(1)`。宿主函数不得直接终止编译器进程。
 
 ## ANTI-PATTERNS (THIS PROJECT)

@@ -29,7 +29,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
         Expr::FuncLit { params, body, .. } => VTy::Func(
-            params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
+            params
+                .iter()
+                .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+                .collect(),
             Box::new(infer_ret_vty(c, frame, params, body)),
         ),
         // 算术结果 = 操作数族 (sema 已保证同族同宽); 比较恒 Bool
@@ -40,7 +43,11 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     lt
                 } else {
                     let rt = static_vty(c, frame, rhs);
-                    if rt.is_numeric() { rt } else { VTy::Other }
+                    if rt.is_numeric() {
+                        rt
+                    } else {
+                        VTy::Other
+                    }
                 }
             }
             _ => VTy::Bool,
@@ -63,10 +70,8 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         Expr::Field { recv, name, .. } => {
             if let VTy::Struct(s) = static_vty(c, frame, recv) {
                 if let Some(layout) = c.struct_layouts.get(&s) {
-                    if let Some((_, _, fvty, _)) =
-                        layout.fields.iter().find(|(n, ..)| n == name)
-                    {
-                        return fvty.clone();
+                    if let Some(field) = layout.fields.iter().find(|field| field.name == *name) {
+                        return field.vty.clone();
                     }
                 }
             }
@@ -85,13 +90,13 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     VTy::Func(_, ret) => Some(*ret),
                     _ => None,
                 }
-                    // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
-                    .or_else(|| {
-                        c.struct_layouts
-                            .contains_key(name)
-                            .then(|| VTy::Struct(name.clone()))
-                    })
-                    .unwrap_or(VTy::Other)
+                // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
+                .or_else(|| {
+                    c.struct_layouts
+                        .contains_key(name)
+                        .then(|| VTy::Struct(name.clone()))
+                })
+                .unwrap_or(VTy::Other)
             }
             Expr::FuncLit { params, body, .. } => infer_ret_vty(c, frame, params, body),
             other => match static_vty(c, frame, other) {
@@ -169,14 +174,18 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 ("string", "upper" | "lower" | "trim") => VTy::Str,
                 _ => VTy::Other,
             }
-        }
-        // Expr 变体已全覆盖 — 新增变体时编译器强制补投影 (穷尽匹配)
+        } // Expr 变体已全覆盖 — 新增变体时编译器强制补投影 (穷尽匹配)
     }
 }
 
 /// 函数字面量返回类型的保守推断 (箭头体=体类型; 块体=末条 return 类型;
 /// 其余落空=Unit)。仅用于打印分派与调用结果宽度 — 不外泄诊断。
-pub(crate) fn infer_ret_vty<M: Module>(c: &Compiler<M>, frame: &Frame, params: &[Param], body: &Body) -> VTy {
+pub(crate) fn infer_ret_vty<M: Module>(
+    c: &Compiler<M>,
+    frame: &Frame,
+    params: &[Param],
+    body: &Body,
+) -> VTy {
     let mut scoped = frame.scopes.clone();
     let mut vtys = frame.locals_vty.clone();
     let mut pmap: HashMap<String, Slot> = HashMap::new();
@@ -211,4 +220,3 @@ pub(crate) fn infer_ret_vty<M: Module>(c: &Compiler<M>, frame: &Frame, params: &
         },
     }
 }
-

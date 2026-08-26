@@ -8,18 +8,15 @@ impl<'m, M: Module> Compiler<'m, M> {
     /// 参数/返回按静态类型逐位定型; 浮点经 ABI 寄存器传递 (win64 XMM)。
     /// Unit 函数统一携带 I64 哑字返回 (cl_type(Unit)=I64), 简化调用点。
     pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
-        let mut s = Signature::new(self.cc);
-        s.params.push(AbiParam::new(types::I64));
-        s.params.push(AbiParam::new(types::I64));
-        for p in params {
-            s.params.push(AbiParam::new(cl_type(p)));
-        }
-        s.returns.push(AbiParam::new(cl_type(ret)));
-        s
+        user_signature(self.cc, params, ret)
     }
 
-    /// 运行时符号签名 (JIT 宿主与 AOT shim 同契约)
-    pub(crate) fn sig(&self, params: &[cranelift_codegen::ir::Type], ret: Option<cranelift_codegen::ir::Type>) -> Signature {
+    /// 操作系统外部符号签名。语言 runtime 必须通过 `runtime_contract` 声明。
+    pub(crate) fn external_signature(
+        &self,
+        params: &[cranelift_codegen::ir::Type],
+        ret: Option<cranelift_codegen::ir::Type>,
+    ) -> Signature {
         let mut s = Signature::new(self.cc);
         for p in params {
             s.params.push(AbiParam::new(*p));
@@ -43,15 +40,40 @@ impl<'m, M: Module> Compiler<'m, M> {
             .map_err(|e| native_err(Span::default(), format!("内部: 函数声明失败 {e}")))
     }
 
-    pub(crate) fn import_fn(
+    pub(crate) fn import_external(
         &mut self,
         name: &str,
         params: &[cranelift_codegen::ir::Type],
         ret: Option<cranelift_codegen::ir::Type>,
     ) -> AliasResult<FuncId> {
+        if name.starts_with("alias.") || name.starts_with("rt.") {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: runtime 符号 '{name}' 必须经契约表声明"),
+            ));
+        }
         self.module
-            .declare_function(name, Linkage::Import, &self.sig(params, ret))
+            .declare_function(name, Linkage::Import, &self.external_signature(params, ret))
             .map_err(|e| native_err(Span::default(), format!("内部: 符号声明失败 {e}")))
+    }
+
+    pub(crate) fn import_runtime(&mut self, name: &str) -> AliasResult<FuncId> {
+        let contract = runtime_contract(name)?;
+        let available = if self.is_aot {
+            contract.backends.aot
+        } else {
+            contract.backends.jit
+        };
+        if !available {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: runtime 符号 '{}' 不支持当前后端", contract.symbol),
+            ));
+        }
+        let sig = contract.signature(self.cc, self.ptr_ty);
+        self.module
+            .declare_function(contract.symbol, Linkage::Import, &sig)
+            .map_err(|e| native_err(Span::default(), format!("内部: runtime 声明失败 {e}")))
     }
 
     /// 调外部/运行时符号的单返回值调用辅助 (JIT 宿主符号与 AOT shim 同名)
@@ -59,11 +81,37 @@ impl<'m, M: Module> Compiler<'m, M> {
         &mut self,
         bcx: &mut FunctionBuilder,
         name: &str,
-        params: &[cranelift_codegen::ir::Type],
-        ret: Option<cranelift_codegen::ir::Type>,
         args: &[Value],
     ) -> AliasResult<Value> {
-        let fid = self.import_fn(name, params, ret)?;
+        let contract = runtime_contract(name)?;
+        if args.len() != contract.params.len() {
+            return Err(native_err(
+                Span::default(),
+                format!(
+                    "内部: runtime '{}' 参数数量不匹配，契约 {}，调用点 {}",
+                    name,
+                    contract.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        for (index, (arg, expected)) in args.iter().zip(contract.params).enumerate() {
+            let actual = bcx.func.dfg.value_type(*arg);
+            let expected = expected.ty.resolve(self.ptr_ty);
+            if actual != expected {
+                return Err(native_err(
+                    Span::default(),
+                    format!(
+                        "内部: runtime '{}' 第 {} 个参数类型不匹配，契约 {}，调用点 {}",
+                        name,
+                        index + 1,
+                        expected,
+                        actual
+                    ),
+                ));
+            }
+        }
+        let fid = self.import_runtime(name)?;
         let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
         let inst = bcx.ins().call(fref, args);
         Ok(match bcx.inst_results(inst) {
@@ -81,8 +129,10 @@ impl<'m, M: Module> Compiler<'m, M> {
         caps: Vec<(String, VTy)>,
         ret_vty: VTy,
     ) -> AliasResult<()> {
-        let param_vtys: Vec<VTy> =
-            params.iter().map(|p| decl_vty(&p.ty, &self.struct_layouts)).collect();
+        let param_vtys: Vec<VTy> = params
+            .iter()
+            .map(|p| decl_vty(&p.ty, &self.struct_layouts))
+            .collect();
         let sig = self.user_sig_typed(&param_vtys, &ret_vty);
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, fid.as_u32()), sig);
@@ -152,17 +202,37 @@ impl<'m, M: Module> Compiler<'m, M> {
     /// JIT: 名 alias_entry 返回 I64 由宿主读取;
     /// AOT: 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
     /// 链接参数 /ENTRY:alias_start (linker.rs 单一拥有者)。
-    pub(crate) fn compile_entry(&mut self, items: &[Item], main_slot: usize, main_ret: VTy) -> AliasResult<FuncId> {
+    pub(crate) fn compile_entry(
+        &mut self,
+        items: &[Item],
+        main_slot: usize,
+        main_ret: VTy,
+    ) -> AliasResult<FuncId> {
         if main_ret != VTy::I(IntW::W32) {
-            return Err(native_err(Span::default(), "内部: sema 未将 main 收紧为 i32"));
+            return Err(native_err(
+                Span::default(),
+                "内部: sema 未将 main 收紧为 i32",
+            ));
         }
         let mut entry_sig = Signature::new(self.cc);
-        entry_sig.returns.push(AbiParam::new(if self.is_aot { types::I32 } else { types::I64 }));
+        entry_sig.returns.push(AbiParam::new(if self.is_aot {
+            types::I32
+        } else {
+            types::I64
+        }));
         let fid = self
             .module
             .declare_function(
-                if self.is_aot { "alias_start" } else { "alias_entry" },
-                if self.is_aot { Linkage::Export } else { Linkage::Local },
+                if self.is_aot {
+                    "alias_start"
+                } else {
+                    "alias_entry"
+                },
+                if self.is_aot {
+                    Linkage::Export
+                } else {
+                    Linkage::Local
+                },
                 &entry_sig,
             )
             .map_err(|e| native_err(Span::default(), format!("内部: 入口声明失败 {e}")))?;
@@ -176,13 +246,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.seal_block(entry);
 
         let byte_count = bcx.ins().iconst(types::I64, self.global_bytes as i64);
-        let gword = self.call_rt(
-            &mut bcx,
-            "alias.globals.new",
-            &[types::I64],
-            Some(types::I64),
-            &[byte_count],
-        )?;
+        let gword = self.call_rt(&mut bcx, "alias.globals.new", &[byte_count])?;
 
         let globals_v = bcx.declare_var(types::I64);
         bcx.def_var(globals_v, gword);
@@ -206,10 +270,14 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         // 名字随项序增长可见 — 镜像解释器逐项插入 (insert-after-eval);
         // 方法不是绑定, 不参与初始化序列
-        for (binding_index, b) in items.iter().filter_map(|i| match i {
-            Item::Binding(b) if b.receiver.is_none() => Some(b),
-            _ => None,
-        }).enumerate() {
+        for (binding_index, b) in items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Binding(b) if b.receiver.is_none() => Some(b),
+                _ => None,
+            })
+            .enumerate()
+        {
             let (v, svty) = if b.kind == BindKind::Func {
                 let Expr::FuncLit { params, body, .. } = &b.value else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
@@ -246,14 +314,12 @@ impl<'m, M: Module> Compiler<'m, M> {
         // main 闭包: 从全局槽位加载 → 间接调用 (混合签名 — 返回类型定型)
         let clo = {
             let base = bcx.use_var(frame.globals);
-            bcx.ins().load(types::I64, MemFlagsData::new(), base, main_slot as i32)
+            bcx.ins()
+                .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
         let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
         let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
-        let mut msig = Signature::new(self.cc);
-        msig.params.push(AbiParam::new(types::I64));
-        msig.params.push(AbiParam::new(types::I64));
-        msig.returns.push(AbiParam::new(cl_type(&main_ret)));
+        let msig = user_signature(self.cc, &[], &main_ret);
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
@@ -261,7 +327,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         if self.is_aot {
             // 无 CRT 环境: 显式 ExitProcess 传递退出码 (返回值无人接收)
             let exit_code = bcx.ins().ireduce(types::I32, code_word);
-            let ep = self.import_fn("ExitProcess", &[types::I32], None)?;
+            let ep = self.import_external("ExitProcess", &[types::I32], None)?;
             let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
             bcx.ins().call(epr, &[exit_code]);
             bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
@@ -274,7 +340,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.switch_to_block(abort_ret);
         bcx.seal_block(abort_ret);
         if self.is_aot {
-            let ep = self.import_fn("ExitProcess", &[types::I32], None)?;
+            let ep = self.import_external("ExitProcess", &[types::I32], None)?;
             let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
             let one = bcx.ins().iconst(types::I32, 1);
             bcx.ins().call(epr, &[one]);
@@ -320,7 +386,10 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     ret_vty: VTy,
 ) -> AliasResult<Value> {
     let caps = scan_captures(c, params, body, frame);
-    let param_vtys: Vec<VTy> = params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect();
+    let param_vtys: Vec<VTy> = params
+        .iter()
+        .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+        .collect();
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
@@ -343,7 +412,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let env_word = if caps.is_empty() {
         bcx.ins().iconst(types::I64, 0)
     } else {
-        let en = c.import_fn("alias.env.new", &[types::I32], Some(types::I64))?;
+        let en = c.import_runtime("alias.env.new")?;
         let eref = c.module.declare_func_in_func(en, &mut bcx.func);
         let len = bcx.ins().iconst(types::I32, caps.len() as i64);
         let ecall = bcx.ins().call(eref, &[len]);
@@ -353,7 +422,12 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         // 捕获项必可解析为本帧局部或本帧捕获 (扫描保证)
         let cellw = if let Some(idx) = frame.caps.get(name) {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            bcx.ins().load(types::I64, MemFlagsData::new(), base, ((*idx as i64) * 8) as i32)
+            bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                base,
+                ((*idx as i64) * 8) as i32,
+            )
         } else {
             let mut found: Option<Value> = None;
             for scope in frame.scopes.iter().rev() {
@@ -364,13 +438,18 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
             }
             found.unwrap_or_else(|| invariant_violation("捕获项解析"))
         };
-        bcx.ins().store(MemFlagsData::new(), cellw, env_word, ((i as i64) * 8) as i32);
+        bcx.ins().store(
+            MemFlagsData::new(),
+            cellw,
+            env_word,
+            ((i as i64) * 8) as i32,
+        );
     }
 
     // 直取函数地址 (func_addr) — JIT/Object 双后端通用, 免运行时指针表
     let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
     let code = bcx.ins().func_addr(c.ptr_ty, fref);
-    let cn = c.import_fn("alias.closure.new", &[types::I64, types::I64], Some(types::I64))?;
+    let cn = c.import_runtime("alias.closure.new")?;
     let cnref = c.module.declare_func_in_func(cn, &mut bcx.func);
     let cncall = bcx.ins().call(cnref, &[code, env_word]);
     Ok(first_result(bcx, cncall))
@@ -463,11 +542,12 @@ pub(crate) fn ensure_scanned_name(
         return;
     }
     // 仅外层函数局部需要捕获; 顶层槽位经 globals 参数可达, 不捕获
-    let outer_local = frame
-        .scopes
-        .iter()
-        .rev()
-        .any(|sc| matches!(sc.get(name), Some(Slot::Local(_))));
+    let outer_local = frame.caps.contains_key(name)
+        || frame
+            .scopes
+            .iter()
+            .rev()
+            .any(|sc| matches!(sc.get(name), Some(Slot::Local(_))));
     if outer_local {
         record_cap(name, caps, seen);
     }

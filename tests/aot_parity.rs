@@ -64,20 +64,39 @@ fn jit_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
 
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_dir(&dir);
-    (
-        out.stdout,
-        out.stderr,
-        out.status.code().unwrap_or(-1),
+    (out.stdout, out.stderr, out.status.code().unwrap_or(-1))
+}
+
+fn nested_closure_program(depth: usize) -> String {
+    fn body(level: usize, depth: usize) -> String {
+        let indent = "    ".repeat(level + 1);
+        let mut out = format!("{indent}val i32 x{level} = {}\n", level + 1);
+        if level + 1 == depth {
+            let sum = std::iter::once("root".to_string())
+                .chain((0..depth).map(|i| format!("x{i}")))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            out.push_str(&format!("{indent}return {sum}\n"));
+        } else {
+            out.push_str(&format!(
+                "{indent}func i32 f{} = () -> {{\n{}{indent}}}\n",
+                level + 1,
+                body(level + 1, depth)
+            ));
+            out.push_str(&format!("{indent}return f{}()\n", level + 1));
+        }
+        out
+    }
+    format!(
+        "func i32 main = () -> {{\n    val i32 root = 7\n    func i32 f0 = () -> {{\n{}    }}\n    return f0()\n}}\n",
+        body(0, depth)
     )
 }
 
 /// 同一 AOT 产物重复执行，专门捕获依赖地址/时序的间歇性崩溃。
 fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32)> {
     let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "alias_aot_repeat_{}_{n}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("alias_aot_repeat_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("创建临时目录失败");
     let src_path = dir.join("prog.as");
     let exe_path = dir.join("prog.exe");
@@ -95,11 +114,7 @@ fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32
     let mut out = Vec::with_capacity(runs);
     for _ in 0..runs {
         let run = Command::new(&exe_path).output().expect("运行 AOT 产物失败");
-        out.push((
-            run.stdout,
-            run.stderr,
-            run.status.code().unwrap_or(-1),
-        ));
+        out.push((run.stdout, run.stderr, run.status.code().unwrap_or(-1)));
     }
     let _ = std::fs::remove_file(&exe_path);
     let _ = std::fs::remove_file(&src_path);
@@ -148,7 +163,7 @@ fn aot_div_zero_aborts_with_span() {
 fn methods_aot_same_binary_is_stable() {
     let expected = "忠犬\nABC\nabc\n3\nhi\n[]\n[plain]\n3\nHi!\n5\n7\nc(7)\n7\n".as_bytes();
     for (index, (stdout, stderr, code)) in
-        build_once_and_run_many(include_str!("../demos/methods.as"), 30)
+        build_once_and_run_many(include_str!("../demos/methods.as"), 100)
             .into_iter()
             .enumerate()
     {
@@ -162,7 +177,9 @@ fn methods_aot_same_binary_is_stable() {
 fn aot_matches_jit_wide_and_float_display() {
     let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = max + one\n    val u64 b = to_u64(-1)\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
     let jit = jit_run(src);
-    assert!(String::from_utf8_lossy(&jit.0).contains("-9223372036854775808\n18446744073709551615\n"));
+    assert!(
+        String::from_utf8_lossy(&jit.0).contains("-9223372036854775808\n18446744073709551615\n")
+    );
     assert_eq!(build_and_run(src), jit);
 }
 
@@ -186,6 +203,82 @@ fn aot_matches_jit_mixed_struct_layout_and_self_abi() {
     let jit = jit_run(src);
     assert_eq!(jit.2, 0);
     assert_eq!(build_and_run(src), jit);
+}
+
+#[test]
+fn aot_matches_jit_layout_permutation_matrix() {
+    let src = r#"
+struct a { val i8 x = 7 val f64 y = 2.5 val i16 z = 9 val string s = 'a' }
+struct b { val string s = 'b' val i8 x = 8 val f32 y = 1.25 val i64 z = 99 }
+struct c { val f64 x = 3.5 val bool ok = true val u8 y = 255 val string s = 'c' val i16 z = -4 }
+public func string a.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
+public func string b.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
+public func string c.show = () -> return '${self.s}:${self.x}:${self.ok}:${self.y}:${self.z}'
+func i32 main = () -> {
+    val a av = a()
+    val b bv = b()
+    val c cv = c()
+    println av.show()
+    println bv.show()
+    println cv.show()
+    return 0
+}
+"#;
+    let jit = jit_run(src);
+    assert_eq!(jit.2, 0);
+    assert_eq!(build_and_run(src), jit);
+}
+
+#[test]
+fn aot_matches_jit_numeric_boundary_matrix() {
+    let src = r#"
+func i32 main = () -> {
+    val i8 a = 127
+    val i8 one8 = 1
+    val i8 aw = a + one8
+    val u8 b = 255
+    val u8 uone8 = 1
+    val u8 bw = b + uone8
+    val i16 c = 32767
+    val i16 one16 = 1
+    val i16 cw = c + one16
+    val u16 d = 65535
+    val u16 uone16 = 1
+    val u16 dw = d + uone16
+    val i32 e = 2147483647
+    val i32 one32 = 1
+    val i32 ew = e + one32
+    val i64 f = 9223372036854775807
+    val i64 one = 1
+    val i64 fw = f + one
+    val u64 g = to_u64(-1)
+    val u64 uone64 = 1
+    val u64 gw = g + uone64
+    println aw
+    println bw
+    println cw
+    println dw
+    println ew
+    println fw
+    println gw
+    return 0
+}
+"#;
+    let jit = jit_run(src);
+    assert_eq!(
+        jit.0,
+        b"-128\n0\n-32768\n0\n-2147483648\n-9223372036854775808\n0\n"
+    );
+    assert_eq!(build_and_run(src), jit);
+}
+
+#[test]
+fn aot_matches_jit_deep_transitive_closure_chain() {
+    let depth = 16;
+    let src = nested_closure_program(depth);
+    let jit = jit_run(&src);
+    assert_eq!(jit.2, 7 + (1..=depth as i32).sum::<i32>());
+    assert_eq!(build_and_run(&src), jit);
 }
 
 #[test]

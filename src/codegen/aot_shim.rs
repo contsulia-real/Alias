@@ -5,15 +5,15 @@
 // ---------------------------------------------------------------------------
 use super::*;
 use crate::codegen::Compiler;
-use std::collections::HashMap;
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::ir::Function;
+use cranelift_codegen::ir::{BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
+use std::collections::HashMap;
 
 /// ASCII 空白字符集 (trim 判定)
 const TRIM_SET: &[u8] = b" \t\r\n";
@@ -28,7 +28,6 @@ const TRIM_SET: &[u8] = b" \t\r\n";
 // 同名 Export 定义经 cranelift-module 符号合并为同一 FuncId。
 // ---------------------------------------------------------------------------
 
-
 /// AOT 外部符号集 (链接期经导入库解析)
 struct AotExterns {
     get_std_handle: FuncId,
@@ -39,14 +38,9 @@ struct AotExterns {
 /// shim 发射样板: 声明 Export 函数 → body 在 entry 上发射 → 定义。
 /// body 求值为 true 表示已发射终结指令; false 则按返回类型补默认 return 0。
 macro_rules! shim {
-    ($c:expr, $name:expr, $params:expr, $ret:expr, |$bcx:ident, $a:ident| $body:block) => {{
-        let __params: Vec<cranelift_codegen::ir::Type> = $params;
-        let __ret: Option<cranelift_codegen::ir::Type> = $ret;
-        let __sig = $c.sig(&__params, __ret.clone());
-        let __fid = $c
-            .module
-            .declare_function($name, Linkage::Export, &__sig)
-            .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    ($c:expr, $name:expr, |$bcx:ident, $a:ident| $body:block) => {{
+        let (__fid, __sig, __contract) = declare_runtime_shim($c, $name)?;
+        let __ret = __contract.ret.map(|v| v.ty.resolve($c.ptr_ty));
         let mut __ctx = Context::new();
         __ctx.func =
             Function::with_name_signature(UserFuncName::user(0x77, __fid.as_u32()), __sig.clone());
@@ -65,7 +59,9 @@ macro_rules! shim {
                     let z = $bcx.ins().iconst(t, 0);
                     $bcx.ins().return_(&[z]);
                 }
-                None => { $bcx.ins().return_(&[]); },
+                None => {
+                    $bcx.ins().return_(&[]);
+                }
             }
         }
 
@@ -73,6 +69,60 @@ macro_rules! shim {
             .define_function(__fid, &mut __ctx)
             .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))?;
     }};
+}
+
+fn declare_runtime_shim<M: Module>(
+    c: &mut Compiler<'_, M>,
+    name: &str,
+) -> AliasResult<(
+    FuncId,
+    cranelift_codegen::ir::Signature,
+    &'static RuntimeContract,
+)> {
+    let contract = runtime_contract(name)?;
+    if !contract.backends.aot {
+        return Err(native_err(
+            Span::default(),
+            format!("内部: runtime '{}' 没有 AOT 契约", contract.symbol),
+        ));
+    }
+    let sig = contract.signature(c.cc, c.ptr_ty);
+    let fid = c
+        .module
+        .declare_function(contract.symbol, Linkage::Export, &sig)
+        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    if !c.runtime_defined.insert(contract.symbol) {
+        return Err(native_err(
+            Span::default(),
+            format!("内部: AOT shim 重复定义 '{}'", contract.symbol),
+        ));
+    }
+    Ok((fid, sig, contract))
+}
+
+fn validate_aot_runtime_coverage<M: Module>(c: &Compiler<'_, M>) -> AliasResult<()> {
+    validate_contract_table().map_err(|msg| native_err(Span::default(), msg))?;
+    let expected = RUNTIME_CONTRACTS
+        .iter()
+        .filter(|contract| contract.backends.aot)
+        .map(|contract| contract.symbol)
+        .collect::<std::collections::HashSet<_>>();
+    if c.runtime_defined != expected {
+        let missing = expected
+            .difference(&c.runtime_defined)
+            .copied()
+            .collect::<Vec<_>>();
+        let extra = c
+            .runtime_defined
+            .difference(&expected)
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(native_err(
+            Span::default(),
+            format!("内部: AOT shim 与 runtime 契约表不一致，缺失 {missing:?}，多余 {extra:?}"),
+        ));
+    }
+    Ok(())
 }
 
 /// trim 字节成员判定: 空格/\t/\r/\n 四路比较或链 (冻结字符集)。
@@ -95,11 +145,7 @@ pub(crate) fn emit_case_shim<M: Module>(
     hi: i64,
     delta: i64,
 ) -> AliasResult<()> {
-    let sig = c.sig(&[types::I64], Some(types::I64));
-    let fid = c
-        .module
-        .declare_function(name, Linkage::Export, &sig)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let (fid, sig, _) = declare_runtime_shim(c, name)?;
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
     let mut fbc = FunctionBuilderContext::new();
@@ -127,7 +173,7 @@ pub(crate) fn emit_case_shim<M: Module>(
 
     bcx.switch_to_block(then_b);
     {
-        let alloc_f = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+        let alloc_f = c.import_runtime("rt.heap.alloc")?;
         let out = {
             let r = c.module.declare_func_in_func(alloc_f, &mut bcx.func);
             let inst = bcx.ins().call(r, &[la]);
@@ -178,7 +224,7 @@ pub(crate) fn emit_case_shim<M: Module>(
     {
         let zero = bcx.ins().iconst(types::I64, 0);
         let blk = {
-            let f = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+            let f = c.import_runtime("rt.heap.alloc")?;
             let r = c.module.declare_func_in_func(f, &mut bcx.func);
             let sz = bcx.ins().iconst(types::I64, 16);
             let inst = bcx.ins().call(r, &[sz]);
@@ -204,11 +250,7 @@ fn emit_integer_display_shim<M: Module>(
     name: &str,
     signed: bool,
 ) -> AliasResult<()> {
-    let sig = c.sig(&[types::I64], Some(types::I64));
-    let fid = c
-        .module
-        .declare_function(name, Linkage::Export, &sig)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let (fid, sig, _) = declare_runtime_shim(c, name)?;
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
     let mut fbc = FunctionBuilderContext::new();
@@ -219,7 +261,7 @@ fn emit_integer_display_shim<M: Module>(
     bcx.seal_block(entry);
     let value = bcx.block_params(entry)[0];
 
-    let alloc = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+    let alloc = c.import_runtime("rt.heap.alloc")?;
     let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
     let sz32 = bcx.ins().iconst(types::I64, 32);
     let buf_call = bcx.ins().call(alloc_ref, &[sz32]);
@@ -330,11 +372,13 @@ fn emit_float_display_shim<M: Module>(
     name: &str,
     param_ty: cranelift_codegen::ir::Type,
 ) -> AliasResult<()> {
-    let sig = c.sig(&[param_ty], Some(types::I64));
-    let fid = c
-        .module
-        .declare_function(name, Linkage::Export, &sig)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let (fid, sig, contract) = declare_runtime_shim(c, name)?;
+    if contract.params[0].ty.resolve(c.ptr_ty) != param_ty {
+        return Err(native_err(
+            Span::default(),
+            format!("内部: 浮点 display '{}' 实现类型与契约不一致", name),
+        ));
+    }
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
     let mut fbc = FunctionBuilderContext::new();
@@ -349,7 +393,7 @@ fn emit_float_display_shim<M: Module>(
     } else {
         raw
     };
-    let alloc = c.import_fn("rt.heap.alloc", &[types::I64], Some(c.ptr_ty))?;
+    let alloc = c.import_runtime("rt.heap.alloc")?;
 
     let nan_b = bcx.create_block();
     let inf_b = bcx.create_block();
@@ -477,7 +521,8 @@ fn emit_float_display_shim<M: Module>(
     let p0 = bcx.use_var(pos);
     let first_addr = bcx.ins().iadd(buf, p0);
     let first_byte = bcx.ins().ireduce(types::I8, first_ch);
-    bcx.ins().store(MemFlagsData::new(), first_byte, first_addr, 0);
+    bcx.ins()
+        .store(MemFlagsData::new(), first_byte, first_addr, 0);
     let p1 = bcx.ins().iadd_imm_s(p0, 1);
     bcx.def_var(pos, p1);
     let frac = bcx.declare_var(types::I64);
@@ -537,7 +582,8 @@ fn emit_float_display_shim<M: Module>(
     let last = bcx.ins().load(types::I8, MemFlagsData::new(), last_addr, 0);
     let is_zero_digit = bcx.ins().icmp_imm_s(IntCC::Equal, last, b'0' as i64);
     let trim_body = bcx.create_block();
-    bcx.ins().brif(is_zero_digit, trim_body, &[], exponent_b, &[]);
+    bcx.ins()
+        .brif(is_zero_digit, trim_body, &[], exponent_b, &[]);
     bcx.seal_block(trim_body);
     bcx.switch_to_block(trim_body);
     bcx.def_var(pos, last_pos);
@@ -573,7 +619,8 @@ fn emit_float_display_shim<M: Module>(
     let has_hundreds = bcx.ins().icmp_imm_s(IntCC::NotEqual, hundreds, 0);
     let hundred_b = bcx.create_block();
     let tens_check_b = bcx.create_block();
-    bcx.ins().brif(has_hundreds, hundred_b, &[], tens_check_b, &[]);
+    bcx.ins()
+        .brif(has_hundreds, hundred_b, &[], tens_check_b, &[]);
     bcx.seal_block(hundred_b);
     bcx.switch_to_block(hundred_b);
     let p = bcx.use_var(pos);
@@ -629,7 +676,11 @@ fn emit_float_display_shim<M: Module>(
 }
 
 /// span 表数据段回填: (line, col) u32 小端对 — abort shim 运行时查表。
-pub(crate) fn define_span_data<M: Module>(c: &mut Compiler<'_, M>, table: &[(u32, u32)]) -> AliasResult<()> {    let id = c
+pub(crate) fn define_span_data<M: Module>(
+    c: &mut Compiler<'_, M>,
+    table: &[(u32, u32)],
+) -> AliasResult<()> {
+    let id = c
         .module
         .declare_data("alias_span_table", Linkage::Local, false, false)
         .map_err(|e| native_err(Span::default(), format!("内部: span 段声明失败 {e}")))?;
@@ -656,11 +707,7 @@ fn emit_span_abort<M: Module>(
     suffix: &str,
     suffix_len: i64,
 ) -> AliasResult<()> {
-    let sig = c.sig(&[types::I32], None);
-    let fid = c
-        .module
-        .declare_function(name, Linkage::Export, &sig)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 声明失败 {e}")))?;
+    let (fid, sig, _) = declare_runtime_shim(c, name)?;
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(UserFuncName::user(0x77, fid.as_u32()), sig);
     let mut fbc = FunctionBuilderContext::new();
@@ -683,23 +730,25 @@ fn emit_span_abort<M: Module>(
 
     macro_rules! w_str {
         ($bcx:expr, $err:expr, $data:expr, $len:expr) => {{
-            let __wa = $bcx.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                3,
-            ));
+            let __wa =
+                $bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
             let __wa_addr = $bcx.ins().stack_addr(c.ptr_ty, __wa, 0);
             let __null = $bcx.ins().iconst(c.ptr_ty, 0);
-            let __gv = c.module.declare_data_in_func(static_ids[$data], &mut $bcx.func);
+            let __gv = c
+                .module
+                .declare_data_in_func(static_ids[$data], &mut $bcx.func);
             let __addr = $bcx.ins().symbol_value(c.ptr_ty, __gv);
             let __len = $bcx.ins().iconst(types::I32, $len);
-            let __wf = c.module.declare_func_in_func(ext.write_file, &mut $bcx.func);
-            $bcx.ins().call(__wf, &[$err, __addr, __len, __wa_addr, __null]);
+            let __wf = c
+                .module
+                .declare_func_in_func(ext.write_file, &mut $bcx.func);
+            $bcx.ins()
+                .call(__wf, &[$err, __addr, __len, __wa_addr, __null]);
         }};
     }
     macro_rules! w_dec {
         ($bcx:expr, $err:expr, $v:expr) => {{
-            let __f = c.import_fn("rt.write.dec", &[c.ptr_ty, types::I64], None)?;
+            let __f = c.import_runtime("rt.write.dec")?;
             let __r = c.module.declare_func_in_func(__f, &mut $bcx.func);
             let __args = [$err, bcx.ins().uextend(types::I64, $v)];
             $bcx.ins().call(__r, &__args);
@@ -707,7 +756,9 @@ fn emit_span_abort<M: Module>(
     }
     let err_args = [bcx.ins().iconst(types::I32, -12)];
     let err = {
-        let r = c.module.declare_func_in_func(ext.get_std_handle, &mut bcx.func);
+        let r = c
+            .module
+            .declare_func_in_func(ext.get_std_handle, &mut bcx.func);
         let inst = bcx.ins().call(r, &err_args);
         first_result(&bcx, inst)
     };
@@ -717,7 +768,9 @@ fn emit_span_abort<M: Module>(
     w_dec!(bcx, err, col);
     w_str!(bcx, err, suffix, suffix_len);
     let code1 = bcx.ins().iconst(types::I32, 1);
-    let ep = c.module.declare_func_in_func(ext.exit_process, &mut bcx.func);
+    let ep = c
+        .module
+        .declare_func_in_func(ext.exit_process, &mut bcx.func);
     bcx.ins().call(ep, &[code1]);
     bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
 
@@ -729,17 +782,22 @@ fn emit_span_abort<M: Module>(
 
 pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
     let ext = AotExterns {
-        get_std_handle: c.import_fn("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
-        write_file: c.import_fn(
+        get_std_handle: c.import_external("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
+        write_file: c.import_external(
             "WriteFile",
             &[c.ptr_ty, c.ptr_ty, types::I32, c.ptr_ty, c.ptr_ty],
             Some(types::I32),
         )?,
-        exit_process: c.import_fn("ExitProcess", &[types::I32], None)?,
+        exit_process: c.import_external("ExitProcess", &[types::I32], None)?,
     };
-    let heap_alloc = c.import_fn("HeapAlloc", &[c.ptr_ty, types::I32, types::I64], Some(c.ptr_ty))?;
-    let _get_process_heap = c.import_fn("GetProcessHeap", &[], Some(c.ptr_ty))?;
-    let rtl_move_memory = c.import_fn("RtlMoveMemory", &[c.ptr_ty, c.ptr_ty, types::I64], None)?;
+    let heap_alloc = c.import_external(
+        "HeapAlloc",
+        &[c.ptr_ty, types::I32, types::I64],
+        Some(c.ptr_ty),
+    )?;
+    let get_process_heap = c.import_external("GetProcessHeap", &[], Some(c.ptr_ty))?;
+    let rtl_move_memory =
+        c.import_external("RtlMoveMemory", &[c.ptr_ty, c.ptr_ty, types::I64], None)?;
 
     // span 表槽位先行声明 (abort shim 引用; 内容编译后由 define_span_data 回填)
     let span_data = c
@@ -762,10 +820,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("rt_inf", b"inf"),
         ("rt_ninf", b"-inf"),
         ("rt_zero", b"0"),
-        ("rt_msg_prefix", "错误 @ ".as_bytes()),      // 9 字节
+        ("rt_msg_prefix", "错误 @ ".as_bytes()), // 9 字节
         ("rt_colon", b":"),
         ("rt_msg_suffix", " — 除以零\n".as_bytes()), // 15 字节
-        ("rt_oob_suffix", " — 下标越界\n".as_bytes()),  // 18 字节
+        ("rt_oob_suffix", " — 下标越界\n".as_bytes()), // 18 字节
         ("rt_pop_suffix", " — pop 空数组\n".as_bytes()), // 19 字节
         ("rt_conv_suffix", " — 转换越界\n".as_bytes()), // 18 字节
     ];
@@ -785,21 +843,16 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     macro_rules! sym {
         ($bcx:expr, $name:expr) => {{
-            let __gv = c.module.declare_data_in_func(static_ids[$name], &mut $bcx.func);
+            let __gv = c
+                .module
+                .declare_data_in_func(static_ids[$name], &mut $bcx.func);
             $bcx.ins().symbol_value(c.ptr_ty, __gv)
         }};
     }
     macro_rules! call_rt_m {
-        ($bcx:expr, $nm:expr, $ps:expr, $r:expr, $args:expr) => {{
-            let __f = c.import_fn($nm, &$ps, $r)?;
-            let __r = c.module.declare_func_in_func(__f, &mut $bcx.func);
+        ($bcx:expr, $nm:expr, $args:expr) => {{
             let __args = $args;
-            let __inst = $bcx.ins().call(__r, &__args);
-            match $bcx.inst_results(__inst) {
-                [v] => *v,
-                [] => $bcx.ins().iconst(types::I64, 0),
-                _ => invariant_violation("运行时单返回值签名"),
-            }
+            c.call_rt(&mut $bcx, $nm, &__args)?
         }};
     }
     macro_rules! call_ext_m {
@@ -812,8 +865,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     }
 
     // ---- rt.heap.alloc(n:I64) -> PTR ----
-    shim!(c, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), |bcx, a| {
-        let h = call_rt_m!(bcx, "GetProcessHeap", vec![], Some(c.ptr_ty), vec![]);
+    shim!(c, "rt.heap.alloc", |bcx, a| {
+        let h = call_ext_m!(bcx, get_process_heap, vec![]);
         let flags = bcx.ins().iconst(types::I32, 8); // HEAP_ZERO_MEMORY
         let p = call_ext_m!(bcx, heap_alloc, vec![h, flags, a[0]]);
         let failed = bcx.ins().icmp_imm_s(IntCC::Equal, p, 0);
@@ -824,7 +877,9 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.seal_block(ok_b);
         bcx.switch_to_block(fail_b);
         let one = bcx.ins().iconst(types::I32, 1);
-        let ep = c.module.declare_func_in_func(ext.exit_process, &mut bcx.func);
+        let ep = c
+            .module
+            .declare_func_in_func(ext.exit_process, &mut bcx.func);
         bcx.ins().call(ep, &[one]);
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
         bcx.switch_to_block(ok_b);
@@ -833,37 +888,29 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
 
     // ---- 分配器: cell / env / globals / closure ----
-    shim!(c, "alias.cell.new", vec![types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.cell.new", |bcx, a| {
         // 参数是调用端按 size_align 算出的字节数；HeapAlloc 的
         // HEAP_ZERO_MEMORY 保证绑定/结构体存储区初始清零，值由调用端写入。
-        let p = call_rt_m!(
-            bcx,
-            "rt.heap.alloc",
-            vec![types::I64],
-            Some(c.ptr_ty),
-            vec![a[0]]
-        );
+        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![a[0]]);
         bcx.ins().return_(&[p]);
         true
     });
-    for name in ["alias.env.new"] {
-        shim!(c, name, vec![types::I32], Some(types::I64), |bcx, a| {
-            let n64 = bcx.ins().sextend(types::I64, a[0]);
-            let bytes = bcx.ins().imul_imm_s(n64, 8);
-            let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
-            bcx.ins().return_(&[p]);
-            true
-        });
-    }
+    shim!(c, "alias.env.new", |bcx, a| {
+        let n64 = bcx.ins().sextend(types::I64, a[0]);
+        let bytes = bcx.ins().imul_imm_s(n64, 8);
+        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
+        bcx.ins().return_(&[p]);
+        true
+    });
     // globals.new (Phase 3a): 入参为字节数 — 混型宽度槽区的布局由调用方计算
-    shim!(c, "alias.globals.new", vec![types::I64], Some(types::I64), |bcx, a| {
-        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![a[0]]);
+    shim!(c, "alias.globals.new", |bcx, a| {
+        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![a[0]]);
         bcx.ins().return_(&[p]);
         true
     });
-    shim!(c, "alias.closure.new", vec![types::I64, types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.closure.new", |bcx, a| {
         let sz = bcx.ins().iconst(types::I64, 16);
-        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![sz]);
+        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![sz]);
         bcx.ins().store(MemFlagsData::new(), a[0], p, 0);
         bcx.ins().store(MemFlagsData::new(), a[1], p, 8);
         bcx.ins().return_(&[p]);
@@ -871,9 +918,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
 
     // ---- 字符串块 {data_ptr, len}; 字节复制进新缓冲 ----
-    shim!(c, "alias.str.new", vec![c.ptr_ty, types::I32], Some(types::I64), |bcx, a| {
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 16)]);
+    shim!(c, "alias.str.new", |bcx, a| {
+        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
         let len64 = bcx.ins().sextend(types::I64, a[1]);
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len64, 0);
         let then_b = bcx.create_block();
@@ -884,8 +930,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.seal_block(else_b);
         bcx.switch_to_block(then_b);
         {
-            let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![len64]);
-            let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![len64]);
+            let mv = c
+                .module
+                .declare_func_in_func(rtl_move_memory, &mut bcx.func);
             bcx.ins().call(mv, &[buf, a[0], len64]);
             bcx.ins().store(MemFlagsData::new(), buf, blk, 0);
             bcx.ins().jump(end_b, &[]);
@@ -903,7 +951,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         true
     });
 
-    shim!(c, "alias.str.concat", vec![types::I64, types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.str.concat", |bcx, a| {
         let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
@@ -918,7 +966,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.seal_block(alloc_b);
         bcx.seal_block(empty_b);
         bcx.switch_to_block(alloc_b);
-        let out = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![total]);
+        let out = call_rt_m!(bcx, "rt.heap.alloc", vec![total]);
         bcx.ins().jump(data_b, &[BlockArg::Value(out)]);
         bcx.switch_to_block(empty_b);
         let null = bcx.ins().iconst(types::I64, 0);
@@ -932,7 +980,9 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.ins().brif(has_a, copy_a_b, &[], after_a_b, &[]);
         bcx.seal_block(copy_a_b);
         bcx.switch_to_block(copy_a_b);
-        let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
+        let mv = c
+            .module
+            .declare_func_in_func(rtl_move_memory, &mut bcx.func);
         bcx.ins().call(mv, &[out_word, pa, la]);
         bcx.ins().jump(after_a_b, &[]);
         bcx.switch_to_block(after_a_b);
@@ -949,15 +999,14 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.ins().jump(after_b_b, &[]);
         bcx.switch_to_block(after_b_b);
         bcx.seal_block(after_b_b);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 16)]);
+        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
         bcx.ins().store(MemFlagsData::new(), out_word, blk, 0);
         bcx.ins().store(MemFlagsData::new(), total, blk, 8);
         bcx.ins().return_(&[blk]);
         true
     });
 
-    shim!(c, "alias.str.cmp", vec![types::I64, types::I64], Some(types::I32), |bcx, a| {
+    shim!(c, "alias.str.cmp", |bcx, a| {
         let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
@@ -1018,7 +1067,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
 
     // ---- 内建字符串方法 (Phase 2c): 与 JIT 宿主函数同符号同契约 ----
-    shim!(c, "alias.str.len", vec![types::I64], Some(types::I32), |bcx, a| {
+    shim!(c, "alias.str.len", |bcx, a| {
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
@@ -1029,7 +1078,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     // trim: 双边界扫描 (首尾剥离 空格/\t/\r/\n) → 子块复制新块;
     // 全空白/空串结果的 data_ptr 恒 null (§五契约)
-    shim!(c, "alias.str.trim", vec![types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.str.trim", |bcx, a| {
         let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let st = bcx.declare_var(types::I64);
@@ -1110,13 +1159,14 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.seal_block(else_b);
         bcx.switch_to_block(then_b);
         {
-            let out = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![n]);
-            let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let out = call_rt_m!(bcx, "rt.heap.alloc", vec![n]);
+            let mv = c
+                .module
+                .declare_func_in_func(rtl_move_memory, &mut bcx.func);
             let stv3 = bcx.use_var(st);
             let src = bcx.ins().iadd(pa, stv3);
             bcx.ins().call(mv, &[out, src, n]);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-                vec![bcx.ins().iconst(types::I64, 16)]);
+            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
             bcx.ins().store(MemFlagsData::new(), out, blk, 0);
             bcx.ins().store(MemFlagsData::new(), n, blk, 8);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
@@ -1124,8 +1174,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.switch_to_block(else_b);
         {
             let zero = bcx.ins().iconst(types::I64, 0);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-                vec![bcx.ins().iconst(types::I64, 16)]);
+            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
             bcx.ins().store(MemFlagsData::new(), zero, blk, 0);
             bcx.ins().store(MemFlagsData::new(), zero, blk, 8);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
@@ -1138,9 +1187,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     // ---- 内建数组方法 (Phase 2d): 与 JIT 宿主函数同符号同契约 ----
     // 头块 {data_ptr, len, cap} 24 字节; pop 空守卫在发射层 — shim 按契约假定非空
-    shim!(c, "alias.arr.new", vec![types::I32, types::I32], Some(types::I64), |bcx, a| {
-        let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 24)]);
+    shim!(c, "alias.arr.new", |bcx, a| {
+        let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
         let cap64 = bcx.ins().sextend(types::I64, a[0]);
         let esz64 = bcx.ins().sextend(types::I64, a[1]);
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, cap64, 0);
@@ -1153,7 +1201,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.switch_to_block(then_b);
         {
             let bytes = bcx.ins().imul(cap64, esz64);
-            let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
+            let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
             bcx.ins().store(MemFlagsData::new(), buf, hdr, 0);
             bcx.ins().jump(end_b, &[]);
         }
@@ -1171,7 +1219,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.ins().return_(&[hdr]);
         true
     });
-    shim!(c, "alias.arr.len", vec![types::I64], Some(types::I32), |bcx, a| {
+    shim!(c, "alias.arr.len", |bcx, a| {
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
@@ -1179,7 +1227,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
     // push: 满 len==cap → 新缓冲 2x (空 cap 取 1) + RtlMoveMemory 复制旧元素,
     // 头块原地换 data_ptr/cap — 所有别名共享可见; 随后尾插 + len+1
-    shim!(c, "alias.arr.push", vec![types::I64, types::I64], None, |bcx, a| {
+    shim!(c, "alias.arr.push", |bcx, a| {
         let hdr = a[0];
         let dp0 = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
         let len = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 8);
@@ -1201,8 +1249,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
             let doubled = bcx.ins().imul_imm_s(cap, 2);
             let new_cap = bcx.ins().select(is_empty, one, doubled);
             let bytes = bcx.ins().imul_imm_s(new_cap, 8);
-            let grown = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
-            let mv = c.module.declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let grown = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
+            let mv = c
+                .module
+                .declare_func_in_func(rtl_move_memory, &mut bcx.func);
             let copy_bytes = bcx.ins().imul_imm_s(len, 8);
             let copy_b = bcx.create_block();
             let after_copy_b = bcx.create_block();
@@ -1231,7 +1281,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.ins().store(MemFlagsData::new(), len1, hdr, 8);
         false
     });
-    shim!(c, "alias.arr.pop", vec![types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.arr.pop", |bcx, a| {
         let hdr = a[0];
         let len = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 8);
         let new_len = bcx.ins().iadd_imm_s(len, -1);
@@ -1246,9 +1296,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     // ---- display 家族 (Value::display 逐字节规则) ----
     // rt.write.dec(h:PTR, v:I64 非负): 十进制写入句柄 (abort 消息行:列共用)
-    shim!(c, "rt.write.dec", vec![c.ptr_ty, types::I64], None, |bcx, a| {
-        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 24)]);
+    shim!(c, "rt.write.dec", |bcx, a| {
+        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
         let ten = bcx.ins().iconst(types::I64, 10);
         let digits = bcx.ins().iconst(types::I64, 48);
         let pos = bcx.declare_var(types::I64);
@@ -1297,11 +1346,8 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
                 let c23 = bcx.ins().iconst(types::I64, 23);
                 bcx.ins().isub(c23, p)
             };
-            let ss = bcx.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                3,
-            ));
+            let ss =
+                bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
             let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
             let null = bcx.ins().iconst(c.ptr_ty, 0);
             let wf = c.module.declare_func_in_func(ext.write_file, &mut bcx.func);
@@ -1312,12 +1358,13 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         false
     });
     // display.int: IR 手写十进制转换 (无 CRT 依赖; i64 幅度容纳 i32::MIN 取负)
-    shim!(c, "alias.display.int", vec![types::I32], Some(types::I64), |bcx, a| {
-        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 24)]);
+    shim!(c, "alias.display.int", |bcx, a| {
+        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
         let v64 = bcx.ins().sextend(types::I64, a[0]);
         let zero = bcx.ins().iconst(types::I64, 0);
-        let neg = bcx.ins().icmp(IntCC::SignedLessThan, v64.clone(), zero.clone());
+        let neg = bcx
+            .ins()
+            .icmp(IntCC::SignedLessThan, v64.clone(), zero.clone());
         let neg_mag = bcx.ins().isub(zero, v64);
         let mag = bcx.ins().select(neg.clone(), neg_mag, v64);
         let ten = bcx.ins().iconst(types::I64, 10);
@@ -1386,8 +1433,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
                 let c23 = bcx.ins().iconst(types::I64, 23);
                 bcx.ins().isub(c23, p)
             };
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-                vec![bcx.ins().iconst(types::I64, 16)]);
+            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
             bcx.ins().store(MemFlagsData::new(), start, blk, 0);
             bcx.ins().store(MemFlagsData::new(), len, blk, 8);
             bcx.ins().return_(&[blk]);
@@ -1398,7 +1444,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     emit_integer_display_shim(c, "alias.display.u64", false)?;
     emit_float_display_shim(c, "alias.display.f32", types::F32)?;
     emit_float_display_shim(c, "alias.display.f64", types::F64)?;
-    shim!(c, "alias.display.bool", vec![types::I32], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.display.bool", |bcx, a| {
         let t_addr = sym!(bcx, "rt_true");
         let f_addr = sym!(bcx, "rt_false");
         let is_t = bcx.ins().icmp_imm_s(IntCC::NotEqual, a[0], 0);
@@ -1406,15 +1452,14 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         let t_len = bcx.ins().iconst(types::I64, 4); // true
         let f_len = bcx.ins().iconst(types::I64, 5); // false
         let len = bcx.ins().select(is_t, t_len, f_len);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 16)]);
+        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
         bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
         bcx.ins().store(MemFlagsData::new(), len, blk, 8);
         bcx.ins().return_(&[blk]);
         true
     });
     // display.str: 恒等 — 块即显示结果 (泄漏模型下共享安全)
-    shim!(c, "alias.display.str", vec![types::I64], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.display.str", |bcx, a| {
         bcx.ins().return_(&[a[0]]);
         true
     });
@@ -1424,11 +1469,10 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("alias.display.struct", "rt_struct", 8),
         ("alias.display.array", "rt_array", 7),
     ] {
-        shim!(c, name, vec![], Some(types::I64), |bcx, _a| {
+        shim!(c, name, |bcx, _a| {
             let addr = sym!(bcx, dname);
             let len = bcx.ins().iconst(types::I64, dlen);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-                vec![bcx.ins().iconst(types::I64, 16)]);
+            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
             bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
             bcx.ins().store(MemFlagsData::new(), len, blk, 8);
             bcx.ins().return_(&[blk]);
@@ -1436,7 +1480,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         });
     }
     // display.result: 运行时 tag 定 <ok>(4 字节)/<err>(5 字节)
-    shim!(c, "alias.display.result", vec![types::I32], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.display.result", |bcx, a| {
         let ok_addr = sym!(bcx, "rt_ok");
         let err_addr = sym!(bcx, "rt_err");
         let is_ok = bcx.ins().icmp_imm_s(IntCC::Equal, a[0], 0);
@@ -1444,8 +1488,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         let err_len = bcx.ins().iconst(types::I64, 5);
         let addr = bcx.ins().select(is_ok.clone(), ok_addr, err_addr);
         let len = bcx.ins().select(is_ok, ok_len, err_len);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
-            vec![bcx.ins().iconst(types::I64, 16)]);
+        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
         bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
         bcx.ins().store(MemFlagsData::new(), len, blk, 8);
         bcx.ins().return_(&[blk]);
@@ -1453,8 +1496,12 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
 
     // ---- rt.write.stdout(p:PTR, l:I64) : GetStdHandle(-11)+WriteFile ----
-    shim!(c, "rt.write.stdout", vec![c.ptr_ty, types::I64], None, |bcx, a| {
-        let h = call_ext_m!(bcx, ext.get_std_handle, vec![bcx.ins().iconst(types::I32, -11)]);
+    shim!(c, "rt.write.stdout", |bcx, a| {
+        let h = call_ext_m!(
+            bcx,
+            ext.get_std_handle,
+            vec![bcx.ins().iconst(types::I32, -11)]
+        );
         let ss = bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
         let null = bcx.ins().iconst(c.ptr_ty, 0);
@@ -1465,28 +1512,31 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
     });
 
     // ---- print 家族: str 直写; i32/bool 经 display 复用 ----
-    shim!(c, "alias.println.str", vec![types::I64], None, |bcx, a| {
+    shim!(c, "alias.println.str", |bcx, a| {
         let p = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        call_rt_m!(bcx, "rt.write.stdout", vec![c.ptr_ty, types::I64], None, vec![p, l]);
+        call_rt_m!(bcx, "rt.write.stdout", vec![p, l]);
         let nl = sym!(bcx, "rt_nl");
-        call_rt_m!(bcx, "rt.write.stdout", vec![c.ptr_ty, types::I64], None,
-            vec![nl, bcx.ins().iconst(types::I64, 1)]);
+        call_rt_m!(
+            bcx,
+            "rt.write.stdout",
+            vec![nl, bcx.ins().iconst(types::I64, 1)]
+        );
         false
     });
-    shim!(c, "alias.print.str", vec![types::I64], None, |bcx, a| {
+    shim!(c, "alias.print.str", |bcx, a| {
         let p = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        call_rt_m!(bcx, "rt.write.stdout", vec![c.ptr_ty, types::I64], None, vec![p, l]);
+        call_rt_m!(bcx, "rt.write.stdout", vec![p, l]);
         false
     });
     for (pname, dname) in [
         ("alias.println.i32", "alias.println.str"),
         ("alias.print.i32", "alias.print.str"),
     ] {
-        shim!(c, pname, vec![types::I32], None, |bcx, a| {
-            let blk = call_rt_m!(bcx, "alias.display.int", vec![types::I32], Some(types::I64), vec![a[0]]);
-            call_rt_m!(bcx, dname, vec![types::I64], None, vec![blk]);
+        shim!(c, pname, |bcx, a| {
+            let blk = call_rt_m!(bcx, "alias.display.int", vec![a[0]]);
+            call_rt_m!(bcx, dname, vec![blk]);
             false
         });
     }
@@ -1494,18 +1544,50 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         ("alias.println.bool", "alias.println.str"),
         ("alias.print.bool", "alias.print.str"),
     ] {
-        shim!(c, pname, vec![types::I32], None, |bcx, a| {
-            let blk = call_rt_m!(bcx, "alias.display.bool", vec![types::I32], Some(types::I64), vec![a[0]]);
-            call_rt_m!(bcx, dname, vec![types::I64], None, vec![blk]);
+        shim!(c, pname, |bcx, a| {
+            let blk = call_rt_m!(bcx, "alias.display.bool", vec![a[0]]);
+            call_rt_m!(bcx, dname, vec![blk]);
             false
         });
     }
 
     // ---- span-ID 中止家族: 同一 IR, 消息后缀不同 (§五契约) ----
-    emit_span_abort(c, "alias.abort_div", &ext, span_data, &static_ids, "rt_msg_suffix", 15)?;
-    emit_span_abort(c, "alias.abort_oob", &ext, span_data, &static_ids, "rt_oob_suffix", 18)?;
-    emit_span_abort(c, "alias.abort_pop", &ext, span_data, &static_ids, "rt_pop_suffix", 19)?;
-    emit_span_abort(c, "alias.abort_conv", &ext, span_data, &static_ids, "rt_conv_suffix", 18)?;
+    emit_span_abort(
+        c,
+        "alias.abort_div",
+        &ext,
+        span_data,
+        &static_ids,
+        "rt_msg_suffix",
+        15,
+    )?;
+    emit_span_abort(
+        c,
+        "alias.abort_oob",
+        &ext,
+        span_data,
+        &static_ids,
+        "rt_oob_suffix",
+        18,
+    )?;
+    emit_span_abort(
+        c,
+        "alias.abort_pop",
+        &ext,
+        span_data,
+        &static_ids,
+        "rt_pop_suffix",
+        19,
+    )?;
+    emit_span_abort(
+        c,
+        "alias.abort_conv",
+        &ext,
+        span_data,
+        &static_ids,
+        "rt_conv_suffix",
+        18,
+    )?;
 
-    Ok(())
+    validate_aot_runtime_coverage(c)
 }

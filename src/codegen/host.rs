@@ -1,6 +1,6 @@
 //! JIT 宿主运行时支持库 — 进程内注册的 extern "C" 实现。
 //! AOT 侧由 aot_shim.rs 以相同符号契约实现 (spec-notes §五)。
-use crate::codegen::{RUNTIME_ERROR, SPAN_TABLE};
+use crate::codegen::{RuntimeTy, RUNTIME_ERROR, SPAN_TABLE};
 use crate::{AliasError, Span};
 use cranelift_jit::JITBuilder;
 
@@ -80,8 +80,16 @@ extern "C" fn alias_str_cmp(a: i64, b: i64) -> i32 {
     unsafe {
         let (pa, la) = str_parts(a);
         let (pb, lb) = str_parts(b);
-        let sa = if la == 0 { &[][..] } else { std::slice::from_raw_parts(pa, la) };
-        let sb = if lb == 0 { &[][..] } else { std::slice::from_raw_parts(pb, lb) };
+        let sa = if la == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(pa, la)
+        };
+        let sb = if lb == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(pb, lb)
+        };
         match sa.cmp(sb) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
@@ -259,7 +267,10 @@ extern "C" fn alias_abort_pop(span_id: i32) {
 
 fn abort_with_span(span_id: i32, msg: &str) {
     let table = SPAN_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let (line, col) = table.get(span_id.max(0) as usize).copied().unwrap_or((0, 0));
+    let (line, col) = table
+        .get(span_id.max(0) as usize)
+        .copied()
+        .unwrap_or((0, 0));
     drop(table);
     let span = if line == 0 || col == 0 {
         Span::default()
@@ -268,12 +279,18 @@ fn abort_with_span(span_id: i32, msg: &str) {
     };
     let mut slot = RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_none() {
-        *slot = Some(AliasError { msg: msg.into(), span });
+        *slot = Some(AliasError {
+            msg: msg.into(),
+            span,
+        });
     }
 }
 
 extern "C" fn alias_runtime_failed() -> i32 {
-    RUNTIME_ERROR.lock().unwrap_or_else(|e| e.into_inner()).is_some() as i32
+    RUNTIME_ERROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some() as i32
 }
 
 extern "C" fn alias_abort_conv(span_id: i32) {
@@ -406,49 +423,144 @@ extern "C" fn alias_display_array() -> i64 {
 }
 
 pub(crate) fn register_host_fns(builder: &mut JITBuilder) {
-    builder.symbol("alias.cell.new", alias_cell_new as *const u8);
-    builder.symbol("alias.env.new", alias_env_new as *const u8);
-    builder.symbol("alias.globals.new", alias_globals_new as *const u8);
-    builder.symbol("alias.closure.new", alias_closure_new as *const u8);
-    builder.symbol("alias.str.new", alias_str_new as *const u8);
-    builder.symbol("alias.str.concat", alias_str_concat as *const u8);
-    builder.symbol("alias.str.cmp", alias_str_cmp as *const u8);
-    builder.symbol("alias.display.int", alias_display_int as *const u8);
-    builder.symbol("alias.display.i64", alias_display_i64 as *const u8);
-    builder.symbol("alias.display.u64", alias_display_u64 as *const u8);
-    builder.symbol("alias.display.f32", alias_display_f32 as *const u8);
-    builder.symbol("alias.display.f64", alias_display_f64 as *const u8);
-    builder.symbol("alias.display.bool", alias_display_bool as *const u8);
-    builder.symbol("alias.display.str", alias_display_str as *const u8);
-    builder.symbol("alias.display.unit", alias_display_unit as *const u8);
-    builder.symbol("alias.display.func", alias_display_func as *const u8);
-    builder.symbol("alias.println.str", alias_println_str as *const u8);
-    builder.symbol("alias.print.str", alias_print_str as *const u8);
-    builder.symbol("alias.println.i32", alias_println_i32 as *const u8);
-    builder.symbol("alias.println.bool", alias_println_bool as *const u8);
-    builder.symbol("alias.print.i32", alias_print_i32 as *const u8);
-    builder.symbol("alias.print.bool", alias_print_bool as *const u8);
-    builder.symbol("alias.abort_div", alias_abort_div as *const u8);
-    builder.symbol("alias.abort_conv", alias_abort_conv as *const u8);
-    builder.symbol("alias.str.len", alias_str_len as *const u8);
-    builder.symbol("alias.str.upper", alias_str_upper as *const u8);
-    builder.symbol("alias.str.lower", alias_str_lower as *const u8);
-    builder.symbol("alias.str.trim", alias_str_trim as *const u8);
-    builder.symbol("alias.display.result", alias_display_result as *const u8);
-    builder.symbol("alias.display.struct", alias_display_struct as *const u8);
-    builder.symbol("alias.display.array", alias_display_array as *const u8);
-    builder.symbol("alias.arr.new", alias_arr_new as *const u8);
-    builder.symbol("alias.arr.len", alias_arr_len as *const u8);
-    builder.symbol("alias.arr.push", alias_arr_push as *const u8);
-    builder.symbol("alias.arr.pop", alias_arr_pop as *const u8);
-    builder.symbol("alias.abort_oob", alias_abort_oob as *const u8);
-    builder.symbol("alias.abort_pop", alias_abort_pop as *const u8);
-    builder.symbol("alias.runtime.failed", alias_runtime_failed as *const u8);
+    validate_host_bindings().unwrap_or_else(|msg| panic!("内部 runtime 契约错误: {msg}"));
+    for binding in host_bindings() {
+        builder.symbol(binding.symbol, binding.address);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostBinding {
+    symbol: &'static str,
+    address: *const u8,
+    params: &'static [RuntimeTy],
+    ret: Option<RuntimeTy>,
+}
+
+trait HostAbiType {
+    const RUNTIME_TY: RuntimeTy;
+}
+
+impl HostAbiType for i32 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::I32;
+}
+impl HostAbiType for i64 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::I64;
+}
+impl HostAbiType for u64 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::I64;
+}
+impl HostAbiType for f32 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::F32;
+}
+impl HostAbiType for f64 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::F64;
+}
+impl HostAbiType for *const u8 {
+    const RUNTIME_TY: RuntimeTy = RuntimeTy::Ptr;
+}
+
+fn host_bindings() -> Vec<HostBinding> {
+    macro_rules! bind {
+        ($symbol:literal, $function:ident, ($($arg:ty),* $(,)?) -> $ret:ty) => {{
+            let typed: extern "C" fn($($arg),*) -> $ret = $function;
+            HostBinding {
+                symbol: $symbol,
+                address: typed as *const () as *const u8,
+                params: &[$(<$arg as HostAbiType>::RUNTIME_TY),*],
+                ret: Some(<$ret as HostAbiType>::RUNTIME_TY),
+            }
+        }};
+        ($symbol:literal, $function:ident, ($($arg:ty),* $(,)?)) => {{
+            let typed: extern "C" fn($($arg),*) = $function;
+            HostBinding {
+                symbol: $symbol,
+                address: typed as *const () as *const u8,
+                params: &[$(<$arg as HostAbiType>::RUNTIME_TY),*],
+                ret: None,
+            }
+        }};
+    }
+    vec![
+        bind!("alias.cell.new", alias_cell_new, (i64) -> i64),
+        bind!("alias.env.new", alias_env_new, (i32) -> i64),
+        bind!("alias.globals.new", alias_globals_new, (i64) -> i64),
+        bind!("alias.closure.new", alias_closure_new, (i64, i64) -> i64),
+        bind!("alias.str.new", alias_str_new, (*const u8, i32) -> i64),
+        bind!("alias.str.concat", alias_str_concat, (i64, i64) -> i64),
+        bind!("alias.str.cmp", alias_str_cmp, (i64, i64) -> i32),
+        bind!("alias.str.len", alias_str_len, (i64) -> i32),
+        bind!("alias.str.upper", alias_str_upper, (i64) -> i64),
+        bind!("alias.str.lower", alias_str_lower, (i64) -> i64),
+        bind!("alias.str.trim", alias_str_trim, (i64) -> i64),
+        bind!("alias.arr.new", alias_arr_new, (i32, i32) -> i64),
+        bind!("alias.arr.len", alias_arr_len, (i64) -> i32),
+        bind!("alias.arr.push", alias_arr_push, (i64, i64)),
+        bind!("alias.arr.pop", alias_arr_pop, (i64) -> i64),
+        bind!("alias.display.int", alias_display_int, (i32) -> i64),
+        bind!("alias.display.i64", alias_display_i64, (i64) -> i64),
+        bind!("alias.display.u64", alias_display_u64, (u64) -> i64),
+        bind!("alias.display.f32", alias_display_f32, (f32) -> i64),
+        bind!("alias.display.f64", alias_display_f64, (f64) -> i64),
+        bind!("alias.display.bool", alias_display_bool, (i32) -> i64),
+        bind!("alias.display.str", alias_display_str, (i64) -> i64),
+        bind!("alias.display.unit", alias_display_unit, () -> i64),
+        bind!("alias.display.func", alias_display_func, () -> i64),
+        bind!("alias.display.struct", alias_display_struct, () -> i64),
+        bind!("alias.display.array", alias_display_array, () -> i64),
+        bind!("alias.display.result", alias_display_result, (i32) -> i64),
+        bind!("alias.println.str", alias_println_str, (i64)),
+        bind!("alias.print.str", alias_print_str, (i64)),
+        bind!("alias.println.i32", alias_println_i32, (i32)),
+        bind!("alias.print.i32", alias_print_i32, (i32)),
+        bind!("alias.println.bool", alias_println_bool, (i32)),
+        bind!("alias.print.bool", alias_print_bool, (i32)),
+        bind!("alias.abort_div", alias_abort_div, (i32)),
+        bind!("alias.abort_oob", alias_abort_oob, (i32)),
+        bind!("alias.abort_pop", alias_abort_pop, (i32)),
+        bind!("alias.abort_conv", alias_abort_conv, (i32)),
+        bind!("alias.runtime.failed", alias_runtime_failed, () -> i32),
+    ]
+}
+
+fn validate_host_bindings() -> Result<(), String> {
+    super::validate_contract_table()?;
+    let bindings = host_bindings();
+    let actual = bindings
+        .iter()
+        .map(|b| b.symbol)
+        .collect::<std::collections::HashSet<_>>();
+    if actual.len() != bindings.len() {
+        return Err("JIT host 符号重复".into());
+    }
+    let expected = super::RUNTIME_CONTRACTS
+        .iter()
+        .filter(|c| c.backends.jit)
+        .map(|c| c.symbol)
+        .collect::<std::collections::HashSet<_>>();
+    if actual != expected {
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let extra = actual.difference(&expected).copied().collect::<Vec<_>>();
+        return Err(format!(
+            "JIT host 与契约表不一致，缺失 {missing:?}，多余 {extra:?}"
+        ));
+    }
+    for binding in &bindings {
+        let contract = super::runtime_contract(binding.symbol).map_err(|e| e.msg)?;
+        let expected_params = contract.params.iter().map(|p| p.ty).collect::<Vec<_>>();
+        if binding.params != expected_params || binding.ret != contract.ret.map(|ret| ret.ty) {
+            return Err(format!(
+                "JIT host '{}' 的 Rust ABI 与 runtime 契约不一致",
+                binding.symbol
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::alias_cell_new;
+    use super::{alias_cell_new, validate_host_bindings};
 
     #[test]
     fn cell_new_treats_argument_as_zeroed_byte_count() {
@@ -458,5 +570,10 @@ mod tests {
             first, 0,
             "alias.cell.new 必须把参数解释为字节数并返回清零存储区"
         );
+    }
+
+    #[test]
+    fn jit_host_bindings_exactly_match_runtime_contracts() {
+        validate_host_bindings().unwrap();
     }
 }

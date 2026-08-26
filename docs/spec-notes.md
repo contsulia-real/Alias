@@ -131,6 +131,13 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 
 ## §五 运行时符号契约 (JIT 宿主函数与 AOT shim 逐字节对齐)
 
+规范的机器可检查版本位于 `src/codegen/runtime.rs::RUNTIME_CONTRACTS`。
+每个表项同时声明参数、返回值、每条边的可空性和 JIT/AOT 实现覆盖；调用点
+只给符号与实参，由该表生成 Cranelift 签名。JIT host 注册集合与表中 `jit`
+集合精确相等，AOT shim 实际定义集合与表中 `aot` 集合精确相等。
+`nullable` 只允许在契约明确标注的边上出现：空串输入指针、零长度 stdout
+指针、无捕获 closure env 及可承载引用的数组载荷字。
+
 | 符号 | 签名 | 语义 |
 |------|------|------|
 | alias.cell.new | (bytes:i64)→i64 | 泄漏并清零 bytes 字节存储区；绑定/结构体值由调用端按声明宽度写入 |
@@ -140,13 +147,31 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | alias.str.new | (ptr,i32)→i64 | 复制字节 → 泄漏块 {data_ptr,len} |
 | alias.str.concat | (i64,i64)→i64 | 拼接新块 |
 | alias.str.cmp | (i64,i64)→i32 | 字典序字节比较 -1/0/1 |
+| alias.str.len / upper / lower / trim | (i64)→i32 / i64 / i64 / i64 | 字节长度、ASCII 大小写映射与四字符集 trim |
+| alias.arr.new / len / push / pop | (i32,i32)→i64 / (i64)→i32 / (i64,i64) / (i64)→i64? | 数组头、元素尺寸感知分配、增长和弹出；pop 字可承载 null 引用 |
 | alias.display.int/i64/u64/f32/f64/bool/unit/func/str | 各型→i64 | Value::display 规则 (§display 表) |
+| alias.display.struct/array/result | ()→i64 / ()→i64 / (i32)→i64 | 复合值固定显示或按 result tag 显示 |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
 | alias.println/print.i32/bool | (i32) | 经 display 复用 |
 | alias.abort_div/oob/pop/conv | (i32) | span-ID 查表；JIT 记录 AliasError 并退回宿主，AOT 输出诊断后 exit 1 |
+| alias.runtime.failed | ()→i32 | 仅 JIT：查询当前执行是否已有运行时错误 |
+| rt.heap.alloc / rt.write.dec / rt.write.stdout | AOT 内部契约 | 仅 AOT：零初始化分配、十进制写和 stdout 写 |
 
 字符串表示: 泄漏 16 字节块 {data_ptr: u64, len: u64}; data_ptr 为 null
 当且仅当 len=0。字节一律复制进块 — 统一所有权。
+
+## §五.1 值 ABI 与布局单源
+
+`src/codegen/abi.rs` 是语言值物理表示的唯一规范实现。每个 `VTy` 通过一个
+`ValueAbi` 同时给出：规范在途寄存器类型、实际存储类型与字节数、对齐、
+用户函数参数类型、返回类型以及 8 字节 result/array 载荷字编码。整数表达式
+在途规范为 I64，但 i8/i16/i32/u8/u16/u32 的参数、返回和内存槽保持声明宽度；
+f32/f64 始终使用对应浮点寄存器，进入载荷字时才按位装箱。
+
+结构体布局由同层两阶段计算：先登记全部结构体名字，再按声明序对齐字段，
+最后按最大字段对齐补尾随填充。单元格、全局槽、字段和紧凑元素不得在调用点
+另写宽度或偏移表；用户函数和间接闭包调用统一由 `user_signature` 加入
+`globals/env` 两个隐藏 I64 参数并生成显式参数/返回 ABI。
 
 ## §六 AOT 形态
 
@@ -330,7 +355,7 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 
 | 符号 | 签名 | 语义 |
 |------|------|------|
-| alias.arr.new | (i32)→i64 | 泄漏头块 + cap×8 缓冲 (cap=0 → data_ptr null), len=0 |
+| alias.arr.new | (cap:i32, elem_size:i32)→i64 | 泄漏头块 + cap×elem_size 缓冲 (cap=0 → data_ptr null), len=0 |
 | alias.arr.len | (i64)→i32 | 头块 len 字段 |
 | alias.arr.push | (i64,i64) | 满 len==cap → 新缓冲 2x (cap=0 取 1) + RtlMoveMemory 复制旧元素, 头块原地换 data_ptr/cap; 尾插 + len+=1 |
 | alias.arr.pop | (i64)→i64 | len-=1 返回 data[len] (空守卫在发射层, shim 按契约假定非空) |

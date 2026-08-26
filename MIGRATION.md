@@ -143,9 +143,13 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 | M45 | **运行时空值与 AOT shim 加固**：空字符串/trim/concat 与空数组复制路径不再对 null 做零长度指针运算或内存拷贝；HeapAlloc 失败显式 exit 1；补齐 i64/u64/f32/f64 双后端 display，并统一浮点规范化输出 | Rust `from_raw_parts(null,0)` 与 C/Windows 零长度 memcpy 的 null 前提不安全；宽整数/浮点符号契约此前不完整 | 空值回归、混型结构体 self ABI、宽数值和浮点 JIT/AOT 逐字节 parity 覆盖 |
 | M46 | **不可信源码健壮性上限**：源码 8 MiB、token 200000、语法/类型/插值嵌套 128、表达式链 256；换行和一元链改迭代；整数解析 checked、科学计数法保留整数部并拒绝非有限值；i64 字面量不再先截成 i32 | 深递归可栈溢出，超长整数曾在 lexer 算术溢出，`1e5` 与宽整数被误解析/截断 | 全部失败均为中文 `AliasError`，不 panic；安全回归覆盖超深/超大输入与 2^31 以上字面量 |
 | M47 | **链接和输出路径竞态修复**：临时 COFF 名含 PID+时间+原子序号并以 create_new 独占创建，RAII 覆盖所有失败路径清理；build 只接受 `.as` 输入，禁止输入与 `.exe` 输出自覆盖 | 同进程并发 build 旧名仅含 PID，会互相覆盖；以 `.exe` 为输入会覆盖源文件 | 32 路并发临时对象单测验证唯一与清理；CLI 回归验证非 `.as` 输入原字节不变 |
+| M48 | **统一 ABI/布局层**：新增 `codegen/abi.rs`，`ValueAbi` 集中声明每种 VTy 的规范寄存器、存储类型/宽度/对齐、参数、返回和载荷字编码；用户直接/间接函数签名统一生成；结构体名字两阶段登记后集中计算字段偏移、最大对齐与尾随填充 | 后端曾在 mod/emit/funcgen 多处复制宽度与签名判断，新增类型时容易出现 load/store 与 GPR/XMM 漂移 | ABI 矩阵与混型布局单测冻结物理契约；调用模块只消费元数据，不再拥有独立宽度表 |
+| M49 | **runtime 机器契约表**：新增 `RUNTIME_CONTRACTS`，逐符号声明参数、返回、可空性和 JIT/AOT 覆盖；调用点由表生成签名并核验实参类型；JIT host 注册集合、AOT shim 实际定义集合分别与契约表做精确相等校验 | host 注册、调用点与 shim 三方手写签名会静默漂移；文档中的 arr.new 已落后于双参数实现 | 缺失、重复、多余、后端缺席或实参类型漂移在构建/测试时失败；修正文档 `arr.new(cap,elem_size)` |
+| M50 | **破坏性语料扩充与传递捕获修复**：固定种子生成 160 个深度 6 的 wrapping i32 AST；覆盖全整数宽度边界、三组混型布局排列、32 层 JIT/16 层 AOT 闭包、16 路并发 JIT；同一 methods AOT 产物由 30 次提高到 100 次重复执行 | 正常 demo 难覆盖组合态；深层闭包测试实证 `scan_captures` 只识别父局部、不把父 env 捕获继续传给子闭包 | 捕获扫描同时识别 `frame.caps`，祖先单元格可逐层透传；随机种子固定，失败可复现；AOT/JIT 边界输出逐字节比较 |
 
-**终态验证**：168 个测试连续 5 轮全绿；每轮都把同一个 `methods.as` AOT
-产物重复执行 30 次并逐字节校验 13 行输出、空 stderr 与 exit 0；另有
-F32 result/match/array、混型结构体 self ABI、宽整数/非有限浮点、并发 JIT
-错误隔离、链接临时文件竞态和输入覆盖保护定向回归。`cargo check` 与
-`cargo clippy --all-targets` 均成功（仓库仍有既存 clippy 风格警告）。
+**终态验证**：180 个测试连续 5 轮全绿；每轮都把同一个 `methods.as` AOT
+产物重复执行 100 次并逐字节校验 13 行输出、空 stderr 与 exit 0；另有
+固定种子随机 AST、全整数宽度边界、混型布局排列、32 层 JIT/16 层 AOT
+传递捕获、16 路并发 JIT、F32 result/match/array、链接临时文件竞态和输入
+覆盖保护定向回归。`cargo check` 与 `cargo clippy --all-targets` 均成功
+（仓库仍有既存 clippy 风格警告）。
