@@ -165,6 +165,8 @@ pub struct CallArg {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64, Span),
+    /// 浮点字面量 (Phase 3a) — f64 承载, f32 目标按编译期舍入检查
+    Float(f64, Span),
     Bool(bool, Span),
     Str(Vec<StrPartAst>, Span),
     Ident(String, Span),
@@ -233,6 +235,7 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Int(_, s)
+            | Expr::Float(_, s)
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Ident(_, s)

@@ -392,7 +392,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.ins().return_(&[p]);
         true
     });
-    for name in ["alias.env.new", "alias.globals.new"] {
+    for name in ["alias.env.new"] {
         shim!(c, name, vec![types::I32], Some(types::I64), |bcx, a| {
             let n64 = bcx.ins().sextend(types::I64, a[0]);
             let bytes = bcx.ins().imul_imm_s(n64, 8);
@@ -401,6 +401,12 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
             true
         });
     }
+    // globals.new (Phase 3a): 入参为字节数 — 混型宽度槽区的布局由调用方计算
+    shim!(c, "alias.globals.new", vec![types::I64], Some(types::I64), |bcx, a| {
+        let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![a[0]]);
+        bcx.ins().return_(&[p]);
+        true
+    });
     shim!(c, "alias.closure.new", vec![types::I64, types::I64], Some(types::I64), |bcx, a| {
         let sz = bcx.ins().iconst(types::I64, 16);
         let p = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![sz]);
@@ -643,10 +649,11 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
 
     // ---- 内建数组方法 (Phase 2d): 与 JIT 宿主函数同符号同契约 ----
     // 头块 {data_ptr, len, cap} 24 字节; pop 空守卫在发射层 — shim 按契约假定非空
-    shim!(c, "alias.arr.new", vec![types::I32], Some(types::I64), |bcx, a| {
+    shim!(c, "alias.arr.new", vec![types::I32, types::I32], Some(types::I64), |bcx, a| {
         let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty),
             vec![bcx.ins().iconst(types::I64, 24)]);
         let cap64 = bcx.ins().sextend(types::I64, a[0]);
+        let esz64 = bcx.ins().sextend(types::I64, a[1]);
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, cap64, 0);
         let then_b = bcx.create_block();
         let else_b = bcx.create_block();
@@ -656,7 +663,7 @@ pub(crate) fn emit_runtime_shims<M: Module>(c: &mut Compiler<'_, M>) -> AliasRes
         bcx.seal_block(else_b);
         bcx.switch_to_block(then_b);
         {
-            let bytes = bcx.ins().imul_imm_s(cap64, 8);
+            let bytes = bcx.ins().imul(cap64, esz64);
             let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![types::I64], Some(c.ptr_ty), vec![bytes]);
             bcx.ins().store(MemFlagsData::new(), buf, hdr, 0);
             bcx.ins().jump(end_b, &[]);

@@ -6,7 +6,7 @@
 //! (expr_all_arms_never 终结性判定)。
 
 use super::types::{check_type_slot, types_match, Ty};
-use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
+use super::{decl_mismatch, literal_slot_unify, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
 use crate::{AliasError, AliasResult, Span};
 
@@ -63,7 +63,12 @@ impl Checker {
                 VarInfo { ty: init_ty, mutable: b.kind == BindKind::Var },
             );
         } else {
-            let init_ty = self.expr(&b.value, env)?;
+            // 裸数值字面量先经槽位统一 (范围守卫 + 类型取声明侧),
+            // 其余形态走常规推断
+            let init_ty = match literal_slot_unify(&declared, &b.value) {
+                Some(r) => r?,
+                None => self.expr(&b.value, env)?,
+            };
             if !types_match(&declared, &init_ty) {
                 return Err(decl_mismatch(b, &declared, &init_ty));
             }

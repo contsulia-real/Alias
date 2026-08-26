@@ -25,6 +25,8 @@ pub enum Tok {
 
     // 字面量
     Int(i64),
+    /// 浮点字面量 (Phase 3a)
+    Float(f64),
     Bool(bool),
     Str(Vec<StrPart>),
     Ident(String),
@@ -201,6 +203,47 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+        // 浮点字面量 (Phase 3a): 数字后跟 '.' + 数字 (排除方法链 `.` 后非数字
+        // 的形态 — 5.foo 非法, 5 .len() 不受影响因 Dot 前有空格由 parser 处理)
+        if self.peek() == Some(b'.')
+            && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        {
+            self.bump(); // .
+            let mut frac = String::from("0.");
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    frac.push(c as char);
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            // 科学计数法: e/E [+/-] digits
+            if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+                self.bump();
+                let mut exp = String::from("e");
+                if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                    exp.push(self.peek().unwrap() as char);
+                    self.bump();
+                }
+                let mut any = false;
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        exp.push(c as char);
+                        any = true;
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                if !any {
+                    return self.err("浮点指数缺少数字 — 例如 1e5");
+                }
+                frac.push_str(&exp);
+            }
+            let v: f64 = frac.parse().unwrap_or(f64::NAN);
+            return Ok(Tok::Float(v));
+        }
         Ok(Tok::Int(n))
     }
 
@@ -334,11 +377,17 @@ impl<'a> Lexer<'a> {
                         Some(c2) if is_ident_start(c2) => {
                             let name_start = self.pos;
                             while let Some(c3) = self.peek() {
-                                if is_ident_continue(c3) || c3 == b'.' {
+                                // $name 仅允许单个标识符 (P3a 收紧) — 点链须 ${...}
+                                if is_ident_continue(c3) {
                                     self.bump();
                                 } else {
                                     break;
                                 }
+                            }
+                            if self.peek() == Some(b'.') {
+                                return self.err(
+                                    "$name 仅支持单个标识符 — 复杂表达式请使用 ${...}",
+                                );
                             }
                             let name = String::from_utf8_lossy(&self.src[name_start..self.pos]).into_owned();
                             // $name 是 ${name} 的简写 — 复用同一通道

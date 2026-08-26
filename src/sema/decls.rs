@@ -4,8 +4,8 @@
 //! ([`Checker::method_def`])、Q④ main 校验 ([`Checker::validate_main`])。
 //! 单一命名空间的重名拦截在此收口; 签名先入表后查体 — 方法可递归。
 
-use super::types::{check_type_slot, types_match, Ty};
-use super::{Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
+use super::types::{check_type_slot, types_match, IntW, Ty};
+use super::{literal_slot_unify, Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
 use crate::ast::{Binding, Expr, Param, StructDef, TypeExpr};
 use crate::{AliasError, AliasResult, Span};
 
@@ -38,8 +38,12 @@ impl Checker {
             }
             let ty = check_type_slot(&f.ty, f.span, &self.structs)?;
             if let Some(d) = &f.default {
-                // 默认值按声明期词汇环境校验 (构造期求值 — 无顶层副作用)
-                let dt = self.expr(d, env)?;
+                // 默认值按声明期词汇环境校验 (构造期求值 — 无顶层副作用);
+                // 裸数值字面量同样经槽位统一
+                let dt = match literal_slot_unify(&ty, d) {
+                    Some(r) => r?,
+                    None => self.expr(d, env)?,
+                };
                 if !types_match(&ty, &dt) {
                     return Err(AliasError {
                         msg: format!(
@@ -151,7 +155,7 @@ impl Checker {
                         span: bspan,
                     });
                 }
-                if matches!(*ret, Ty::Int | Ty::Bool | Ty::Str | Ty::Unit) {
+                if matches!(*ret, Ty::Int(IntW::W32) | Ty::Bool | Ty::Str | Ty::Unit) {
                     Ok(())
                 } else {
                     Err(AliasError {
