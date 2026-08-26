@@ -4,7 +4,7 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 impl<'m, M: Module> Compiler<'m, M> {
-    /// 统一调用约定: (globals:I64, env:I64, args:I64...) -> I64。
+    /// 统一调用约定 (多态退化路径): (globals:I64, env:I64, args:I64...) -> I64。
     pub(crate) fn user_sig(&self, n_args: usize) -> Signature {
         let mut s = Signature::new(self.cc);
         s.params.push(AbiParam::new(types::I64));
@@ -16,6 +16,21 @@ impl<'m, M: Module> Compiler<'m, M> {
         s
     }
 
+    /// 混合签名 (Phase 3a): (globals:I64, env:I64, params...) -> ret —
+    /// 参数/返回按静态类型逐位定型; 浮点经 ABI 寄存器传递 (win64 XMM)。
+    /// Unit 函数统一携带 I64 哑字返回 (cl_type(Unit)=I64), 简化调用点。
+    pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
+        let mut s = Signature::new(self.cc);
+        s.params.push(AbiParam::new(types::I64));
+        s.params.push(AbiParam::new(types::I64));
+        for p in params {
+            s.params.push(AbiParam::new(cl_type(p)));
+        }
+        s.returns.push(AbiParam::new(cl_type(ret)));
+        s
+    }
+
+    /// 运行时符号签名 (JIT 宿主与 AOT shim 同契约)
     pub(crate) fn sig(&self, params: &[cranelift_codegen::ir::Type], ret: Option<cranelift_codegen::ir::Type>) -> Signature {
         let mut s = Signature::new(self.cc);
         for p in params {
@@ -27,16 +42,14 @@ impl<'m, M: Module> Compiler<'m, M> {
         s
     }
 
-    pub(crate) fn declare_user_func(&mut self, n_args: usize) -> AliasResult<FuncId> {
-        let name = format!("u{}", self.next_fid);
-        self.next_fid += 1;
-        self.declare_fn_named(name, n_args)
-    }
-
-    /// 具名内部函数 (Local 链接) — 方法以 m<接收者>名字 混成,
-    /// 类型命名空间唯一化, 与用户函数 u{n} 互不冲突
-    pub(crate) fn declare_fn_named(&mut self, name: String, n_args: usize) -> AliasResult<FuncId> {
-        let sig = self.user_sig(n_args);
+    /// 具名混合签名内部函数声明 (用户函数与方法共用)
+    pub(crate) fn declare_user_func_typed(
+        &mut self,
+        params: &[VTy],
+        ret: &VTy,
+        name: String,
+    ) -> AliasResult<FuncId> {
+        let sig = self.user_sig_typed(params, ret);
         self.module
             .declare_function(&name, Linkage::Local, &sig)
             .map_err(|e| native_err(Span::default(), format!("内部: 函数声明失败 {e}")))
@@ -80,8 +93,9 @@ impl<'m, M: Module> Compiler<'m, M> {
         caps: Vec<(String, VTy)>,
         ret_vty: VTy,
     ) -> AliasResult<()> {
-        let _ = ret_vty;
-        let sig = self.user_sig(params.len());
+        let param_vtys: Vec<VTy> =
+            params.iter().map(|p| decl_vty(&p.ty, &self.struct_layouts)).collect();
+        let sig = self.user_sig_typed(&param_vtys, &ret_vty);
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, fid.as_u32()), sig);
         let mut fbctx = FunctionBuilderContext::new();
@@ -112,29 +126,34 @@ impl<'m, M: Module> Compiler<'m, M> {
             terminated: false,
             init_ctx: false,
             ret_block: None,
+            ret_vty: Some(ret_vty.clone()),
         };
 
-        // 参数 → 新鲜单元格 (引用语义; 参数入局部作用域, spec-notes §附录二)
+        // 参数 → 新鲜单元格 (引用语义; 参数入局部作用域, spec-notes §附录二)]
         for (i, p) in params.iter().enumerate() {
-            let word = bcx.block_params(entry)[i + 2];
+            let raw = bcx.block_params(entry)[i + 2];
             let vty = decl_vty(&p.ty, &self.struct_layouts);
+            let word = norm_load(&mut bcx, raw, &vty);
             emit_local_cell(self, &mut bcx, &mut frame, word, vty, &p.name)?;
         }
 
         let ret_block = bcx.create_block();
         frame.ret_block = Some(ret_block);
-        let ret_val = bcx.append_block_param(ret_block, types::I64);
+        let ret_val = bcx.append_block_param(ret_block, cl_type(&ret_vty));
         emit_body(self, &mut bcx, &mut frame, body, ret_block)?;
         if !frame.terminated {
             // 落空回退: 仅 unit 函数可达 (非 unit 落空已被 Q③ 严格版在 sema 拒绝) → 哑值 0
-            let zero = bcx.ins().iconst(types::I64, 0);
+            let zero = bcx.ins().iconst(cl_type(&ret_vty), 0);
             bcx.ins().jump(ret_block, &[BlockArg::Value(zero)]);
         }
         bcx.switch_to_block(ret_block);
         bcx.seal_block(ret_block);
         bcx.ins().return_(&[ret_val]);
         bcx.finalize(self.module.target_config());
-
+        if let Err(ve) = ctx.verify_if(self.module.isa()) {
+            eprintln!("[verify-fail] {}", ve);
+            eprintln!("[CLIF]\n{}", ctx.func);
+        }
         self.module
             .define_function(fid, &mut ctx)
             .map_err(|e| native_err(Span::default(), format!("内部: 函数定义失败 {e}")))
@@ -166,13 +185,13 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.switch_to_block(entry);
         bcx.seal_block(entry);
 
-        let slot_count = bcx.ins().iconst(types::I32, self.global_slots as i64);
+        let byte_count = bcx.ins().iconst(types::I64, self.global_bytes as i64);
         let gword = self.call_rt(
             &mut bcx,
             "alias.globals.new",
-            &[types::I32],
+            &[types::I64],
             Some(types::I64),
-            &[slot_count],
+            &[byte_count],
         )?;
 
         let globals_v = bcx.declare_var(types::I64);
@@ -187,6 +206,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             terminated: false,
             init_ctx: false,
             ret_block: None,
+            ret_vty: None,
         };
         // 顶层槽位偏移在编译期已知 → 记录供 slot_of 解析 (init 语境)
         frame.init_ctx = true;
@@ -198,27 +218,39 @@ impl<'m, M: Module> Compiler<'m, M> {
             _ => None,
         }) {
             let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?;
-            write_global(&mut bcx, &frame, slot_of(self, &b.name), v);
-            frame.scopes[0].insert(b.name.clone(), Slot::Global(slot_of(self, &b.name)));
+            let off = slot_of(self, &b.name);
+            let svty = self.globals_final[&b.name].1.clone();
+            let sv = norm_store(&mut bcx, v, &svty);
+            let base = bcx.use_var(frame.globals);
+            bcx.ins().store(MemFlagsData::new(), sv, base, off as i32);
+            frame.scopes[0].insert(b.name.clone(), Slot::Global(off));
             frame.locals_vty[0].insert(b.name.clone(), decl_vty(&b.ty, &self.struct_layouts));
         }
 
-        // main 闭包: 从全局槽位加载 → 间接调用
-        let clo = read_global(&mut bcx, &frame, main_slot);
+        // main 闭包: 从全局槽位加载 → 间接调用 (混合签名 — 返回类型定型)
+        let clo = {
+            let base = bcx.use_var(frame.globals);
+            bcx.ins().load(types::I64, MemFlagsData::new(), base, main_slot as i32)
+        };
         let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
         let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
-        let uref = bcx.func.import_signature(self.user_sig(0));
+        let mut msig = Signature::new(self.cc);
+        msig.params.push(AbiParam::new(types::I64));
+        msig.params.push(AbiParam::new(types::I64));
+        msig.returns.push(AbiParam::new(cl_type(&main_ret)));
+        let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
-        let code_word = match main_ret {
-            VTy::Int => raw,
+        // 退出映射 (Q④): i32→原样 / bool true→0 false→1 / 其余→0
+        let code_word: Value = match &main_ret {
+            VTy::I(IntW::W32) => bcx.ins().sextend(types::I64, raw),
             VTy::Bool => {
                 let is_true = bcx.ins().icmp_imm_s(IntCC::Equal, raw, 1);
                 let t = bcx.ins().iconst(types::I64, 0);
                 let f = bcx.ins().iconst(types::I64, 1);
                 bcx.ins().select(is_true, t, f)
             }
-            _ => bcx.ins().iconst(types::I64, 0),
+            _ => invariant_violation("main 返回类型 ∈ {i32,bool} (sema Q④ 已校验)"),
         };
         if self.is_aot {
             // 无 CRT 环境: 显式 ExitProcess 传递退出码 (返回值无人接收)
@@ -231,6 +263,10 @@ impl<'m, M: Module> Compiler<'m, M> {
             bcx.ins().return_(&[code_word]);
         }
         bcx.finalize(self.module.target_config());
+        if let Err(ve) = ctx.verify_if(self.module.isa()) {
+            eprintln!("[verify-fail] {}", ve);
+            eprintln!("[CLIF]\n{}", ctx.func);
+        }
         self.module
             .define_function(fid, &mut ctx)
             .map_err(|e| native_err(Span::default(), format!("内部: 入口定义失败 {e}")))?;
@@ -255,7 +291,10 @@ pub(crate) fn emit_funclit_value<M: Module>(
 ) -> AliasResult<Value> {
     let caps = scan_captures(c, params, body, frame);
     let ret_vty = infer_ret_vty(c, frame, params, body);
-    let fid = c.declare_user_func(params.len())?;
+    let param_vtys: Vec<VTy> = params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect();
+    let name = format!("u{}", c.next_fid);
+    c.next_fid += 1;
+    let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
     c.fn_ids.push(fid);
     c.fn_rets.push(ret_vty.clone());
     // 捕获项静态类型在捕获帧就地解析 — 闭包体内不可再回查外层帧

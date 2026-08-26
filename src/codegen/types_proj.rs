@@ -17,13 +17,27 @@ pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str)
 /// 打印分派所需的最小静态类型投影 (推断不外泄 — 仅后端内部消费)。
 pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
     match e {
-        Expr::Int(..) | Expr::Neg { .. } => VTy::Int,
+        Expr::Int(..) => VTy::I(IntW::W32),
+        Expr::Float(..) => VTy::F(FloatW::F64),
+        Expr::Neg { expr, .. } => match static_vty(c, frame, expr) {
+            v @ (VTy::I(_) | VTy::F(_)) => v,
+            _ => VTy::Other,
+        },
         Expr::Bool(..) => VTy::Bool,
         Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
         Expr::FuncLit { .. } => VTy::Func,
-        Expr::Binary { op, lhs: _, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => VTy::Int,
+        // 算术结果 = 操作数族 (sema 已保证同族同宽); 比较恒 Bool
+        Expr::Binary { op, lhs, rhs, .. } => match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                let lt = static_vty(c, frame, lhs);
+                if lt.is_numeric() {
+                    lt
+                } else {
+                    let rt = static_vty(c, frame, rhs);
+                    if rt.is_numeric() { rt } else { VTy::Other }
+                }
+            }
             _ => VTy::Bool,
         },
         Expr::Ident(name, _) => vty_of_name(c, frame, name),
@@ -44,8 +58,8 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         Expr::Field { recv, name, .. } => {
             if let VTy::Struct(s) = static_vty(c, frame, recv) {
                 if let Some(layout) = c.struct_layouts.get(&s) {
-                    if let Some((_, _, fvty)) =
-                        layout.iter().find(|(n, ..)| n == name)
+                    if let Some((_, _, fvty, _)) =
+                        layout.fields.iter().find(|(n, ..)| n == name)
                     {
                         return fvty.clone();
                     }
@@ -54,17 +68,25 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             VTy::Other
         }
         Expr::Call { callee, .. } => match callee.as_ref() {
-            Expr::Ident(name, _) => c
-                .fn_ret_by_name
-                .get(name)
-                .cloned()
-                // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
-                .or_else(|| {
-                    c.struct_layouts
-                        .contains_key(name)
-                        .then(|| VTy::Struct(name.clone()))
-                })
-                .unwrap_or(VTy::Other),
+            Expr::Ident(name, _) => {
+                // 转换内建 → 目标类型; typeof → string
+                if let Some(t) = conv_target_vty(name) {
+                    return t;
+                }
+                if name == "typeof" {
+                    return VTy::Str;
+                }
+                c.fn_ret_by_name
+                    .get(name)
+                    .cloned()
+                    // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
+                    .or_else(|| {
+                        c.struct_layouts
+                            .contains_key(name)
+                            .then(|| VTy::Struct(name.clone()))
+                    })
+                    .unwrap_or(VTy::Other)
+            }
             Expr::FuncLit { .. } => VTy::Other,
             _ => VTy::Other,
         },
@@ -82,12 +104,12 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         Expr::MethodCall { recv, name, .. } => {
             let rn = match static_vty(c, frame, recv) {
                 VTy::Str => "string".to_string(),
-                VTy::Int => "i32".to_string(),
+                VTy::I(_) => "i32".to_string(),
                 VTy::Bool => "bool".to_string(),
-                VTy::Struct(s) => s,
+                VTy::Struct(s) => s.clone(),
                 VTy::Array(elem) => {
                     return match name.as_str() {
-                        "len" => VTy::Int,
+                        "len" => VTy::I(IntW::W32),
                         "push" => VTy::Unit,
                         "pop" => *elem,
                         _ => VTy::Other,
@@ -99,7 +121,7 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 return v.clone();
             }
             match (rn.as_str(), name.as_str()) {
-                ("string", "len") => VTy::Int,
+                ("string", "len") => VTy::I(IntW::W32),
                 ("string", "upper" | "lower" | "trim") => VTy::Str,
                 _ => VTy::Other,
             }
@@ -129,9 +151,10 @@ pub(crate) fn infer_ret_vty<M: Module>(c: &Compiler<M>, frame: &Frame, params: &
         env: frame.env,
         caps: frame.caps.clone(),
         caps_vty: frame.caps_vty.clone(),
+        ret_block: frame.ret_block,
+        ret_vty: frame.ret_vty.clone(),
         terminated: false,
         init_ctx: true,
-        ret_block: None,
     };
     match body {
         Body::ArrowExpr(e) => static_vty(c, &inner, e),

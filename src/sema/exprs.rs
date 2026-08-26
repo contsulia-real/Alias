@@ -5,7 +5,7 @@
 //! 类型表 / 调用元数与实参一致性 / increase-decrease 内建。
 //! 求值顺序 (lhs-before-rhs、先值后目标) 为黄金记录冻结, 逐行保留。
 
-use super::types::{types_match, Ty};
+use super::types::{types_match, FloatW, IntW, Ty, UIntW};
 use super::{op_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, StrPartAst, Stmt};
 use crate::{AliasError, AliasResult, Span};
@@ -15,7 +15,8 @@ impl Checker {
 
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
         match e {
-            Expr::Int(..) => Ok(Ty::Int),
+            Expr::Int(..) => Ok(Ty::Int(IntW::W32)),
+            Expr::Float(..) => Ok(Ty::Float(FloatW::F64)),
             Expr::Bool(..) => Ok(Ty::Bool),
             Expr::Unit(_) => Ok(Ty::Unit),
             Expr::Str(parts, _) => {
@@ -40,9 +41,11 @@ impl Checker {
                     return Ok(Ty::Unknown);
                 }
                 match t {
-                    Ty::Int => Ok(Ty::Int),
+                    // 取负按声明宽度 wrapping (Phase 3a); 无符号取负无定义
+                    Ty::Int(w) => Ok(Ty::Int(w)),
+                    Ty::Float(w) => Ok(Ty::Float(w)),
                     other => Err(AliasError {
-                        msg: format!("取负需要 i32, 实际 {}", other.name()),
+                        msg: format!("取负需要有符号整数或浮点, 实际 {}", other.name()),
                         span: expr.span(),
                     }),
                 }
@@ -72,7 +75,7 @@ impl Checker {
                     });
                 };
                 let it = self.expr(idx, env)?;
-                if !it.is_unknown() && it != Ty::Int {
+                if !it.is_unknown() && it != Ty::Int(IntW::W32) {
                     return Err(AliasError {
                         msg: format!("下标需要 i32, 实际 {}", it.name()),
                         span: idx.span(),
@@ -303,13 +306,29 @@ impl Checker {
         if l.is_unknown() || r.is_unknown() {
             return Ok(Ty::Unknown);
         }
+        // 数值混算拦截 (Phase 3a 裁决③): 同族同宽才合法 —
+        // 数值×数值异型报「禁止隐式混算」, 数值×非数值沿用运算符不适用
+        let mixed = |span: Span| {
+            if l.is_numeric() && r.is_numeric() {
+                AliasError {
+                    msg: format!("{} 与 {} 禁止隐式混算", l.name(), r.name()),
+                    span,
+                }
+            } else {
+                op_mismatch(op, &l, &r, span)
+            }
+        };
         match op {
             Add | Sub | Mul | Div => match (&l, &r) {
-                (Ty::Int, Ty::Int) => Ok(Ty::Int),
-                _ => Err(op_mismatch(op, &l, &r, span)),
+                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
+                (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),
+                _ => Err(mixed(span)),
             },
             Lt | Le | Gt | Ge | EqEq | NotEq => match (&l, &r) {
-                (Ty::Int, Ty::Int) => Ok(Ty::Bool),
+                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Bool),
+                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::Bool),
+                (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Bool),
                 (Ty::Str, Ty::Str) => Ok(Ty::Bool),
                 (Ty::Bool, Ty::Bool) => match op {
                     EqEq | NotEq => Ok(Ty::Bool),
@@ -322,7 +341,7 @@ impl Checker {
                         span,
                     }),
                 },
-                _ => Err(op_mismatch(op, &l, &r, span)),
+                _ => Err(mixed(span)),
             },
         }
     }
@@ -370,6 +389,53 @@ impl Checker {
                 };
                 self.expr(&arg.value, env)?;
                 return Ok(Ty::Unit);
+            }
+            // 转换内建 (Phase 3a): to_i8..to_f64 — 实参须数值族,
+            // 结果 = 目标类型; 跨族/跨宽一律显式转换 (无隐式混算)
+            if let Some(target) = conv_builtin_ty(name) {
+                let [arg] = args else {
+                    return Err(AliasError {
+                        msg: format!("{name} 恰好接受 1 个参数"),
+                        span,
+                    });
+                };
+                if !arg.label.is_none() {
+                    return Err(AliasError {
+                        msg: format!("函数调用不接受命名实参 '{}'", arg.label.as_ref().unwrap()),
+                        span: arg.span,
+                    });
+                }
+                let t = self.expr(&arg.value, env)?;
+                if !t.is_unknown() && !t.is_numeric() {
+                    return Err(AliasError {
+                        msg: format!("{name} 需要数值类型, 实际 {}", t.name()),
+                        span: arg.value.span(),
+                    });
+                }
+                return Ok(target);
+            }
+            // typeof 内建 (Phase 3a): 求值实参取副作用, 返回静态类型名字符串
+            if name == "typeof" {
+                let [arg] = args else {
+                    return Err(AliasError {
+                        msg: "typeof 恰好接受 1 个参数".into(),
+                        span,
+                    });
+                };
+                if !arg.label.is_none() {
+                    return Err(AliasError {
+                        msg: format!("函数调用不接受命名实参 '{}'", arg.label.as_ref().unwrap()),
+                        span: arg.span,
+                    });
+                }
+                let t = self.expr(&arg.value, env)?;
+                if t.is_unknown() {
+                    return Err(AliasError {
+                        msg: "typeof 无法确定实参的静态类型".into(),
+                        span: arg.value.span(),
+                    });
+                }
+                return Ok(Ty::Str);
             }
         }
         let ft = self.expr(callee, env)?;
@@ -538,7 +604,7 @@ impl Checker {
             return Ok(Ty::Unit);
         }
         match info.ty {
-            Ty::Int => Ok(Ty::Unit),
+            Ty::Int(IntW::W32) => Ok(Ty::Unit),
             ref other => Err(AliasError {
                 msg: format!("{name} 需要 i32, 实际 {}", other.name()),
                 span: *tspan,
@@ -574,7 +640,7 @@ impl Checker {
                 }
             }
             match name {
-                "len" if args.is_empty() => return Ok(Ty::Int),
+                "len" if args.is_empty() => return Ok(Ty::Int(IntW::W32)),
                 "push" if args.len() == 1 => {
                     let at = self.expr(&args[0].value, env)?;
                     if !types_match(elem, &at) {
@@ -649,4 +715,22 @@ impl Checker {
         }
         Ok(sig.ret)
     }
+}
+
+/// 转换内建名 → 目标类型 (Phase 3a 裁决⑤); 非转换名返回 None。
+fn conv_builtin_ty(name: &str) -> Option<Ty> {
+    let t = match name {
+        "to_i8" => Ty::Int(IntW::W8),
+        "to_i16" => Ty::Int(IntW::W16),
+        "to_i32" => Ty::Int(IntW::W32),
+        "to_i64" => Ty::Int(IntW::W64),
+        "to_u8" => Ty::UInt(UIntW::U8),
+        "to_u16" => Ty::UInt(UIntW::U16),
+        "to_u32" => Ty::UInt(UIntW::U32),
+        "to_u64" => Ty::UInt(UIntW::U64),
+        "to_f32" => Ty::Float(FloatW::F32),
+        "to_f64" => Ty::Float(FloatW::F64),
+        _ => return None,
+    };
+    Some(t)
 }

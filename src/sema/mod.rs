@@ -20,15 +20,16 @@
 mod decls;
 mod exprs;
 mod stmts;
-mod types;
+pub(crate) mod types;
 
-use crate::ast::{BinOp, Binding, Item, Program};
+use crate::ast::{BinOp, Binding, Expr, Item, Program};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use types::Ty;
+use types::int_literal_fits;
 
 #[derive(Clone)]
 struct VarInfo {
@@ -47,7 +48,7 @@ struct FieldInfo {
 }
 
 #[derive(Clone)]
-struct StructInfo {
+pub(crate) struct StructInfo {
     fields: Vec<FieldInfo>,
 }
 
@@ -141,7 +142,7 @@ pub fn check(program: &Program) -> AliasResult<()> {
 /// len = 字节长; upper/lower 仅 ASCII 字母; trim 剥离首尾空格/\t/\r/\n。
 fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     let seed: [(&str, Vec<Ty>, Ty); 4] = [
-        ("len", vec![], Ty::Int),
+        ("len", vec![], Ty::Int(types::IntW::W32)),
         ("upper", vec![], Ty::Str),
         ("lower", vec![], Ty::Str),
         ("trim", vec![], Ty::Str),
@@ -172,4 +173,40 @@ fn decl_mismatch(b: &Binding, want: &Ty, got: &Ty) -> AliasError {
         msg: format!("绑定 '{}' 声明类型为 {}, 实际 {}", b.name, want.name(), got.name()),
         span: b.span,
     }
+}
+
+/// 裸数值字面量与声明槽位的统一 (Phase 3a 裁决① 前置守卫):
+/// - 整数字面量 (含一元负号前缀): 装入整型槽位时按 [`types::int_literal_fits`]
+///   校验 — 通过则类型取声明槽位, 越界即编译错误;
+/// - 浮点字面量装入浮点槽位恒可舍入 — 类型取声明槽位;
+/// - 其余组合返回 None — 不做字面量多态, 跨族/跨宽赋值须经转换内建。
+pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<AliasResult<Ty>> {
+    let span = value.span();
+    if let Expr::Float(..) = value {
+        return if matches!(declared, Ty::Float(_)) {
+            Some(Ok(declared.clone()))
+        } else {
+            None
+        };
+    }
+    let v = match value {
+        Expr::Int(n, _) => *n,
+        Expr::Neg { expr, .. } => match expr.as_ref() {
+            // wrapping 取负镜像 codegen 的按宽 wrapping 语义
+            Expr::Int(n, _) => n.wrapping_neg(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !matches!(declared, Ty::Int(_) | Ty::UInt(_)) {
+        return None;
+    }
+    Some(if int_literal_fits(declared, v) {
+        Ok(declared.clone())
+    } else {
+        Err(AliasError {
+            msg: format!("字面量 {v} 超出 {} 的表示范围", declared.name()),
+            span,
+        })
+    })
 }

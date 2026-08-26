@@ -21,7 +21,7 @@ public func i32 counter.bump = (i32 by) -> {
 }
 
 // 无参方法 + self 只读 (字段读经插值洞)
-public func string counter.label = () -> return '${self.tag}($self.n)'
+public func string counter.label = () -> return '${self.tag}(${self.n})'
 
 func i32 main = () -> {
     // ---- 用户字符串方法 ----

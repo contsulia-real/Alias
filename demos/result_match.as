@@ -86,7 +86,7 @@ func i32 main = () -> {
 
     // ---- 穷尽匹配取值: 本例命中 err 臂 ----
     val string label = match mk_stat(-1, 0) {
-        ok(s) -> '有 $s.lines 行'
+        ok(s) -> '有 ${s.lines} 行'
         err(e) -> e
     }
     println label

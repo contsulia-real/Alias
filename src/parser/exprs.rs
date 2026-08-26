@@ -73,7 +73,7 @@ impl Parser {
                 Some(t)
                     if matches!(
                         t,
-                        Tok::Int(_) | Tok::Bool(_) | Tok::Str(_) | Tok::LParen | Tok::LBracket
+                        Tok::Int(_) | Tok::Float(_) | Tok::Bool(_) | Tok::Str(_) | Tok::LParen | Tok::LBracket
                     ) =>
                 {
                     let callee = match &lhs {
@@ -108,6 +108,7 @@ impl Parser {
             self.peek_at(n),
             Some(Tok::Ident(_))
                 | Some(Tok::Int(_))
+                | Some(Tok::Float(_))
                 | Some(Tok::Bool(_))
                 | Some(Tok::Str(_))
                 | Some(Tok::LParen)
@@ -272,6 +273,11 @@ impl Parser {
             Some(Tok::Int(v)) => {
                 self.bump();
                 Ok(Expr::Int(v, span))
+            }
+            // 浮点字面量 (Phase 3a): f64 承载, 目标 f32 由 sema 编译期舍入检查
+            Some(Tok::Float(v)) => {
+                self.bump();
+                Ok(Expr::Float(v, span))
             }
             Some(Tok::Bool(b)) => {
                 self.bump();
