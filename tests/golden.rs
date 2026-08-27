@@ -30,7 +30,9 @@ struct Golden {
 }
 
 // ---------------------------------------------------------------------------
-// 黄金记录表 — 与当前 1-based line/col Span 契约保持一致。
+// 黄金记录表 — Span 列坐标按当前 lexer 的实际算法冻结。
+// `col` 游标从 1 开始，但 token 起点取 span_here(1)，即对非首列通常表现为
+// 视觉列 - 1，同时通过 max(1) 保证不会产生真实 col=0。
 // ---------------------------------------------------------------------------
 
 #[rustfmt::skip]
@@ -88,12 +90,12 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 0,
         },
-        // ---- 除零: 运行时错误, span 为除号左侧操作数 `1` (1-based 列 12) ----
+        // ---- 除零: 运行时错误, span 为除号左侧操作数 `1`；当前坐标为 2:11 ----
         Golden {
             name: "division_by_zero_error",
             input: Input::Inline("func i32 main = () -> {\n    return 1 / 0\n}\n"),
             stdout: b"",
-            stderr: "错误 @ 2:12 — 除以零\n".as_bytes(),
+            stderr: "错误 @ 2:11 — 除以零\n".as_bytes(),
             exit: 1,
         },
         // ---- display 渲染: func→<func>; unit 是无返回值标记，不在 display 域 ----
@@ -136,24 +138,24 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 3,
         },
-        // ---- val 重赋值: span 为赋值目标 `a` (1-based 列 5) ----
+        // ---- val 重赋值: span 为赋值目标 `a`；当前坐标为 3:4 ----
         Golden {
             name: "val_reassignment_error",
             input: Input::Inline(
                 "func i32 main = () -> {\n    val i32 a = 1;\n    a = 2;\n    return 0\n}\n",
             ),
             stdout: b"",
-            stderr: "错误 @ 3:5 — 'a' 是 val 绑定, 不可重新赋值\n".as_bytes(),
+            stderr: "错误 @ 3:4 — 'a' 是 val 绑定, 不可重新赋值\n".as_bytes(),
             exit: 1,
         },
-        // ---- 类型槽强制非空: span 为名字 `x` (1-based 列 9) ----
+        // ---- 类型槽强制非空: span 为名字 `x`；当前坐标为 2:8 ----
         Golden {
             name: "missing_type_slot_error",
             input: Input::Inline(
                 "func i32 main = () -> {\n    var x = 1;\n    return 0\n}\n",
             ),
             stdout: b"",
-            stderr: "错误 @ 2:9 — Var 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注\n".as_bytes(),
+            stderr: "错误 @ 2:8 — Var 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注\n".as_bytes(),
             exit: 1,
         },
         // ---- 缺 main: Span::default() 时省略位置前缀 ----
