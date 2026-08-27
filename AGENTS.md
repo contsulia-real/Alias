@@ -2,7 +2,7 @@
 
 **同步日期：** 2026-08-28  
 **基线分支：** `main`  
-**基线提交：** `a54ad7b0800cafb861e189630898006a30357df1`（typed HIR 单次类型投影）
+**实现基线提交：** `a54ad7b0800cafb861e189630898006a30357df1`（typed HIR 单次类型投影）
 
 > 本文件只描述 Alias **当前状态**。历史阶段、已删除实现和旧裁决仅记录在 `MIGRATION.md`，不得从历史条目反推当前行为。
 
@@ -259,7 +259,9 @@ pub func Ret Receiver.method = (...) -> ...
 
 用户可见诊断统一为简体中文。
 
-当前 `Span` 只包含 `line / col / len`，尚不包含源文件路径。真实 lexer span 的**行和列都从 1 开始**；`Span::default()` 的全零值只作为无具体源码位置的哨兵，例如缺少顶层 `main`，此时 `AliasError::Display` 省略 `错误 @ line:col —` 前缀。
+当前 `Span` 只包含 `line / col / len`，尚不包含源文件路径。行号从 1 开始。列坐标必须按 **当前 lexer 的实际算法**理解：内部 `col` 游标从 1 开始，但 token 起点在消费前通过 `span_here(1)` 计算，即 `col.saturating_sub(1).max(1)`；因此非首列 token 通常表现为视觉列减 1，而最小列仍为 1。这不是标准的纯 0-based 或纯 1-based 坐标系，文档和测试不得把它简化成其中任一种。当前黄金锚点包括：`return 1 / 0` 中的 `1` 为 `2:11`，四格缩进后的赋值目标 `a` 为 `3:4`。
+
+`Span::default()` 的全零值只作为无具体源码位置的哨兵，例如缺少顶层 `main`，此时 `AliasError::Display` 省略 `错误 @ line:col —` 前缀。
 
 运行时错误由已编译产物根据内嵌 span 数据输出；编译器进程不执行语言 runtime。
 
