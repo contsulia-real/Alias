@@ -78,7 +78,8 @@ D:\Project\Alias\
 - **Pattern 语义**：第一批 Pattern 为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`。普通标识符与 `_` 都是 catch-all，前者绑定整个主语；guard/struct Pattern 暂未加入。
 - **运算符语义**：`%` 仅整数；`& | ^ ~ << >>` 仅整数；同型同宽度运算，不允许隐式数值混算；不提供复合赋值。
 - **数组语义**：语言值 = 共享 wrapper {raw_header,version}；raw header 为 {data_ptr,len,cap}，元素使用 8 字节载荷槽。别名共享 wrapper；push/pop 推进 version 并使旧 iterator fail-fast。下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop/iterator 不可定义。
-- **自增减语义**：`increase name` / `decrease name` 只允许作为独立语句，目标必须是可变数值绑定；整数按声明宽度 wrapping ±1，f32/f64 按同型 ±1.0。它们不产生可赋值、可返回或可传参的值。
+- **整数溢出语义**：整数 `+/-/*`、一元负号以及 `increase/decrease` 均按声明宽度检查；结果超出范围时，编译产物经表达式 Span 输出「整数溢出」并 `ExitProcess(1)`，不得回绕。位运算和移位维持固定位宽位模式语义。
+- **自增减语义**：`increase name` / `decrease name` 只允许作为独立语句，目标必须是可变数值绑定；整数执行 checked ±1，f32/f64 按同型 ±1.0。它们不产生可赋值、可返回或可传参的值。
 - **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。
 - **ABI/布局单源**：每种 `VTy` 的规范寄存器类型、实际存储类型/宽度/对齐、参数/返回类型及载荷字编码只在 `codegen/abi.rs` 定义。
 - **runtime 契约单源**：所有 `alias.*` 与内部 `rt.*` 符号必须进入 `RUNTIME_CONTRACTS`；缺失、重复、多余或调用参数类型漂移均为编译器错误。
@@ -129,5 +130,5 @@ cargo build                               # 构建
 - **CI 永久禁用。** 以仓库根目录 `NO_CI.md` 为硬规则；任何工具、代理或后续任务都不得新增、恢复、启用或询问启用 CI/GitHub Actions/其它自动化流水线。验证只能显式手动运行。
 - 无 lint 配置、无 Makefile——构建使用 cargo 默认行为。
 - 数值类型含 i8/i16/i32/i64、u8/u16/u32/u64、f32/f64；跨类型混算禁止，显式转换走 `to_*` 内建。
-- 除零是运行时错误而非 panic（`codegen/emit.rs` 显式守卫 → span-ID 中止存根，INT_MIN÷-1 同守卫）。
+- 除零是运行时错误而非 panic（`codegen/emit.rs` 显式守卫 → span-ID 中止存根）；`INT_MIN / -1` 与其它整数算术越界统一报「整数溢出」。
 - 输入上限：源码 8 MiB、200000 token、语法/类型/插值嵌套 128 层、表达式链 256 项。

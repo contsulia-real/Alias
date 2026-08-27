@@ -51,6 +51,53 @@ fn runtime_abort_terminates_only_the_compiled_program() {
 }
 
 #[test]
+fn integer_overflow_aborts_for_every_width_and_checked_operation() {
+    let cases = [
+        "func i32 main = () -> {\n    val i8 x = 127\n    val i8 one = 1\n    val i8 out = x + one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i16 x = -32768\n    val i16 one = 1\n    val i16 out = x - one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i32 x = 50000\n    val i32 out = x * x\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i64 x = 9223372036854775807\n    val i64 one = 1\n    val i64 out = x + one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u8 x = 255\n    val u8 one = 1\n    val u8 out = x + one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u16 zero = 0\n    val u16 one = 1\n    val u16 out = zero - one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u32 x = 65536\n    val u32 out = x * x\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u64 max = to_u64(-1)\n    val u64 one = 1\n    val u64 out = max + one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i8 min = -128\n    val i8 out = -min\n    return 0\n}\n",
+        "func i32 main = () -> {\n    var i16 max = 32767\n    increase max\n    return 0\n}\n",
+        "func i32 main = () -> {\n    var u16 zero = 0\n    decrease zero\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i32 min = -2147483647 - 1\n    val i32 m1 = -1\n    val i32 out = min / m1\n    return 0\n}\n",
+    ];
+
+    for src in cases {
+        let output = run_cli(src);
+        assert_eq!(output.status.code(), Some(1), "源码未以 1 中止:\n{src}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.starts_with("错误 @ ") && stderr.ends_with(" — 整数溢出\n"),
+            "溢出诊断错误: {stderr:?}\n源码:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn recursive_u32_factorial_aborts_at_thirteen_instead_of_wrapping() {
+    let src = r#"pub func u32 fact = (u32 x) -> {
+    if x == 0 {
+        return 1
+    }
+    return x * fact(x - 1)
+}
+func i32 main = () -> {
+    println fact(13)
+    return 0
+}
+"#;
+    let output = run_cli(src);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, "错误 @ 5:11 — 整数溢出\n".as_bytes());
+}
+
+#[test]
 fn concurrent_native_compilations_keep_span_tables_isolated() {
     let threads = (0..12)
         .map(|padding| {

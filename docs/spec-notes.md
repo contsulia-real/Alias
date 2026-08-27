@@ -13,8 +13,8 @@
 
 | 运行时值 | 静态类型 | 显示字节 | 备注 |
 |---|---|---|---|
-| 有符号整数 | `i8/i16/i32/i64` | 十进制表示 (如 `48`, `-3`) | 按声明宽度 wrapping |
-| 无符号整数 | `u8/u16/u32/u64` | 无符号十进制表示 | 按声明宽度 wrapping |
+| 有符号整数 | `i8/i16/i32/i64` | 十进制表示 (如 `48`, `-3`) | `+/-/*`、一元负号、自增减按声明宽度 checked，越界中止 |
+| 无符号整数 | `u8/u16/u32/u64` | 无符号十进制表示 | `+/-/*`、自增减按声明宽度 checked，越界中止 |
 | 浮点 | `f32/f64` | 规范化十进制科学计数法；零为 `0` | 原生 runtime 统一舍入规则 |
 | 布尔 | `Bool(bool)` | `true` / `false` | 小写字面量 |
 | 字符串 | `Str(String)` | 原文字节 | **不加引号、不转义**, 与源码字面量形态无关 |
@@ -153,7 +153,7 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | alias.display.struct/array/result | ()→i64 / ()→i64 / (i32)→i64 | 复合值固定显示或按 result tag 显示 |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
 | alias.println/print.i32/bool | (i32) | 经 display 复用 |
-| alias.abort_div/oob/pop/conv | (i32) | span-ID 查表；编译产物输出诊断后 exit 1 |
+| alias.abort_div/oob/pop/conv/overflow | (i32) | span-ID 查表；编译产物输出诊断后 exit 1 |
 | rt.heap.alloc / rt.write.dec / rt.write.stdout | 内部契约 | 零初始化分配、十进制写和 stdout 写 |
 
 字符串表示: 泄漏 16 字节块 {data_ptr: u64, len: u64}; data_ptr 为 null
@@ -357,6 +357,7 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 | alias.arr.pop | (i64)→i64 | len-=1 返回 data[len] |
 | alias.display.array | ()→i64 | 固定 "<array>" 块 |
 | alias.abort_oob / alias.abort_pop | (i32) | span-ID 中止存根 |
+| alias.abort_overflow | (i32) | 整数算术结果超出声明宽度时输出「整数溢出」并中止 |
 
 锁定: tests/array_laws.rs + demos/arrays.as 原生管线一致性。
 
@@ -382,9 +383,10 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 - `&&` / `||` 为运行时短路；`?:` 只求值被选中的值分支。
 - 当前运算符优先级（高→低）：后缀/调用/方法 > 一元 `- ! ~` > `* / %` > `+ -` > `<< >>` > 有序比较 > `== !=` > `&` > `^` > `|` > 无括号方法/调用边界 > `&&` > `||` > `?:`。
 - `%` 仅适用于同型整数；`& | ^ ~ << >>` 仅适用于整数。整数宽度与有/无符号身份必须一致，不做隐式混算。`>>` 对有符号整数为算术右移，对无符号整数为逻辑右移。
+- 整数 `+/-/*`、一元负号和 `increase/decrease` 采用声明宽度 checked 语义；溢出或无符号下溢均在运行时按表达式 Span 报「整数溢出」并退出 1。`INT_MIN / -1` 走同一溢出诊断；除数为零仍报「除以零」。位运算及移位是固定位宽位模式操作，不进入算术溢出通道。
 - 不提供 `+= -= *= /= %= &= |= ^= <<= >>=` 等复合赋值。
 - 数值类型提供内建 `plus/minus/times/div`，分别与 `+/-/*//` 共享静态规则和原生 lowering；`bool.not()` 与 `!` 共享取反语义。非数值类型仍可定义自己的同名扩展方法。
-- `increase name` / `decrease name` 是独立语句，不是返回 unit 的表达式。目标必须是可变数值绑定；整数按声明宽度 wrapping 加减 1，f32/f64 按同型加减 1.0。任何赋值、return、实参、插值等值位置均编译期拒绝。
+- `increase name` / `decrease name` 是独立语句，不是返回 unit 的表达式。目标必须是可变数值绑定；整数执行 checked 加减 1，f32/f64 按同型加减 1.0。任何赋值、return、实参、插值等值位置均编译期拒绝。
 - 普通赋值与结构体字段赋值均执行静态目标类型一致性检查。
 - `pub` 是唯一公开可见性关键字，只允许顶层绑定；旧 `public` 不再是关键字或兼容语法。
 - `match` 使用统一 Pattern AST；第一批为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`。guard 与 struct Pattern 暂不加入。

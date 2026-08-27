@@ -21,24 +21,22 @@ fn random_i32_expr(rng: &mut Lcg, depth: usize) -> (String, i32) {
     }
     let (left_src, left) = random_i32_expr(rng, depth - 1);
     let (right_src, right) = random_i32_expr(rng, depth - 1);
-    match rng.next() % 3 {
-        0 => (
-            format!("({left_src} + {right_src})"),
-            left.wrapping_add(right),
-        ),
-        1 => (
-            format!("({left_src} - {right_src})"),
-            left.wrapping_sub(right),
-        ),
-        _ => (
-            format!("({left_src} * {right_src})"),
-            left.wrapping_mul(right),
-        ),
-    }
+    let candidate = match rng.next() % 3 {
+        0 => left
+            .checked_add(right)
+            .map(|value| (format!("({left_src} + {right_src})"), value)),
+        1 => left
+            .checked_sub(right)
+            .map(|value| (format!("({left_src} - {right_src})"), value)),
+        _ => left
+            .checked_mul(right)
+            .map(|value| (format!("({left_src} * {right_src})"), value)),
+    };
+    candidate.unwrap_or((left_src, left))
 }
 
 #[test]
-fn deterministic_random_ast_corpus_matches_wrapping_i32_model() {
+fn deterministic_random_ast_corpus_matches_checked_i32_model() {
     let mut rng = Lcg(0xA11A_5C0D_EC0D_E123);
     let mut src = String::from("func i32 main = () -> {\n");
     for index in 0..160 {
@@ -54,48 +52,45 @@ fn deterministic_random_ast_corpus_matches_wrapping_i32_model() {
 }
 
 #[test]
-fn integer_width_boundaries_wrap_at_the_declared_type() {
+fn integer_width_boundaries_accept_results_that_still_fit() {
     let src = r#"
 func i32 main = () -> {
-    val i8 i8_max = 127
+    val i8 i8_max = 126
     val i8 i8_one = 1
-    val i8 i8_wrap = i8_max + i8_one
+    val i8 i8_result = i8_max + i8_one
     val i8 i8_min = -128
-    while i8_wrap != i8_min { return 1 }
-    val i16 i16_max = 32767
+    while i8_result != 127 { return 1 }
+    while i8_min + i8_one != -127 { return 2 }
+    val i16 i16_max = 32766
     val i16 i16_one = 1
-    val i16 i16_wrap = i16_max + i16_one
+    val i16 i16_result = i16_max + i16_one
     val i16 i16_min = -32768
-    while i16_wrap != i16_min { return 2 }
-    val i32 i32_max = 2147483647
+    while i16_result != 32767 { return 3 }
+    while i16_min + i16_one != -32767 { return 4 }
+    val i32 i32_max = 2147483646
     val i32 i32_one = 1
-    val i32 i32_wrap = i32_max + i32_one
-    while i32_wrap != -2147483648 { return 3 }
-    val i64 i64_max = 9223372036854775807
+    val i32 i32_result = i32_max + i32_one
+    while i32_result != 2147483647 { return 5 }
+    val i64 i64_max = 9223372036854775806
     val i64 one = 1
-    val i64 i64_wrap = i64_max + one
-    val i64 minus_one = -1
-    while i64_wrap + i64_max != minus_one { return 4 }
-    val u8 u8_max = 255
+    val i64 i64_result = i64_max + one
+    while i64_result != 9223372036854775807 { return 6 }
+    val u8 u8_max = 254
     val u8 u8_one = 1
-    val u8 u8_wrap = u8_max + u8_one
-    val u8 u8_zero = 0
-    while u8_wrap != u8_zero { return 5 }
-    val u16 u16_max = 65535
+    val u8 u8_result = u8_max + u8_one
+    while u8_result != 255 { return 7 }
+    val u16 u16_max = 65534
     val u16 u16_one = 1
-    val u16 u16_wrap = u16_max + u16_one
-    val u16 u16_zero = 0
-    while u16_wrap != u16_zero { return 6 }
-    val u32 u32_max = 4294967295
+    val u16 u16_result = u16_max + u16_one
+    while u16_result != 65535 { return 8 }
+    val u32 u32_max = 4294967294
     val u32 u32_one = 1
-    val u32 u32_wrap = u32_max + u32_one
-    val u32 u32_zero = 0
-    while u32_wrap != u32_zero { return 7 }
+    val u32 u32_result = u32_max + u32_one
+    while u32_result != 4294967295 { return 9 }
     val u64 u64_max = to_u64(-1)
     val u64 u64_one = 1
-    val u64 u64_wrap = u64_max + u64_one
-    val u64 u64_zero = 0
-    while u64_wrap != u64_zero { return 8 }
+    val u64 u64_result = (u64_max - u64_one) + u64_one
+    while u64_result != u64_max { return 10 }
     return 0
 }
 "#;

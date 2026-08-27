@@ -57,11 +57,11 @@ func i32 main = () -> {
 fn incdec_supports_every_numeric_type_with_declared_width_semantics() {
     let src = r#"
 func i32 main = () -> {
-    var i8 s8 = 127
+    var i8 s8 = 12
     increase s8
-    if s8 != -128 { return 1 }
+    if s8 != 13 { return 1 }
     decrease s8
-    if s8 != 127 { return 2 }
+    if s8 != 12 { return 2 }
 
     var i16 s16 = 16
     increase s16
@@ -78,11 +78,11 @@ func i32 main = () -> {
     decrease s64
     if s64 != 64 { return 5 }
 
-    var u8 u8v = 255
+    var u8 u8v = 8
     increase u8v
-    if u8v != 0 { return 6 }
+    if u8v != 9 { return 6 }
     decrease u8v
-    if u8v != 255 { return 7 }
+    if u8v != 8 { return 7 }
 
     var u16 u16v = 16
     increase u16v
@@ -94,11 +94,11 @@ func i32 main = () -> {
     decrease u32v
     if u32v != 32 { return 9 }
 
-    var u64 u64v = to_u64(-1)
+    var u64 u64v = 64
     increase u64v
-    if u64v != 0 { return 10 }
+    if u64v != 65 { return 10 }
     decrease u64v
-    if u64v != to_u64(-1) { return 11 }
+    if u64v != 64 { return 11 }
 
     var f32 f32v = 1.5
     increase f32v

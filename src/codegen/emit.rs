@@ -637,13 +637,24 @@ pub(crate) fn emit_expr<M: Module>(
             }
             None => Err(native_err(*span, format!("未定义的绑定 '{name}'"))),
         },
-        Expr::Neg { expr, .. } => {
+        Expr::Neg { expr, span } => {
             let v = emit_expr(c, bcx, frame, expr)?;
             let t = static_vty(c, frame, expr);
             match t {
                 VTy::I(w) => {
                     let wt = cl_type(&VTy::I(w));
                     let red = narrow(bcx, v, w.bits());
+                    let min = bcx.ins().iconst(
+                        wt,
+                        match w.bits() {
+                            8 => i8::MIN as i64,
+                            16 => i16::MIN as i64,
+                            32 => i32::MIN as i64,
+                            _ => i64::MIN,
+                        },
+                    );
+                    let overflow = bcx.ins().icmp(IntCC::Equal, red, min);
+                    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", *span)?;
                     let n = bcx.ins().ineg(red);
                     Ok(widen_signed(bcx, n, wt))
                 }
@@ -1066,9 +1077,9 @@ fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Add => bcx.ins().iadd(li, ri),
-                    Sub => bcx.ins().isub(li, ri),
-                    Mul => bcx.ins().imul(li, ri),
+                    Add | Sub | Mul => {
+                        emit_checked_int_binary(c, bcx, frame, op, li, ri, true, span)?
+                    }
                     Div => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, false)?,
                     Rem => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, true)?,
                     _ => unreachable!(),
@@ -1080,9 +1091,9 @@ fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Add => bcx.ins().iadd(li, ri),
-                    Sub => bcx.ins().isub(li, ri),
-                    Mul => bcx.ins().imul(li, ri),
+                    Add | Sub | Mul => {
+                        emit_checked_int_binary(c, bcx, frame, op, li, ri, false, span)?
+                    }
                     Div => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, false)?,
                     Rem => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, true)?,
                     _ => unreachable!(),
@@ -1177,6 +1188,29 @@ fn emit_binary_values<M: Module>(
         }
         And | Or => invariant_violation("短路逻辑运算由 emit_short_circuit 发射"),
     }
+}
+
+fn emit_checked_int_binary<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    op: BinOp,
+    l: Value,
+    r: Value,
+    signed: bool,
+    span: Span,
+) -> AliasResult<Value> {
+    let (result, overflow) = match (signed, op) {
+        (true, BinOp::Add) => bcx.ins().sadd_overflow(l, r),
+        (true, BinOp::Sub) => bcx.ins().ssub_overflow(l, r),
+        (true, BinOp::Mul) => bcx.ins().smul_overflow(l, r),
+        (false, BinOp::Add) => bcx.ins().uadd_overflow(l, r),
+        (false, BinOp::Sub) => bcx.ins().usub_overflow(l, r),
+        (false, BinOp::Mul) => bcx.ins().umul_overflow(l, r),
+        _ => invariant_violation("checked 整数算术仅用于加减乘"),
+    };
+    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+    Ok(result)
 }
 
 fn int_cc(op: BinOp, signed: bool) -> IntCC {
@@ -1963,11 +1997,11 @@ pub(crate) fn emit_divrem_guard<M: Module>(
     span: Span,
     remainder: bool,
 ) -> AliasResult<Value> {
-    let span_id = new_span_id(c, span);
     let wt = ir_type_bits(bits);
     let zero = bcx.ins().iconst(wt, 0);
     let by_zero = bcx.ins().icmp(IntCC::Equal, r, zero);
-    let trap = if signed {
+    emit_abort_branch(c, bcx, frame, by_zero, "alias.abort_div", span)?;
+    if signed {
         let m1 = bcx.ins().iconst(wt, -1);
         let mini = bcx.ins().iconst(
             wt,
@@ -1980,24 +2014,9 @@ pub(crate) fn emit_divrem_guard<M: Module>(
         );
         let by_m1 = bcx.ins().icmp(IntCC::Equal, r, m1);
         let is_min = bcx.ins().icmp(IntCC::Equal, l, mini);
-        let m1_min = bcx.ins().band(by_m1, is_min);
-        bcx.ins().bor(by_zero, m1_min)
-    } else {
-        by_zero
-    };
-
-    let abort_b = bcx.create_block();
-    let ok_b = bcx.create_block();
-    bcx.ins().brif(trap, abort_b, &[], ok_b, &[]);
-    bcx.seal_block(abort_b);
-    bcx.seal_block(ok_b);
-
-    bcx.switch_to_block(abort_b);
-    let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt(bcx, "alias.abort_div", &[aid])?;
-    jump_zero_return(bcx, frame);
-
-    bcx.switch_to_block(ok_b);
+        let overflow = bcx.ins().band(by_m1, is_min);
+        emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+    }
     Ok(match (signed, remainder) {
         (true, false) => bcx.ins().sdiv(l, r),
         (false, false) => bcx.ins().udiv(l, r),

@@ -125,6 +125,7 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.abort_oob", [val(RuntimeTy::I32)]),
     contract!("alias.abort_pop", [val(RuntimeTy::I32)]),
     contract!("alias.abort_conv", [val(RuntimeTy::I32)]),
+    contract!("alias.abort_overflow", [val(RuntimeTy::I32)]),
     contract!("rt.heap.alloc", [val(RuntimeTy::I64)] -> val(RuntimeTy::Ptr)),
     contract!("rt.write.dec", [val(RuntimeTy::Ptr), val(RuntimeTy::I64)]),
     contract!(

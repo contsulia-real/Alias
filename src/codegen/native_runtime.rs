@@ -819,6 +819,7 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         ("rt_oob_suffix", " — 下标越界\n".as_bytes()), // 18 字节
         ("rt_pop_suffix", " — pop 空数组\n".as_bytes()), // 19 字节
         ("rt_conv_suffix", " — 转换越界\n".as_bytes()), // 18 字节
+        ("rt_overflow_suffix", " — 整数溢出\n".as_bytes()), // 18 字节
     ];
     let mut static_ids: HashMap<&str, cranelift_module::DataId> = HashMap::new();
     for (name, bytes) in statics.drain(..) {
@@ -1579,6 +1580,15 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         span_data,
         &static_ids,
         "rt_conv_suffix",
+        18,
+    )?;
+    emit_span_abort(
+        c,
+        "alias.abort_overflow",
+        &ext,
+        span_data,
+        &static_ids,
+        "rt_overflow_suffix",
         18,
     )?;
 

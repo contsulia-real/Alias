@@ -203,7 +203,7 @@ fn methods_same_native_binary_is_stable() {
 
 #[test]
 fn run_matches_build_artifact_for_wide_and_float_display() {
-    let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = max + one\n    val u64 b = to_u64(-1)\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
+    let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = -max - one\n    val u64 b = to_u64(-1)\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
     let run = run_command(src);
     assert!(
         String::from_utf8_lossy(&run.0).contains("-9223372036854775808\n18446744073709551615\n")
@@ -258,46 +258,15 @@ func i32 main = () -> {
 }
 
 #[test]
-fn run_matches_build_artifact_for_numeric_boundary_matrix() {
-    let src = r#"
-func i32 main = () -> {
-    val i8 a = 127
-    val i8 one8 = 1
-    val i8 aw = a + one8
-    val u8 b = 255
-    val u8 uone8 = 1
-    val u8 bw = b + uone8
-    val i16 c = 32767
-    val i16 one16 = 1
-    val i16 cw = c + one16
-    val u16 d = 65535
-    val u16 uone16 = 1
-    val u16 dw = d + uone16
-    val i32 e = 2147483647
-    val i32 one32 = 1
-    val i32 ew = e + one32
-    val i64 f = 9223372036854775807
-    val i64 one = 1
-    val i64 fw = f + one
-    val u64 g = to_u64(-1)
-    val u64 uone64 = 1
-    val u64 gw = g + uone64
-    println aw
-    println bw
-    println cw
-    println dw
-    println ew
-    println fw
-    println gw
-    return 0
-}
-"#;
-    let run = run_command(src);
-    assert_eq!(
-        run.0,
-        b"-128\n0\n-32768\n0\n-2147483648\n-9223372036854775808\n0\n"
+fn run_matches_build_artifact_for_integer_overflow() {
+    let src = "func i32 main = () -> {\n    val u32 x = 4294967295\n    val u32 one = 1\n    println (x + one)\n    return 0\n}\n";
+    let expected = (
+        Vec::new(),
+        "错误 @ 4:13 — 整数溢出\n".as_bytes().to_vec(),
+        1,
     );
-    assert_eq!(build_and_run(src), run);
+    assert_eq!(run_command(src), expected);
+    assert_eq!(build_and_run(src), expected);
 }
 
 #[test]
