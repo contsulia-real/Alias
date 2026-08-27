@@ -159,12 +159,12 @@ fn method_on_unknown_type_rejected() {
     );
 }
 
-/// 已知但非法的接收者类型 (unit)。
+/// unit 是无返回值标记，不属于接收者的值类型域。
 #[test]
 fn unit_receiver_rejected() {
     assert_law(
         "func i32 unit.m = () -> return 0\nfunc i32 main = () -> return 0\n",
-        "类型 unit 不能作为方法接收者",
+        "unit 只能作为函数返回类型",
         1,
         1,
     );

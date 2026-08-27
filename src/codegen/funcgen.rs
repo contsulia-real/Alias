@@ -162,21 +162,33 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         let ret_block = bcx.create_block();
         frame.ret_block = Some(ret_block);
-        let ret_val = bcx.append_block_param(ret_block, cl_type(&ret_vty));
+        let ret_val = if ret_vty == VTy::Unit {
+            None
+        } else {
+            Some(bcx.append_block_param(ret_block, cl_type(&ret_vty)))
+        };
         emit_body(self, &mut bcx, &mut frame, body, ret_block)?;
         if !frame.terminated {
-            let zero = if cl_type(&ret_vty) == types::F32 {
-                bcx.ins().f32const(0.0)
-            } else if cl_type(&ret_vty) == types::F64 {
-                bcx.ins().f64const(0.0)
+            if ret_vty == VTy::Unit {
+                bcx.ins().jump(ret_block, &[]);
             } else {
-                bcx.ins().iconst(cl_type(&ret_vty), 0)
-            };
-            bcx.ins().jump(ret_block, &[BlockArg::Value(zero)]);
+                let zero = if cl_type(&ret_vty) == types::F32 {
+                    bcx.ins().f32const(0.0)
+                } else if cl_type(&ret_vty) == types::F64 {
+                    bcx.ins().f64const(0.0)
+                } else {
+                    bcx.ins().iconst(cl_type(&ret_vty), 0)
+                };
+                bcx.ins().jump(ret_block, &[BlockArg::Value(zero)]);
+            }
         }
         bcx.switch_to_block(ret_block);
         bcx.seal_block(ret_block);
-        bcx.ins().return_(&[ret_val]);
+        if let Some(ret_val) = ret_val {
+            bcx.ins().return_(&[ret_val]);
+        } else {
+            bcx.ins().return_(&[]);
+        }
         bcx.finalize(self.module.target_config());
         if let Err(ve) = ctx.verify_if(self.module.isa()) {
             eprintln!("[内部验证失败] {}", ve);
@@ -628,6 +640,6 @@ pub(crate) fn scan_expr<M: Module>(
             }
             scan_body(c, body, &mut nested_locals, caps, seen, frame);
         }
-        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Unit(_) => {}
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) => {}
     }
 }

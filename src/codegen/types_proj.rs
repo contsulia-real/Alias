@@ -47,7 +47,6 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             }
         }
         Expr::Bool(..) => VTy::Bool,
-        Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
         Expr::FuncLit { params, body, .. } => VTy::Func(
             params

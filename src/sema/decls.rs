@@ -4,7 +4,7 @@
 //! ([`Checker::method_def`])、Q④ main 校验 ([`Checker::validate_main`])。
 //! 单一命名空间的重名拦截在此收口; 签名先入表后查体 — 方法可递归。
 
-use super::types::{check_type_slot, types_match, IntW, Ty};
+use super::types::{check_return_type_slot, check_value_type_slot, types_match, IntW, Ty};
 use super::{literal_slot_unify, Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
 use crate::ast::{Binding, Expr, Param, StructDef};
 use crate::{AliasError, AliasResult, Span};
@@ -33,7 +33,7 @@ impl Checker {
                     span: f.span,
                 });
             }
-            let ty = check_type_slot(&f.ty, f.span, &self.structs)?;
+            let ty = check_value_type_slot(&f.ty, f.span, &self.structs)?;
             if let Some(d) = &f.default {
                 let dt = match literal_slot_unify(&ty, d) {
                     Some(r) => r?,
@@ -65,7 +65,7 @@ impl Checker {
     // ---------- 扩展函数定义 ----------
 
     /// 扩展函数定义: pub? func <Ret> <ReceiverType>.<name> = (params) -> 体。
-    /// 所有合法 Alias 类型都可作为 receiver，唯一例外是 unit。
+    /// 所有合法 Alias 值类型都可作为 receiver。
     /// self 为隐式首参数 (val 语义, 类型 = 完整 receiver 类型)。
     pub(super) fn method_def(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
         let Some(recv_expr) = b.receiver.clone() else {
@@ -74,16 +74,10 @@ impl Checker {
                 span: b.span,
             });
         };
-        let recv_ty = check_type_slot(&recv_expr, b.span, &self.structs)?;
-        if recv_ty == Ty::Unit {
-            return Err(AliasError {
-                msg: format!("类型 {} 不能作为方法接收者", recv_expr.display()),
-                span: b.span,
-            });
-        }
+        let recv_ty = check_value_type_slot(&recv_expr, b.span, &self.structs)?;
         let recv = recv_ty.name();
         let mname = b.name.clone();
-        let declared = check_type_slot(&b.ty, b.span, &self.structs)?;
+        let declared = check_return_type_slot(&b.ty, b.span, &self.structs)?;
         let Expr::FuncLit {
             params,
             body,
@@ -97,7 +91,7 @@ impl Checker {
         };
         let mut ptys = Vec::with_capacity(params.len());
         for p in params {
-            ptys.push(check_type_slot(&p.ty, p.span, &self.structs)?);
+            ptys.push(check_value_type_slot(&p.ty, p.span, &self.structs)?);
         }
         {
             let table = self.methods.entry(recv.clone()).or_default();

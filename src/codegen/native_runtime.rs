@@ -803,7 +803,6 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         ("rt_nl", b"\n"),
         ("rt_true", b"true"),
         ("rt_false", b"false"),
-        ("rt_unit", b"()"),
         ("rt_func", b"<func>"),
         ("rt_struct", b"<struct>"),
         ("rt_array", b"<array>"),
@@ -1458,8 +1457,7 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         true
     });
     for (name, dname, dlen) in [
-        ("alias.display.unit", "rt_unit", 2i64),
-        ("alias.display.func", "rt_func", 6),
+        ("alias.display.func", "rt_func", 6i64),
         ("alias.display.struct", "rt_struct", 8),
         ("alias.display.array", "rt_array", 7),
     ] {

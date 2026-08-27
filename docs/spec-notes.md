@@ -19,11 +19,9 @@
 | 布尔 | `Bool(bool)` | `true` / `false` | 小写字面量 |
 | 字符串 | `Str(String)` | 原文字节 | **不加引号、不转义**, 与源码字面量形态无关 |
 | 函数值 | `Func(Rc<FuncValue>)` | `<func>` | 永不泄露闭包/参数信息 |
-| 单元 | `Unit` | `()` | |
 
-**已知陷阱 (冻结)**: 语句 `println ()` 无法打印单元 — parser 后缀链把 `(` 吞作
-零参调用 (`src/parser.rs:430-433`), 报「println 恰好接受 1 个参数」。显示 unit
-须经绑定中转 (`val unit u = ()` 后 `println u`), 见黄金记录 `display_func_and_unit`。
+`unit` 不在显示表中。它只用于函数签名，表示函数没有返回值；不存在可构造、
+绑定、传参、转换、插值或打印的 unit 值，`()` 也不是表达式。
 
 ## 二、行为怪癖裁决 Q①–Q⑥ (规范性, 用户已裁决, 实现代理不得重开)
 
@@ -69,7 +67,7 @@
 | `bool_main_rejected` / `string_main_rejected` / `unit_main_rejected` | Q④ main 仅 i32 |
 | `string_interpolation_equality` | 插值 `'n=$i'` + 字符串相等 |
 | `division_by_zero_error` | 除零消息 + 0 起始列号 |
-| `display_func_and_unit` | display 表 `<func>` / `()` |
+| `display_func` | display 表 `<func>`；unit 不在值域 |
 | `top_level_side_effect_ordering` | Q⑥ 顶层副作用先于 main |
 | `closure_reference_capture_latest_value` | 引用捕获读到最新值 |
 | `while_false_dead_code` | 死代码落空 |
@@ -149,7 +147,7 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | alias.str.cmp | (i64,i64)→i32 | 字典序字节比较 -1/0/1 |
 | alias.str.len / upper / lower / trim | (i64)→i32 / i64 / i64 / i64 | 字节长度、ASCII 大小写映射与四字符集 trim |
 | alias.arr.new / len / push / pop | (i32,i32)→i64 / (i64)→i32 / (i64,i64) / (i64)→i64? | raw 数组头的分配、增长和弹出；当前调用端固定传 8 字节载荷槽，pop 字可承载 null 引用 |
-| alias.display.int/i64/u64/f32/f64/bool/unit/func/str | 各型→i64 | Value::display 规则 (§display 表) |
+| alias.display.int/i64/u64/f32/f64/bool/func/str | 各型→i64 | Value::display 规则 (§display 表)；不存在 unit display 符号 |
 | alias.display.struct/array/result | ()→i64 / ()→i64 / (i32)→i64 | 复合值固定显示或按 result tag 显示 |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
 | alias.println/print.i32/bool | (i32) | 经 display 复用 |
@@ -161,9 +159,10 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 
 ## §五.1 值 ABI 与布局单源
 
-`src/codegen/abi.rs` 是语言值物理表示的唯一规范实现。每个 `VTy` 通过一个
-`ValueAbi` 同时给出：规范在途寄存器类型、实际存储类型与字节数、对齐、
-用户函数参数类型、返回类型以及 8 字节 result/array 载荷字编码。整数表达式
+`src/codegen/abi.rs` 是语言值物理表示的唯一规范实现。每个值类型的 `VTy`
+通过 `ValueAbi` 同时给出：规范在途寄存器类型、实际存储类型与字节数、对齐、
+用户函数参数类型、返回类型以及 8 字节 result/array 载荷字编码。`unit` 返回标记
+生成零返回值 ABI，不分配返回槽，也不制造哑返回字。整数表达式
 在途规范为 I64，但 i8/i16/i32/u8/u16/u32 的参数、返回和内存槽保持声明宽度；
 f32/f64 始终使用对应浮点寄存器，进入载荷字时才按位装箱。
 
@@ -293,7 +292,7 @@ postfix     := ... | postfix "." IDENT "(" args ")"
 
 | 主题 | 裁决 |
 |------|------|
-| 接收者域 | 除 unit 外的已知完整 Alias 类型均可作为扩展接收者；完整 `TypeExpr` 决定静态分派身份 |
+| 接收者域 | 已知完整 Alias 值类型均可作为扩展接收者；unit 不是值类型；完整 `TypeExpr` 决定静态分派身份 |
 | self | 隐式 val 绑定: 不在参数表、类型 = 完整接收者、不可重绑定/不可 increase; 方法体外出现 → 「未定义的绑定 'self'」 |
 | 命名空间 | 方法表二级结构: 接收者类型 → (方法名 → 签名); 与裸函数/绑定/字段名互不干扰 |
 | 登记 | 签名先入表后查体 — 方法体可递归自调用; 同型同名重复 → 「类型 X 上已定义方法 'm'」 |
@@ -304,7 +303,7 @@ postfix     := ... | postfix "." IDENT "(" args ")"
 
 ## §十四 运行时表示 (冻结)
 
-- **方法 = 普通内部函数**, 统一约定 `fn(globals, env, self, args...) -> word`; 调用点直调, env 传哑字 0。
+- **方法 = 普通内部函数**；有返回值方法约定 `fn(globals, env, self, args...) -> word`，unit 方法使用零返回值 ABI；调用点直调，env 传哑字 0。
 - **内建字符串方法统一 runtime 符号**: alias.str.len(I64)→I32 / alias.str.upper·lower·trim(I64)→I64。
 - **空串结果 data_ptr 恒 null** (§五契约); 非空结果字节一律复制进新块。
 
@@ -337,7 +336,7 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 | 字面量 | 元素按书写序求值逐个入缓冲; 元素类型须一致 |
 | 下标读 | 主语与下标按序求值 → I32 域越界守卫 → data_ptr 偏移加载 |
 | 下标赋值 | 本阶段拒绝 — 解析层「下标赋值尚未支持」 |
-| 内建方法 | len()→i32 / push(v)→unit / pop()→元素字; push 实参须等于元素类型; pop 空数组 → 运行时中止 |
+| 内建方法 | len()→i32 / push(v) 无返回值 / pop()→元素字; push 实参须等于元素类型; pop 空数组 → 运行时中止 |
 | 打印 | 数组值经 println/print/插值 → 固定 `<array>` |
 
 ## §十七 运行时表示与符号契约 (冻结)
@@ -394,8 +393,17 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 ## 2026-08-27 转换、整数范围与当前函数自引用
 
 - 整数字面量的无符号词法范围为 `0..=18446744073709551615`。无上下文正整数字面量依次默认推断为 i32、i64、u64；负整数字面量只允许落在 i64 范围。进入已知整数目标槽时，先按目标类型检查字面量范围，不允许截断。
-- `(T) value` 明确指定目标类型；当前仅数值类型之间存在转换关系。整数目标转换在运行时检查值域，越界报「转换越界」；浮点到整数同时拒绝 NaN 与目标范围外值。
-- `from(value)` 与无括号形式 `from value` 必须由声明、赋值、return、实参、字段或复合表达式的目标槽给出目标类型；没有目标上下文时编译错误。转换关系不存在时编译错误。
+- `(T) value` 明确指定目标类型。转换关系包括数值类型互转，以及所有具有 display 规则的具体值到 string；unit 无返回值表达式不属于转换源或目标。后者与 println/插值复用同一渲染契约。整数目标转换在运行时检查值域，越界报「转换越界」；浮点到整数同时拒绝 NaN 与目标范围外值。
+- `from(value)` 与无括号形式 `from value` 必须由声明、赋值、return、实参、字段、字符串插值或复合表达式的目标槽给出目标类型；没有目标上下文时编译错误。插值孔的目标为 string，因此 `'${from u}'` 会把数值按 display 规则转换为文本。转换关系不存在时编译错误。
 - `try_from(value)` 使用相同的目标类型规则。转换关系存在时与 `from` 一样执行并检查值域；关系不存在时不制造新类型，静默保留源表达式的类型，再由外层目标槽执行普通一致性检查。因此 `val i32 a = try_from(b)` 在 `b:string` 时与 `val i32 a = b` 产生同一类型错误。
 - `to_i8`…`to_f64` 旧内建已删除，不保留别名或兼容诊断。
+
+## 2026-08-28 unit 无返回值语义
+
+- `unit` 只允许单独出现在 `func unit name = ...` 或 `func unit Type.method = ...` 的返回类型槽中。参数、val/var、结构体字段、for 变量、方法接收者、数组/result/iterator 类型参数和 cast 目标均拒绝 unit。
+- unit 函数允许自然落空或使用裸 `return`；`return <expr>` 非法。非 unit 函数仍必须显式返回值。
+- 调用 unit 函数和无返回值内建只能作为独立表达式语句。绑定、赋值、return、实参、数组元素、result 载荷、match 主语、转换、插值、print/println 与 typeof 等值位置统一报「无返回值表达式不能用于值位置」。
+- `()` 不再构造值，遇到值语法位置时编译错误「() 不是值；unit 只表示函数不返回值」。函数参数表的 `()` 仍表示零参数，与 unit 无关。
+- 原生 ABI 对 unit 返回函数不声明返回值、不建立返回块参数；`alias.display.unit` 与静态 `()` 数据已删除。
 - `this` 在每个 func 体内绑定当前函数自身，类型为当前函数完整签名。函数改名不影响递归；进入嵌套 func 后重新绑定到内层函数；func 体外使用编译错误。
+- `typeof(expr)` 与 `typeof expr` 是静态类型查询特殊形式，结果为 string 类型名。实参照常完成名字解析与类型检查，但生成代码不求值实参；`typeof(1 / 0)` 返回 `i32`，不会执行除法。数组、iterator、result 使用完整泛型类型名。

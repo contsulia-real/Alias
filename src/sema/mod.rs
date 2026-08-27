@@ -108,10 +108,14 @@ pub fn check(program: &Program) -> AliasResult<()> {
                     // 只让“当前函数自引用”提前可见，不开启后续声明的前向引用。
                     if b.kind == BindKind::Func {
                         if let Expr::FuncLit { params, .. } = &b.value {
-                            let ret = types::check_type_slot(&b.ty, b.span, &ck.structs)?;
+                            let ret = types::check_return_type_slot(&b.ty, b.span, &ck.structs)?;
                             let mut ptys = Vec::with_capacity(params.len());
                             for p in params {
-                                ptys.push(types::check_type_slot(&p.ty, p.span, &ck.structs)?);
+                                ptys.push(types::check_value_type_slot(
+                                    &p.ty,
+                                    p.span,
+                                    &ck.structs,
+                                )?);
                             }
                             Scope::insert(
                                 &top,

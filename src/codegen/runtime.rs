@@ -110,7 +110,6 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.display.f64", [val(RuntimeTy::F64)] -> val(RuntimeTy::I64)),
     contract!("alias.display.bool", [val(RuntimeTy::I32)] -> val(RuntimeTy::I64)),
     contract!("alias.display.str", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
-    contract!("alias.display.unit", [] -> val(RuntimeTy::I64)),
     contract!("alias.display.func", [] -> val(RuntimeTy::I64)),
     contract!("alias.display.struct", [] -> val(RuntimeTy::I64)),
     contract!("alias.display.array", [] -> val(RuntimeTy::I64)),

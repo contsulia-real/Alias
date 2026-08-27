@@ -352,6 +352,11 @@ pub(crate) fn emit_stmt<M: Module>(
         }
         Stmt::Return { value, .. } => {
             let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
+            if expected == VTy::Unit {
+                bcx.ins().jump(ret_block, &[]);
+                frame.terminated = true;
+                return Ok(());
+            }
             let v = match value {
                 Some(e) => emit_expr_expected(c, bcx, frame, e, &expected)?,
                 None => match cl_type(&expected) {
@@ -628,7 +633,6 @@ pub(crate) fn emit_expr<M: Module>(
         Expr::Int(n, _) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
         Expr::Float(v, _) => Ok(bcx.ins().f64const(*v)),
         Expr::Bool(b, _) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
-        Expr::Unit(_) => Ok(bcx.ins().iconst(types::I64, 0)),
         Expr::Str(parts, _) => emit_str(c, bcx, frame, parts),
         Expr::Ident(name, span) => match cell_addr(c, frame, name) {
             Some(addr) => {
@@ -994,7 +998,7 @@ pub(crate) fn emit_expr_expected<M: Module>(
                 invariant_violation("from/try_from 元数 (sema 已校验)")
             };
             let source = static_vty(c, frame, &arg.value);
-            if source.is_numeric() && expected.is_numeric() {
+            if conversion_exists_vty(&source, expected) {
                 let value = emit_expr(c, bcx, frame, &arg.value)?;
                 emit_convert(c, bcx, frame, *span, value, &source, expected)
             } else {
@@ -1048,6 +1052,11 @@ pub(crate) fn emit_expr_expected<M: Module>(
 
 fn is_contextual_conversion(callee: &Expr) -> bool {
     matches!(callee, Expr::Ident(name, _) if name == "from" || name == "try_from")
+}
+
+fn conversion_exists_vty(source: &VTy, target: &VTy) -> bool {
+    (source.is_numeric() && target.is_numeric())
+        || (matches!(target, VTy::Str) && !matches!(source, VTy::Other | VTy::Unit))
 }
 
 fn binary_vty_flows_expected(op: BinOp, expected: &VTy) -> bool {
@@ -1423,8 +1432,13 @@ pub(crate) fn emit_str<M: Module>(
         let piece = match p {
             StrPartAst::Lit(s) => str_literal_handle(c, bcx, s)?,
             StrPartAst::Hole(h) => {
-                let w = emit_expr(c, bcx, frame, h)?;
-                display_word(c, bcx, frame, h, w)?
+                if matches!(h.as_ref(), Expr::Call { callee, .. } if is_contextual_conversion(callee))
+                {
+                    emit_expr_expected(c, bcx, frame, h, &VTy::Str)?
+                } else {
+                    let w = emit_expr(c, bcx, frame, h)?;
+                    display_word(c, bcx, frame, h, w)?
+                }
             }
         };
         acc = c.call_rt(bcx, "alias.str.concat", &[acc, piece])?;
@@ -1467,7 +1481,18 @@ pub(crate) fn display_word<M: Module>(
     e: &Expr,
     w: Value,
 ) -> AliasResult<Value> {
-    match static_vty(c, frame, e) {
+    let vty = static_vty(c, frame, e);
+    display_typed(c, bcx, &vty, w, e.span())
+}
+
+fn display_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    vty: &VTy,
+    w: Value,
+    span: Span,
+) -> AliasResult<Value> {
+    match vty {
         VTy::I(IntW::W64) => c.call_rt(bcx, "alias.display.i64", &[w]),
         VTy::I(_) => {
             let t = bcx.ins().ireduce(types::I32, w);
@@ -1485,7 +1510,7 @@ pub(crate) fn display_word<M: Module>(
             c.call_rt(bcx, "alias.display.bool", &[t])
         }
         VTy::Str => c.call_rt(bcx, "alias.display.str", &[w]),
-        VTy::Unit => c.call_rt(bcx, "alias.display.unit", &[]),
+        VTy::Unit => Err(native_err(span, "内部: unit 无返回值表达式进入 display")),
         VTy::Func(..) => c.call_rt(bcx, "alias.display.func", &[]),
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[]),
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),
@@ -1495,7 +1520,7 @@ pub(crate) fn display_word<M: Module>(
             let t = bcx.ins().ireduce(types::I32, tag);
             c.call_rt(bcx, "alias.display.result", &[t])
         }
-        VTy::Other => Err(native_err(e.span(), "原生后端无法推断该表达式的显示类型")),
+        VTy::Other => Err(native_err(span, "原生后端无法推断该表达式的显示类型")),
     }
 }
 
@@ -1531,7 +1556,6 @@ pub(crate) fn emit_call<M: Module>(
             let [arg] = args else {
                 invariant_violation("typeof 元数 (sema 已校验)")
             };
-            emit_expr(c, bcx, frame, &arg.value)?;
             let tn = static_vty(c, frame, &arg.value).display_name();
             return str_literal_handle(c, bcx, &tn);
         }
@@ -1602,6 +1626,9 @@ fn call_closure<M: Module>(
     let sig = user_signature(c.cc, param_vtys, ret_vty);
     let sig_ref = bcx.func.import_signature(sig);
     let inst = bcx.ins().call_indirect(sig_ref, code, &words);
+    if *ret_vty == VTy::Unit {
+        return Ok(bcx.ins().iconst(types::I64, 0));
+    }
     let raw = first_result(bcx, inst);
     Ok(norm_load(bcx, raw, ret_vty))
 }
@@ -1610,8 +1637,13 @@ fn jump_zero_return(bcx: &mut FunctionBuilder, frame: &Frame) {
     let rb = frame
         .ret_block
         .unwrap_or_else(|| invariant_violation("运行时错误传播需要返回块"));
-    let [param] = bcx.block_params(rb) else {
-        invariant_violation("返回块恰有一个参数")
+    let params = bcx.block_params(rb);
+    if params.is_empty() {
+        bcx.ins().jump(rb, &[]);
+        return;
+    }
+    let [param] = params else {
+        invariant_violation("返回块至多一个参数")
     };
     let ty = bcx.func.dfg.value_type(*param);
     let zero = if ty == types::F32 {
@@ -1634,6 +1666,7 @@ fn emit_convert<M: Module>(
     dst: &VTy,
 ) -> AliasResult<Value> {
     match dst {
+        VTy::Str => display_typed(c, bcx, src, v, span),
         VTy::F(w) => {
             let t = cl_type(dst);
             let base = match src {
@@ -1663,7 +1696,7 @@ fn emit_convert<M: Module>(
             let wt = ir_type_bits(bits);
             emit_convert_to_int(c, bcx, frame, span, v, src, false, bits, wt)
         }
-        _ => invariant_violation("转换目标为数值族"),
+        _ => invariant_violation("转换目标为数值族或 string"),
     }
 }
 
@@ -1945,6 +1978,9 @@ pub(crate) fn emit_method_call<M: Module>(
             words.push(norm_store(bcx, v, pt));
         }
         let inst = bcx.ins().call(fref, &words);
+        if ret_vty == VTy::Unit {
+            return Ok(bcx.ins().iconst(types::I64, 0));
+        }
         let raw = first_result(bcx, inst);
         return Ok(norm_load(bcx, raw, &ret_vty));
     }

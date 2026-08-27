@@ -79,9 +79,9 @@ fn golden_table() -> Vec<Golden> {
         },
         Golden {
             name: "unit_main_rejected",
-            input: Input::Inline("func unit main = () -> { return () }\n"),
+            input: Input::Inline("func unit main = () -> { return }\n"),
             stdout: b"",
-            stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 ()\n".as_bytes(),
+            stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 unit\n".as_bytes(),
             exit: 1,
         },
         // ---- 字符串插值 'n=$i' 相等比较仍合法 ----
@@ -102,14 +102,13 @@ fn golden_table() -> Vec<Golden> {
             stderr: "错误 @ 2:11 — 除以零\n".as_bytes(),
             exit: 1,
         },
-        // ---- display 渲染 (interp.rs:23-31): func→<func>, unit→() ----
-        // 注意: `println ()` 会把 `(` 吞作零参调用而报错, 故 unit 经绑定中转。
+        // ---- display 渲染: func→<func>; unit 是无返回值标记，不在 display 域 ----
         Golden {
-            name: "display_func_and_unit",
+            name: "display_func",
             input: Input::Inline(
-                "func i32 main = () -> {\n    func i32 f = () -> return 5\n    println f\n    val unit u = ()\n    println u\n    return 0\n}\n",
+                "func i32 main = () -> {\n    func i32 f = () -> return 5\n    println f\n    return 0\n}\n",
             ),
-            stdout: "<func>\n()\n".as_bytes(),
+            stdout: "<func>\n".as_bytes(),
             stderr: b"",
             exit: 0,
         },

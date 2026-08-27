@@ -212,7 +212,7 @@ fn return_expr_vs_declared_mismatch() {
 fn generic_type_shape_rejected() {
     // 例证原为 array<string>, Phase 2d 落地后轮换为 sender<string> — M35
     assert_law(
-        "\nfunc i32 main = () -> {\n    val sender<string> a = ()\n    return 0\n}\n",
+        "\nfunc i32 main = () -> {\n    val sender<string> a = 1\n    return 0\n}\n",
         "泛型类型 sender<string> 尚未实现 (Phase 5+)",
         3,
         4,
@@ -295,11 +295,7 @@ fn tightened_q4_main_no_params() {
 /// Q④ 裁决: main 的唯一合法返回类型是 i32。
 #[test]
 fn tightened_q4_non_i32_main_rejected() {
-    for (ty, value, actual) in [
-        ("bool", "true", "bool"),
-        ("string", "'hi'", "string"),
-        ("unit", "()", "()"),
-    ] {
+    for (ty, value, actual) in [("bool", "true", "bool"), ("string", "'hi'", "string")] {
         let src = format!("\nfunc {ty} main = () -> return {value}\n");
         let e = fail(&src);
         assert_eq!(
@@ -308,6 +304,9 @@ fn tightened_q4_non_i32_main_rejected() {
         );
         assert_eq!((e.span.line, e.span.col), (2, 1));
     }
+    let e = fail("\nfunc unit main = () -> return\n");
+    assert_eq!(e.msg, "顶层 func main 返回类型必须是 i32, 实际 unit");
+    assert_eq!((e.span.line, e.span.col), (2, 1));
 }
 
 /// Q⑤ 裁决: 缺 main 时 Display 省略位置前缀 — 锁定新输出形态。

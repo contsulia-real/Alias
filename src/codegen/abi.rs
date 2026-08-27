@@ -66,9 +66,9 @@ impl VTy {
                 ret: types::F64,
                 word: WordRepr::F64Bits,
             },
+            VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
             VTy::Bool
             | VTy::Str
-            | VTy::Unit
             | VTy::Func(..)
             | VTy::Struct(_)
             | VTy::Result(..)
@@ -171,7 +171,9 @@ pub(crate) fn user_signature(
     sig.params.push(AbiParam::new(types::I64));
     sig.params
         .extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
-    sig.returns.push(AbiParam::new(ret.abi().ret));
+    if *ret != VTy::Unit {
+        sig.returns.push(AbiParam::new(ret.abi().ret));
+    }
     sig
 }
 
@@ -398,7 +400,6 @@ mod tests {
             VTy::F(FloatW::F64),
             VTy::Bool,
             VTy::Str,
-            VTy::Unit,
             VTy::Struct("s".into()),
             VTy::Result("i32".into(), "string".into()),
             VTy::Array(Box::new(VTy::I(IntW::W8))),
@@ -412,6 +413,23 @@ mod tests {
             assert_eq!(abi.param, abi.storage);
             assert_eq!(abi.ret, abi.storage);
         }
+    }
+
+    #[test]
+    fn unit_user_signature_has_no_return_value() {
+        let unit = user_signature(
+            cranelift_codegen::isa::CallConv::WindowsFastcall,
+            &[],
+            &VTy::Unit,
+        );
+        assert!(unit.returns.is_empty());
+
+        let value = user_signature(
+            cranelift_codegen::isa::CallConv::WindowsFastcall,
+            &[],
+            &VTy::I(IntW::W32),
+        );
+        assert_eq!(value.returns.len(), 1);
     }
 
     #[test]

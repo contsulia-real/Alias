@@ -196,7 +196,7 @@ fn unknown_method_on_array_rejected() {
 #[test]
 fn array_zero_params_rejected() {
     assert_law(
-        "func i32 main = () -> {\n    val array<> a = ()\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val array<> a = 1\n    return 0\n}\n",
         "期望类型名",
         2,
         14,
@@ -207,7 +207,7 @@ fn array_zero_params_rejected() {
 #[test]
 fn array_two_params_rejected() {
     assert_law(
-        "func i32 main = () -> {\n    val array<i32, string> a = ()\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val array<i32, string> a = 1\n    return 0\n}\n",
         "array 需要 1 个类型参数, 实际 2 个",
         2,
         4,

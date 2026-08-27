@@ -292,7 +292,6 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
-    Unit(Span),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,8 +349,7 @@ impl Expr {
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Ident(_, s)
-            | Expr::This(s)
-            | Expr::Unit(s) => *s,
+            | Expr::This(s) => *s,
             Expr::Binary { span, .. }
             | Expr::Cast { span, .. }
             | Expr::Neg { span, .. }

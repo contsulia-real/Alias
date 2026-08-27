@@ -96,7 +96,7 @@ impl Ty {
             Ty::Bool => "bool".into(),
             Ty::Str => "string".into(),
             Ty::Func { .. } | Ty::FuncPoly => "func".into(),
-            Ty::Unit => "()".into(),
+            Ty::Unit => "unit".into(),
             Ty::Struct(s) => s.clone(),
             Ty::Result(t, e) => format!("result<{}, {}>", t.name(), e.name()),
             Ty::Array(t) => format!("array<{}>", t.name()),
@@ -107,6 +107,28 @@ impl Ty {
 
     pub(crate) fn is_unknown(&self) -> bool {
         matches!(self, Ty::Unknown)
+    }
+
+    pub(crate) fn contains_unknown(&self) -> bool {
+        match self {
+            Ty::Unknown => true,
+            Ty::Func { params, ret } => {
+                params.iter().any(Ty::contains_unknown) || ret.contains_unknown()
+            }
+            Ty::Result(ok, err) => ok.contains_unknown() || err.contains_unknown(),
+            Ty::Array(elem) | Ty::Iterator(elem) => elem.contains_unknown(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn contains_unit(&self) -> bool {
+        match self {
+            Ty::Unit => true,
+            Ty::Func { params, ret } => params.iter().any(Ty::contains_unit) || ret.contains_unit(),
+            Ty::Result(ok, err) => ok.contains_unit() || err.contains_unit(),
+            Ty::Array(elem) | Ty::Iterator(elem) => elem.contains_unit(),
+            _ => false,
+        }
     }
 
     pub(crate) fn is_numeric(&self) -> bool {
@@ -231,5 +253,37 @@ pub(crate) fn check_type_slot(
                 }
             }
         },
+    }
+}
+
+pub(crate) fn check_value_type_slot(
+    te: &TypeExpr,
+    span: Span,
+    structs: &HashMap<String, StructInfo>,
+) -> AliasResult<Ty> {
+    let ty = check_type_slot(te, span, structs)?;
+    if ty.contains_unit() {
+        Err(AliasError {
+            msg: "unit 只能作为函数返回类型".into(),
+            span,
+        })
+    } else {
+        Ok(ty)
+    }
+}
+
+pub(crate) fn check_return_type_slot(
+    te: &TypeExpr,
+    span: Span,
+    structs: &HashMap<String, StructInfo>,
+) -> AliasResult<Ty> {
+    let ty = check_type_slot(te, span, structs)?;
+    if ty != Ty::Unit && ty.contains_unit() {
+        Err(AliasError {
+            msg: "unit 只能单独作为函数返回类型".into(),
+            span,
+        })
+    } else {
+        Ok(ty)
     }
 }

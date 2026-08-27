@@ -39,6 +39,32 @@ func i32 main = () -> {
 }
 
 #[test]
+fn displayable_values_convert_to_string_in_slots_and_interpolation() {
+    let src = r#"
+func i32 main = () -> {
+    val u32 u = 1
+    val string contextual = from u
+    val string explicit = (string) u
+    val string interpolated_from = '${from u}'
+    val string interpolated_try = '${try_from u}'
+    val string interpolated_explicit = '${(string) u}'
+    val bool flag = true
+    val array<u32> values = [u]
+    val string array_display = from(values)
+    if contextual != '1' { return 1 }
+    if explicit != '1' { return 2 }
+    if interpolated_from != '1' { return 3 }
+    if interpolated_try != '1' { return 4 }
+    if interpolated_explicit != '1' { return 5 }
+    if (string) flag != 'true' { return 6 }
+    if array_display != '<array>' { return 7 }
+    return 0
+}
+"#;
+    assert_eq!(run("string-conversions.as", src).unwrap(), 0);
+}
+
+#[test]
 fn conversion_without_a_target_context_is_rejected() {
     for name in ["from", "try_from"] {
         let src = format!("func i32 main = () -> {{\n    println({name}(1))\n    return 0\n}}\n");
@@ -70,9 +96,9 @@ fn from_requires_a_defined_conversion_relationship() {
 fn try_from_without_a_conversion_falls_back_to_the_source_type() {
     let fallback = r#"
 func i32 main = () -> {
-    val string b = 'boy'
-    val string unchanged = try_from b
-    return unchanged == 'boy' ? 0 : 1
+    val bool b = true
+    val bool unchanged = try_from b
+    return unchanged ? 0 : 1
 }
 "#;
     assert_eq!(run("try-from-fallback.as", fallback).unwrap(), 0);

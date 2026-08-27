@@ -1,7 +1,7 @@
 //! sema::exprs — 表达式静态语义。
 
 use super::types::{
-    check_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
+    check_value_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
     types_match, FloatW, IntW, Ty,
 };
 use super::{literal_slot_unify, op_mismatch, Checker, Env, Scope, VarInfo};
@@ -14,7 +14,7 @@ impl Checker {
     /// match 都走这一入口，使窄数值字面量的范围规则完全一致。
     pub(super) fn expr_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
         if let Some((name, arg, span)) = contextual_conversion(e) {
-            let source = self.expr(arg, env)?;
+            let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
                 return Ok(expected.clone());
             }
@@ -118,7 +118,7 @@ impl Checker {
     }
 
     fn check_inferred_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
-        let got = self.expr(e, env)?;
+        let got = require_value(self.expr(e, env)?, e.span())?;
         if types_match(expected, &got) {
             Ok(expected.clone())
         } else {
@@ -163,11 +163,14 @@ impl Checker {
             Expr::Int(value, ..) => Ok(default_positive_int_ty(*value)),
             Expr::Float(..) => Ok(Ty::Float(FloatW::F64)),
             Expr::Bool(..) => Ok(Ty::Bool),
-            Expr::Unit(_) => Ok(Ty::Unit),
             Expr::Str(parts, _) => {
                 for p in parts {
                     if let StrPartAst::Hole(h) = p {
-                        self.expr(h, env)?;
+                        if contextual_conversion(h).is_some() {
+                            self.expr_expected(h, env, &Ty::Str)?;
+                        } else {
+                            require_value(self.expr(h, env)?, h.span())?;
+                        }
                     }
                 }
                 Ok(Ty::Str)
@@ -189,8 +192,8 @@ impl Checker {
                     })
             }
             Expr::Cast { target, expr, span } => {
-                let target_ty = check_type_slot(target, *span, &self.structs)?;
-                let source_ty = self.expr(expr, env)?;
+                let target_ty = check_value_type_slot(target, *span, &self.structs)?;
+                let source_ty = require_value(self.expr(expr, env)?, expr.span())?;
                 if conversion_exists(&source_ty, &target_ty) {
                     Ok(target_ty)
                 } else {
@@ -302,7 +305,7 @@ impl Checker {
             Expr::ArrayLit { elems, .. } => {
                 let mut elem_ty: Option<Ty> = None;
                 for item in elems {
-                    let t = self.expr(item, env)?;
+                    let t = require_value(self.expr(item, env)?, item.span())?;
                     match &elem_ty {
                         None => elem_ty = Some(t),
                         Some(first) if !types_match(first, &t) => {
@@ -373,7 +376,7 @@ impl Checker {
         env: &Env,
         expected: Option<&Ty>,
     ) -> AliasResult<Ty> {
-        let st = self.expr(subject, env)?;
+        let st = require_value(self.expr(subject, env)?, subject.span())?;
         if st.is_unknown() {
             return Ok(Ty::Unknown);
         }
@@ -706,7 +709,7 @@ impl Checker {
                         span,
                     });
                 };
-                self.expr(&arg.value, env)?;
+                require_value(self.expr(&arg.value, env)?, arg.value.span())?;
                 return Ok(Ty::Unit);
             }
             if name == "from" || name == "try_from" {
@@ -716,7 +719,7 @@ impl Checker {
                         span,
                     });
                 };
-                self.expr(&arg.value, env)?;
+                require_value(self.expr(&arg.value, env)?, arg.value.span())?;
                 return Err(AliasError {
                     msg: format!("{name} 需要目标类型上下文"),
                     span,
@@ -729,8 +732,8 @@ impl Checker {
                         span,
                     });
                 };
-                let t = self.expr(&arg.value, env)?;
-                if t.is_unknown() {
+                let t = require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                if t.contains_unknown() {
                     return Err(AliasError {
                         msg: "typeof 无法确定实参的静态类型".into(),
                         span: arg.value.span(),
@@ -770,7 +773,7 @@ impl Checker {
             }
             Ty::FuncPoly | Ty::Unknown => {
                 for a in args {
-                    self.expr(&a.value, env)?;
+                    require_value(self.expr(&a.value, env)?, a.value.span())?;
                 }
                 Ok(Ty::Unknown)
             }
@@ -853,7 +856,7 @@ impl Checker {
                 span: arg.span,
             });
         }
-        let t = self.expr(&arg.value, env)?;
+        let t = require_value(self.expr(&arg.value, env)?, arg.value.span())?;
         Ok(if name == "ok" {
             Ty::Result(Box::new(t), Box::new(Ty::Unknown))
         } else {
@@ -1028,7 +1031,19 @@ fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
 }
 
 fn conversion_exists(source: &Ty, target: &Ty) -> bool {
-    source.is_numeric() && target.is_numeric()
+    (source.is_numeric() && target.is_numeric())
+        || (matches!(target, Ty::Str) && !source.is_unknown() && *source != Ty::Unit)
+}
+
+fn require_value(ty: Ty, span: Span) -> AliasResult<Ty> {
+    if ty == Ty::Unit {
+        Err(AliasError {
+            msg: "无返回值表达式不能用于值位置".into(),
+            span,
+        })
+    } else {
+        Ok(ty)
+    }
 }
 
 fn contextual_conversion(e: &Expr) -> Option<(&str, &Expr, Span)> {

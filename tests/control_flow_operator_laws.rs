@@ -133,14 +133,14 @@ func i32 main = () -> {
         error.msg
     );
 
-    let unit_slot = r#"
+    let decrease_value = r#"
 func i32 main = () -> {
     var f64 n = 1.0
-    val unit ignored = decrease(n)
+    val f64 ignored = decrease(n)
     return 0
 }
 "#;
-    let error = fail(unit_slot);
+    let error = fail(decrease_value);
     assert!(
         error.msg.contains("decrease 只能作为独立语句使用"),
         "{}",

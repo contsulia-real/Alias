@@ -94,7 +94,13 @@ impl Parser {
                     let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
                     if matches!(
                         n.as_str(),
-                        "println" | "print" | "increase" | "decrease" | "from" | "try_from"
+                        "println"
+                            | "print"
+                            | "increase"
+                            | "decrease"
+                            | "from"
+                            | "try_from"
+                            | "typeof"
                     ));
                     if callee_is_bare_builtin {
                         let arg = self.parse_unary()?;
@@ -605,7 +611,10 @@ impl Parser {
                     self.bump();
                     if self.peek() == Some(&Tok::RParen) {
                         self.bump();
-                        return Ok(Expr::Unit(span));
+                        return Err(AliasError {
+                            msg: "() 不是值；unit 只表示函数不返回值".into(),
+                            span,
+                        });
                     }
                     let e = self.parse_expr()?;
                     self.expect(&Tok::RParen)?;

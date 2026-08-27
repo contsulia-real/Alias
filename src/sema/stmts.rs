@@ -1,6 +1,6 @@
 //! sema::stmts — 语句、函数体与控制流检查。
 
-use super::types::{check_type_slot, types_match, Ty};
+use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
 use crate::{AliasError, AliasResult, Span};
@@ -19,7 +19,11 @@ impl Checker {
                 span: b.span,
             });
         }
-        let declared = check_type_slot(&b.ty, b.span, &self.structs)?;
+        let declared = if b.kind == BindKind::Func {
+            check_return_type_slot(&b.ty, b.span, &self.structs)?
+        } else {
+            check_value_type_slot(&b.ty, b.span, &self.structs)?
+        };
         if b.kind == BindKind::Func {
             let Expr::FuncLit { params, body, span } = &b.value else {
                 return Err(AliasError {
@@ -83,7 +87,7 @@ impl Checker {
         let local = Scope::child(env);
         let mut param_tys = Vec::with_capacity(params.len());
         for p in params {
-            let pt = check_type_slot(&p.ty, p.span, &self.structs)?;
+            let pt = check_value_type_slot(&p.ty, p.span, &self.structs)?;
             param_tys.push(pt.clone());
             Scope::insert(
                 &local,
@@ -249,6 +253,12 @@ impl Checker {
                     });
                 };
                 match value {
+                    Some(_) if ret == Ty::Unit => {
+                        return Err(AliasError {
+                            msg: "unit 函数的 return 不能携带值".into(),
+                            span: *span,
+                        });
+                    }
                     Some(e) => {
                         self.expr_expected(e, env, &ret).map_err(|err| AliasError {
                             msg: format!("return 需要 {}: {}", ret.name(), err.msg),
@@ -309,7 +319,7 @@ impl Checker {
                 body,
                 span,
             } => {
-                let declared = check_type_slot(ty, *span, &self.structs)?;
+                let declared = check_value_type_slot(ty, *span, &self.structs)?;
                 let source = self.expr(iterable, env)?;
                 let elem = match source {
                     Ty::Array(elem) | Ty::Iterator(elem) => *elem,

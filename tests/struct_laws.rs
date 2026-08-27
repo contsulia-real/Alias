@@ -181,7 +181,7 @@ fn default_type_mismatch_rejected() {
 fn unknown_struct_in_type_slot() {
     // 既有法律不变: 类型槽按冻结类型集 + 结构体表收紧
     assert_law(
-        "func i32 main = () -> {\n    val nosuch s = ()\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val nosuch s = 1\n    return 0\n}\n",
         "未知类型名 'nosuch'",
         2,
         4,
@@ -192,7 +192,7 @@ fn unknown_struct_in_type_slot() {
 fn forward_struct_reference_rejected() {
     // 声明前不可见 — 与绑定同序 (insert-after-eval 镜像)
     assert_law(
-        "func i32 main = () -> {\n    val later s = ()\n    return 0\n}\nstruct later {\n    val i32 x = 1\n}\n",
+        "func i32 main = () -> {\n    val later s = 1\n    return 0\n}\nstruct later {\n    val i32 x = 1\n}\n",
         "未知类型名 'later'",
         2, 4,
     );
