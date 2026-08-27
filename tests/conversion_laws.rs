@@ -57,6 +57,44 @@ func i32 main = () -> {
 }
 
 #[test]
+fn every_typed_value_slot_propagates_its_target_into_conversions() {
+    let src = r#"
+val u32 seed = 3
+struct defaults {
+    val i32 value = from seed
+}
+struct box {
+    var i32 value = 0
+}
+func i32 through_return = (u32 value) -> return from value
+func i32 accept = (i32 value) -> return value
+func i32 main = () -> {
+    val u32 source = 4
+    val i32 declared = from source
+    var i32 assigned = 0
+    assigned = from source
+    val box field = box(value = from source)
+    field.value = from source
+    val i32 argument = accept(from source)
+    val array<i32> values = [from source]
+    val result<i32, string> wrapped = ok(from source)
+    val i32 result_value = match wrapped {
+        ok(value) -> value
+        err(_) -> 0
+    }
+    val i32 matched = match true {
+        true -> from source
+        false -> 0
+    }
+    val i32 composite = (from source) + (from source)
+    val defaults defaulted = defaults()
+    return declared + assigned + field.value + argument + values[0] + result_value + matched + composite + through_return(source) + defaulted.value
+}
+"#;
+    assert_eq!(run("target-propagation-matrix.as", src).unwrap(), 43);
+}
+
+#[test]
 fn displayable_values_convert_to_string_in_slots_and_interpolation() {
     let src = r#"
 func i32 main = () -> {
@@ -132,6 +170,53 @@ func i32 main = () -> {
         attempted.msg,
         "绑定 'a' 声明类型为 i32: 需要 i32, 实际 string"
     );
+}
+
+#[test]
+fn try_from_fallback_preserves_outer_slot_diagnostics() {
+    let pairs = [
+        (
+            "val array<i32> out = [b]",
+            "val array<i32> out = [try_from b]",
+        ),
+        (
+            "val result<i32, string> out = ok(b)",
+            "val result<i32, string> out = ok(try_from b)",
+        ),
+        (
+            "val i32 out = match true { true -> b, false -> 0 }",
+            "val i32 out = match true { true -> try_from b, false -> 0 }",
+        ),
+        ("val i32 out = b + 1", "val i32 out = (try_from b) + 1"),
+        (
+            "val i32 out = accept(b)",
+            "val i32 out = accept(try_from b)",
+        ),
+        (
+            "val box out = box(value = b)",
+            "val box out = box(value = try_from b)",
+        ),
+        ("values.push(b)", "values.push(try_from b)"),
+    ];
+    for (direct, attempted) in pairs {
+        let program = |statement: &str| {
+            format!(
+                "struct box {{ val i32 value = 0 }}\nfunc i32 accept = (i32 value) -> return value\nfunc i32 main = () -> {{\n    val string b = 'boy'\n    val array<i32> values = []\n    {statement}\n    return 0\n}}\n"
+            )
+        };
+        let direct_error = fail(&program(direct));
+        let attempted_error = fail(&program(attempted));
+        assert_eq!(attempted_error.msg, direct_error.msg, "语句: {attempted}");
+    }
+
+    let default_program = |expression: &str| {
+        format!(
+            "val string b = 'boy'\nstruct box {{ val i32 value = {expression} }}\nfunc i32 main = () -> return 0\n"
+        )
+    };
+    let direct_default = fail(&default_program("b"));
+    let attempted_default = fail(&default_program("try_from b"));
+    assert_eq!(attempted_default.msg, direct_default.msg);
 }
 
 #[test]

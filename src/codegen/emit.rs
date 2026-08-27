@@ -1560,49 +1560,21 @@ pub(crate) fn emit_call<M: Module>(
             return str_literal_handle(c, bcx, &tn);
         }
     }
-    if let Expr::FuncLit { params, body, .. } = callee {
-        let clo = emit_funclit_value(c, bcx, frame, params, body)?;
-        let param_vtys: Vec<VTy> = params
-            .iter()
-            .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-            .collect();
-        let ret_vty = infer_ret_vty(c, frame, params, body);
-        return call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args);
-    }
-    if matches!(callee, Expr::This(_)) {
-        let clo = emit_expr(c, bcx, frame, callee)?;
-        let Some(VTy::Func(param_vtys, ret_vty)) = frame.this_vty.clone() else {
-            return Err(native_err(span, "this 只能出现在 func 体内"));
-        };
-        return call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args);
-    }
-    let clo = match callee {
-        Expr::Ident(name, _) => {
-            if c.struct_layouts.contains_key(name) && cell_addr(c, frame, name).is_none() {
-                return emit_construct(c, bcx, frame, name, args);
-            }
-            if (name == "ok" || name == "err") && cell_addr(c, frame, name).is_none() {
-                return emit_result_ctor(c, bcx, frame, name, args);
-            }
-            match cell_addr(c, frame, name) {
-                Some(addr) => {
-                    let callee_vty = vty_of_name(c, frame, name);
-                    read_cell(bcx, frame, &addr, &callee_vty)
-                }
-                None => return Err(native_err(span, format!("未定义的绑定 '{name}'"))),
-            }
-        }
-        _ => return Err(native_err(span, "函数值尚未接入原生后端 (Phase 3)")),
-    };
     if let Expr::Ident(name, _) = callee {
-        return match vty_of_name(c, frame, name) {
-            VTy::Func(param_vtys, ret_vty) => {
-                call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
-            }
-            _ => Err(native_err(span, format!("'{name}' 不是带签名的函数绑定"))),
-        };
+        if c.struct_layouts.contains_key(name) && cell_addr(c, frame, name).is_none() {
+            return emit_construct(c, bcx, frame, name, args);
+        }
+        if (name == "ok" || name == "err") && cell_addr(c, frame, name).is_none() {
+            return emit_result_ctor(c, bcx, frame, name, args);
+        }
     }
-    invariant_violation("被调方形态 (上方已分派)")
+
+    let callee_vty = static_vty(c, frame, callee);
+    let VTy::Func(param_vtys, ret_vty) = callee_vty else {
+        return Err(native_err(span, "被调方缺少可调用函数签名"));
+    };
+    let clo = emit_expr(c, bcx, frame, callee)?;
+    call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
 }
 
 fn call_closure<M: Module>(

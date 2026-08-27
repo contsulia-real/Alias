@@ -71,14 +71,10 @@ impl Checker {
                 for item in elems {
                     match self.expr_expected(item, env, elem) {
                         Ok(_) => {}
-                        Err(e) if e.msg.starts_with("需要 ") => {
-                            let got = self.expr(item, env)?;
+                        Err(e) if expected_actual(&e.msg, elem).is_some() => {
+                            let actual = expected_actual(&e.msg, elem).unwrap();
                             return Err(AliasError {
-                                msg: format!(
-                                    "数组元素类型不一致: {} 与 {}",
-                                    elem.name(),
-                                    got.name()
-                                ),
+                                msg: format!("数组元素类型不一致: {} 与 {}", elem.name(), actual),
                                 span: item.span(),
                             });
                         }
@@ -140,6 +136,21 @@ impl Checker {
     ) -> AliasResult<Ty> {
         if let Some(result) = literal_slot_unify(expected, e) {
             return result;
+        }
+        if let Some((name, arg, span)) = contextual_conversion(e) {
+            let source = require_value(self.expr(arg, env)?, arg.span())?;
+            if conversion_exists(&source, expected) {
+                return Ok(expected.clone());
+            }
+            if name == "from" {
+                return Err(AliasError {
+                    msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
+                    span,
+                });
+            }
+            // try_from 不存在转换时把源类型交还给运算符，不能在子表达式层
+            // 抢先制造外层目标类型错误。
+            return Ok(source);
         }
         let Expr::Binary { op, lhs, rhs, span } = e else {
             return self.expr(e, env);
@@ -754,14 +765,14 @@ impl Checker {
                 for (i, (a, pt)) in args.iter().zip(&params).enumerate() {
                     match self.expr_expected(&a.value, env, pt) {
                         Ok(_) => {}
-                        Err(e) if e.msg.starts_with("需要 ") => {
-                            let got = self.expr(&a.value, env)?;
+                        Err(e) if expected_actual(&e.msg, pt).is_some() => {
+                            let actual = expected_actual(&e.msg, pt).unwrap();
                             return Err(AliasError {
                                 msg: format!(
                                     "第 {} 个实参需要 {}, 实际 {}",
                                     i + 1,
                                     pt.name(),
-                                    got.name()
+                                    actual
                                 ),
                                 span: a.value.span(),
                             });
@@ -816,10 +827,10 @@ impl Checker {
             let want = &info.fields[idx].ty;
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
-                Err(e) if e.msg.starts_with("需要 ") => {
-                    let got = self.expr(&a.value, env)?;
+                Err(e) if expected_actual(&e.msg, want).is_some() => {
+                    let actual = expected_actual(&e.msg, want).unwrap();
                     return Err(AliasError {
-                        msg: format!("字段 '{}' 需要 {}, 实际 {}", lbl, want.name(), got.name()),
+                        msg: format!("字段 '{}' 需要 {}, 实际 {}", lbl, want.name(), actual),
                         span: a.value.span(),
                     });
                 }
@@ -947,14 +958,10 @@ impl Checker {
                     }
                     match self.expr_expected(&args[0].value, env, elem) {
                         Ok(_) => {}
-                        Err(e) if e.msg.starts_with("需要 ") => {
-                            let got = self.expr(&args[0].value, env)?;
+                        Err(e) if expected_actual(&e.msg, elem).is_some() => {
+                            let actual = expected_actual(&e.msg, elem).unwrap();
                             return Err(AliasError {
-                                msg: format!(
-                                    "第 1 个实参需要 {}, 实际 {}",
-                                    elem.name(),
-                                    got.name()
-                                ),
+                                msg: format!("第 1 个实参需要 {}, 实际 {}", elem.name(), actual),
                                 span: args[0].value.span(),
                             });
                         }
@@ -1000,15 +1007,10 @@ impl Checker {
         for (i, (a, want)) in args.iter().zip(&sig.params).enumerate() {
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
-                Err(e) if e.msg.starts_with("需要 ") => {
-                    let got = self.expr(&a.value, env)?;
+                Err(e) if expected_actual(&e.msg, want).is_some() => {
+                    let actual = expected_actual(&e.msg, want).unwrap();
                     return Err(AliasError {
-                        msg: format!(
-                            "第 {} 个实参需要 {}, 实际 {}",
-                            i + 1,
-                            want.name(),
-                            got.name()
-                        ),
+                        msg: format!("第 {} 个实参需要 {}, 实际 {}", i + 1, want.name(), actual),
                         span: a.value.span(),
                     });
                 }
@@ -1017,6 +1019,12 @@ impl Checker {
         }
         Ok(sig.ret)
     }
+}
+
+fn expected_actual(message: &str, expected: &Ty) -> Option<String> {
+    message
+        .strip_prefix(&format!("需要 {}, 实际 ", expected.name()))
+        .map(str::to_owned)
 }
 
 fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
