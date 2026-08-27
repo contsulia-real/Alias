@@ -1,145 +1,326 @@
-# PROJECT KNOWLEDGE BASE
+# Alias 项目知识库
 
-**Generated:** 2026-08-27
-**Git:** `main` 分支
+**同步日期：** 2026-08-28  
+**基线分支：** `main`  
+**基线提交：** `a54ad7b0800cafb861e189630898006a30357df1`（typed HIR 单次类型投影）
 
-## OVERVIEW
+> 本文件只描述 Alias **当前状态**。历史阶段、已删除实现和旧裁决仅记录在 `MIGRATION.md`，不得从历史条目反推当前行为。
 
-Alias——用 Rust 实现的自研**编译型语言**（`.as` 源程序）。唯一执行形态是 Cranelift 生成 COFF、rust-lld 链接独立 `.exe`（纯 kernel32 依赖，无 CRT）。`run` 先完整编译临时 exe 再启动，`build` 输出持久 exe；不存在解释执行或进程内机器码执行路径。管线：lexer → parser → **sema** → codegen → linker → 原生进程。
+## 1. 项目定位与唯一执行模型
 
-## STRUCTURE
+Alias 是用 Rust 实现的自研静态类型编译语言，源文件扩展名为 `.as`。
 
-```
-D:\Project\Alias\
-├── src/
-│   ├── main.rs      # CLI 壳：run|build 子命令（裸单参 = run）→ 退出码 clamp 到 0–255
-│   ├── lib.rs       # 编排器 run()/build() + 统一错误类型 AliasError/Span(line:col,len)
-│   ├── lexer.rs     # lex(src) -> Vec<Token>；含字符串插值 StrPart 切分
-│   ├── parser/      # parse(tokens) -> Program；含递归/表达式链深度守卫
-│   ├── ast.rs       # AST 纯数据定义（Expr/Stmt/BindKind/BinOp/Pattern…）
-│   ├── sema/        # 静态语义层 check()：作用域链 + 内部类型推断 + 全量检查
-│   ├── codegen/     # 唯一 Cranelift Object 后端：abi/runtime 单源 + 原生 runtime + 发射器
-│   └── linker.rs    # rust-lld 子进程封装：SDK 发现 + 链接参数（链接唯一拥有者）
-├── demos/*.as       # Alias 语言示例程序；count_to_ten.as 被 smoke.rs include_str! 复用为测试
-├── tests/smoke.rs   # Phase 1 集成冒烟测试，直接调库接口 run()
-├── tests/golden.rs  # Phase 0 黄金记录：二进制精确三元组 (stdout/stderr/exit)
-├── tests/sema_laws.rs # Phase 1 sema 法律：负向矩阵断言精确中文消息+行:列
-├── tests/native_parity.rs # Phase 4 编译器黄金基线：demos 机械枚举 + 定向用例
-├── tests/struct_laws.rs # Phase 2a struct 法律：正负矩阵断言精确中文消息+行:列
-├── tests/result_laws.rs # Phase 2b result/match/? 法律：正负矩阵
-├── tests/method_laws.rs # Phase 2c 扩展方法法律：正负矩阵断言精确中文消息+行:列
-├── tests/array_laws.rs # Phase 2d array<T> 法律：正负矩阵 + 运行时中止子进程用例
-├── tests/pattern_laws.rs # Pattern AST / match 第一批法律：wildcard/binding/literal/result ctor
-├── tests/operator_pub_laws.rs # pub / % / 位运算 / 移位法律
-├── tests/conversion_laws.rs # (T)/from/try_from、checked 转换与 u64 字面量法律
-├── tests/function_value_laws.rs # 三元/match/函数字面量产生的函数值统一间接调用法律
-├── tests/this_laws.rs # this 当前函数自引用法律
-├── tests/typeof_laws.rs # typeof 静态类型查询法律
-├── tests/unit_laws.rs # unit 无返回值标记与零返回槽 ABI 法律
-├── tests/native_pipeline.rs # run 临时产物 vs build 持久产物三元组逐字节一致
-├── tests/security_regressions.rs # 内存安全、资源上限、宿主存活与覆盖保护回归
-├── tests/destructive_codegen.rs # 固定种子随机 AST、数值边界、深层闭包、并发原生编译
-├── docs/spec-notes.md # 规范冻结：display 表、Q①–Q⑥、运行时契约、唯一原生形态
-├── MIGRATION.md     # 迁移记录：每个语义变化一行，引用裁决编号
-├── NO_CI.md        # 项目级硬规则：CI 永久禁用
-├── Cargo.toml       # [dependencies] = cranelift-* 0.135 (唯一第三方依赖, codegen/ 独占)
-└── .cargo/config.toml # windows-msvc 目标用 rust-lld linker
+当前唯一管线：
+
+```text
+source.as
+  → lexer
+  → parser AST
+  → sema
+  → CheckedProgram typed HIR
+  → Ty → VTy 单次投影
+  → Cranelift Object / COFF
+  → rust-lld
+  → 独立 Windows x64 .exe
+  → 新进程执行
 ```
 
-## WHERE TO LOOK
+不存在解释器、JIT、宿主函数执行后端或进程内调用生成机器码的路径。`run` 也必须先完成完整编译和链接，再启动临时 exe；`build` 输出持久 exe。
 
-| 任务 | 位置 | 备注 |
-|------|------|------|
-| 加语言特性 | ast.rs → parser.rs → sema.rs → codegen.rs | 按此顺序四处联动，入口链不变 |
-| 加内建函数 | `codegen/emit.rs` + `codegen/runtime.rs` + `codegen/native_runtime.rs` | 先在 `RUNTIME_CONTRACTS` 登记签名和可空性；调用点不得手写 runtime 签名 |
-| 改值 ABI/布局 | `codegen/abi.rs` | `VTy::abi()`、用户函数签名、存储字转换、结构体字段布局的唯一真相源；其它模块不得复制宽度表 |
-| 改错误信息格式 | lib.rs `AliasError::Display` | 运行时错误经 span-ID 中止存根/编译期 AliasError 携带 |
-| 加语法 | lexer.rs Tok + parser/ | 词法与语法分离改动 |
-| 验证语义 | tests/*_laws.rs + demos/ | 每条用例对应一条语言裁决 |
+当前链接路径是 **x86_64 Windows MSVC**：`src/linker.rs` 固定定位 `x86_64-pc-windows-msvc/bin/rust-lld.exe`，链接 `kernel32.lib`，无 CRT。当前还不是跨平台编译器。
 
-## CODE MAP
+## 2. 当前源码结构
 
-| 符号 | 类型 | 位置 | 角色 |
-|------|------|------|------|
-| `run` / `build` | fn | lib.rs | 共用唯一编译管线；run 链接临时 exe 后启动，build 输出持久 exe |
-| `lex` | fn | lexer.rs | 源码 → Token 流 |
-| `parse` | fn | parser/ | Token → Program AST |
-| `sema::check` | fn | sema/mod.rs | 静态全量检查 |
-| `codegen::compile_to_object` | fn | codegen/mod.rs | 把 Program 编译为含 runtime 与入口的 COFF 字节流 |
-| `VTy::abi` / `build_struct_layouts` | fn | codegen/abi.rs | 寄存器、存储、对齐、参数/返回和字段布局单源 |
-| `RUNTIME_CONTRACTS` | table | codegen/runtime.rs | runtime 参数、返回值和可空性的唯一机器契约 |
-| `emit_expr` / `emit_stmt` | fn | codegen/emit.rs | 表达式/语句发射核心（单元格值模型 + 闭包创建） |
-| `methods` / `method_rets` | field | codegen/mod.rs | 方法表：(接收者,方法名)→FuncId 静态分派 + 返回类型投影 |
-| `define_span_data` | fn | codegen/native_runtime.rs | 把运行时诊断 span 表固化进原生产物只读数据段 |
-| `AliasError`/`Span` | struct | lib.rs | 错误携带 line:col,len；当前不保存源文件路径 |
+```text
+src/
+├── main.rs                 # CLI：alias <file> / run / build
+├── lib.rs                  # run/build 编排；AliasError / Span
+├── lexer.rs                # Token、插值拆分、输入规模限制
+├── ast.rs                  # parser AST：只表达语法
+├── parser/
+│   ├── mod.rs
+│   ├── items.rs
+│   ├── stmts.rs
+│   └── exprs.rs
+├── sema/
+│   ├── mod.rs              # check(Program) -> CheckedProgram
+│   ├── decls.rs
+│   ├── stmts.rs
+│   ├── exprs.rs
+│   ├── types.rs            # Ty 与类型槽检查
+│   └── hir.rs              # typed HIR + resolved call targets
+├── codegen/
+│   ├── mod.rs              # compile_to_object(CheckedProgram)
+│   ├── abi.rs              # Ty→VTy 投影、ValueAbi、结构体布局
+│   ├── emit.rs             # HIR 表达式/语句发射
+│   ├── funcgen.rs          # 用户函数/闭包函数生成
+│   ├── runtime.rs          # RUNTIME_CONTRACTS 唯一机器契约表
+│   └── native_runtime.rs   # 原生产物内 runtime 实现
+└── linker.rs               # COFF → exe 的唯一链接拥有者
+```
 
-## CONVENTIONS
+测试按语言法律拆分，当前包括：`golden`、`sema_laws`、`struct_laws`、`result_laws`、`method_laws`、`array_laws`、`pattern_laws`、`control_flow_operator_laws`、`operator_pub_laws`、`conversion_laws`、`function_value_laws`、`this_laws`、`typeof_laws`、`unit_laws`、`native_pipeline`、`native_parity`、`security_regressions`、`destructive_codegen`、`smoke` 等。
 
-- **宪法驱动**：已冻结裁决优先于局部实现便利；语义变化必须同步测试/规范。
-- **执行模型**：所有合法程序必须先生成 COFF 并经 rust-lld 链接为 exe；`run` 只负责临时产物生命周期和启动，不得增加进程内执行捷径。
-- **中文报错**：所有面向用户的错误消息为简体中文。
-- **存储/闭包语义**：`alias.cell.new(bytes)` 按声明类型尺寸分配清零存储区；每个绑定一泄漏堆单元格，闭包 env 持捕获单元格指针（引用捕获）。
-- **方法语义**：`pub? func <Ret> <RecvType>.<name>` 定义扩展方法；`pub` 只允许顶层；`public` 不再是关键字或兼容别名。self 是隐式 val 绑定；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖。
-- **Pattern 语义**：第一批 Pattern 为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`。普通标识符与 `_` 都是 catch-all，前者绑定整个主语；guard/struct Pattern 暂未加入。
-- **运算符语义**：`%` 仅整数；`& | ^ ~ << >>` 仅整数；同型同宽度运算，不允许隐式数值混算；不提供复合赋值。
-- **数组语义**：语言值 = 共享 wrapper {raw_header,version}；raw header 为 {data_ptr,len,cap}，元素使用 8 字节载荷槽。别名共享 wrapper；push/pop 推进 version 并使旧 iterator fail-fast。下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop/iterator 不可定义。
-- **整数溢出语义**：整数 `+/-/*`、左移 `<<`、一元负号以及 `increase/decrease` 均按声明宽度检查；结果超出范围时，编译产物经表达式 Span 输出「整数溢出」并 `ExitProcess(1)`，不得回绕。`& | ^ ~ >>` 维持固定位宽位模式语义。
-- **自增减语义**：`increase name` / `decrease name` 只允许作为独立语句，目标必须是可变数值绑定；整数执行 checked ±1，f32/f64 按同型 ±1.0。它们不产生可赋值、可返回或可传参的值。
-- **转换语义**：显式目标写 `(T) value`；声明、普通/字段赋值、字段默认值、return、函数/方法实参、array、result、match/三元、字符串插值与数值复合表达式组成完整目标传播矩阵。`try_from(value)` 仅在不存在转换关系时静默保留源类型，随后由所在槽或运算符照常检查；诊断不得为取得实际类型再做无目标检查。转换关系覆盖数值族互转和所有可显示值到 string；数值越界始终运行时报「转换越界」，不会退回源类型。旧 `to_*` 已物理退役。
-- **静态类型查询**：`typeof(expr)` / `typeof expr` 返回表达式静态类型名的 string。实参必须通过 sema，但运行时不求值，因此不得触发副作用或运行时中止。
-- **当前函数自引用**：`this` 是每个 func 体内的不可变当前函数绑定，签名与当前函数一致；改名不影响递归，嵌套 func 各自重新绑定。func 体外使用直接拒绝。
-- **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。
-- **函数值调用**：任何静态类型携带完整函数签名的表达式都可作为被调方；标识符、`this`、函数字面量、三元和 match 统一发射为闭包间接调用，不保留后端形态白名单。
-- **ABI/布局单源**：每种 `VTy` 的规范寄存器类型、实际存储类型/宽度/对齐、参数/返回类型及载荷字编码只在 `codegen/abi.rs` 定义。
-- **runtime 契约单源**：所有 `alias.*` 与内部 `rt.*` 符号必须进入 `RUNTIME_CONTRACTS`；缺失、重复、多余或调用参数类型漂移均为编译器错误。
-- **运行时错误**：只由编译产物按内嵌 span 表输出中文诊断并 `ExitProcess(1)`；编译器进程不执行语言 runtime。
-- **库接口边界**：`run()` 的 `Err` 只承载编译、链接和启动失败；语言运行时中止属于已编译子进程，`run()` 返回其退出码。
-- **unit 语义**：`unit` 仅是函数无返回值标记，不是值类型。unit 函数可自然落空或裸 `return`；`()` 不是值；unit 不得绑定、存储、传参、返回、转换、插值、打印或进入 `typeof`，原生函数签名不含返回槽。
+## 3. 当前编译器层级边界
 
-## HARD DEVELOPMENT RULE — NO DEFENSIVE COMPATIBILITY
+### 3.1 parser AST
 
-这是项目级硬规则，优先级高于实现便利、代理习惯和“为了稳妥”的自行判断：
+`src/ast.rs` 只保存语法结构，不拥有最终静态类型，也不负责调用目标解析。
 
-- **禁止防御性兼容。** 除非仓库所有者明确要求，否则不得为旧语法、旧 AST、旧诊断、旧数据形态或旧行为保留兼容入口、别名、桥接层、fallback、Deref 过渡层或双路径实现。
-- **废弃即删除。** 开发阶段被新裁决替换的语法、字段、分支、测试夹具和实现状态必须直接移除，不保留“先兼容一阵”“以后可能用到”的废弃状态。
-- **禁止无规范依据的 fallback。** 不得因为担心未来输入、旧代码、潜在调用方或未知边界而自行增加兜底语义；未定义行为应按当前规范拒绝，而不是猜测兼容。
-- **禁止提前抽象和未来兼容。** 不得为尚未批准的未来特性预留公共语法、兼容字段、额外状态机、双版本数据结构或“先铺路”的抽象；只实现当前已批准的语义。
-- **最新裁决直接覆盖旧裁决。** 当仓库所有者明确修改语言设计时，以最新裁决为准，代码、测试、demo 和规范直接迁移到新状态；历史记录可记录旧事实，但运行时/编译器不得继续承载旧状态。
-- **修 bug 不得借机扩大范围。** 修复应只解决已确认根因及必要联动，不得顺手添加兼容分支、防御性特殊情况或未批准特性。
-- **验证不是新增语义的理由。** 静态检查、回归测试和代码审计只能验证已批准行为，不得以“更安全”“更稳妥”“防回归”为理由发明新行为或兼容层。
-- **提交应保持单一当前真相。** 不制造 no-op 提交、临时兼容提交、过渡态提交；能直接形成最终状态时直接提交最终状态。
+### 3.2 sema / typed HIR
 
-如果实现与本节冲突，应删除兼容/防御性代码，而不是为它寻找合理化解释。
+`sema::check` 成功后产出 `CheckedProgram`。这是进入后端前的语义完成态：
 
-## ANTI-PATTERNS (THIS PROJECT)
+- 每个 HIR 表达式携带最终静态 `Ty`；
+- 普通调用携带已解析 `CallTarget`；
+- 方法调用携带已解析 `MethodTarget`；
+- 匿名函数字面量的返回类型在 sema 完成合并；
+- 目标类型传播、名字解析、调用归属、Pattern coverage 等都必须在这里完成。
 
-- **禁止字符串哨兵**：控制流与错误各有类型化通道，不得用特殊字符串/魔法值传递。
-- import 只解析不执行——不要尝试解析 import 语义（Phase 5 前）。
-- 下标赋值是明确拒绝（只读索引裁决），不是 bug。
-- 不为废弃开发状态保留兼容层；被替换的语法应直接退役。
+禁止 codegen 根据 AST 形态、名称、函数体或诊断文本重新猜类型或调用目标。
 
-## UNIQUE STYLES
+### 3.3 codegen 类型投影
 
-- 语言语法风格：`func i32 main = () -> {...}`、`pub func u32 f = (...) -> ...`、`var i32 x = 1;`。
-- 无括号调用 (P2e 泛化): 语句入口裸名吞一个 unary 实参；表达式内 `ident unary` 吞参调用、`expr Ident [unary]` 方法中缀（`a plus b` ≡ `a.plus(b)`）。铁律: `dup 5 + 1` 报错，须 `(dup 5) + 1`; 函数值传参须显式 `f(g)`; 零参调用必须括号 `five()`。
-- main 必须零参且只允许返回 i32；其它返回类型在 sema 阶段拒绝。
-- `func unit f = (...) -> ...` 表示无返回值；调用只能作为独立语句，不能写 `return ()` 或把调用结果放进任何值位置。
-- 字符串插值用单引号：`'n=$i'`。
-- demos/ 即测试夹具：smoke.rs 用 include_str! 直接跑 demo 文件。
+`src/codegen/abi.rs::project_ty(&CheckedProgram)` 是唯一 `Ty → VTy` 投影入口。进入 codegen 时对整棵 HIR 恰执行一次，后续发射只读取投影表。
 
-## COMMANDS
+`Unknown` 是显式不变式状态；不存在 `VTy::Other` 或“默认退回 I64”。需要值 ABI 的 `Unknown` 或 `unit` 若到达后端，属于 sema 缺口，必须失败。
+
+### 3.4 ABI 与 runtime 单源
+
+- `codegen/abi.rs`：寄存器表示、存储宽度、对齐、参数/返回 ABI、结构体字段布局和 result/array 载荷字编码的唯一真相源；
+- `codegen/runtime.rs::RUNTIME_CONTRACTS`：所有 `alias.*` / `rt.*` runtime 符号签名及可空性的唯一机器契约；
+- `native_runtime.rs` 的实际定义集合必须与契约表精确一致。
+
+## 4. 当前类型系统
+
+可写类型：
+
+- 有符号整数：`i8 i16 i32 i64`
+- 无符号整数：`u8 u16 u32 u64`
+- 浮点：`f32 f64`
+- `bool`
+- `string`
+- 函数类型（内部保留完整参数/返回签名；类型槽 `func` 表示多态函数槽）
+- 用户 `struct`
+- `result<T,E>`
+- `array<T>`
+- `iterator<T>`
+
+当前其它泛型类型未实现。
+
+`unit` **不是值类型**，只表示函数没有返回值：
+
+- 仅可单独作为函数/方法返回类型；
+- `()` 不是值表达式；
+- unit 调用只能作为独立语句；
+- unit 不得绑定、存储、传参、进入数组/result、转换、插值、打印或 `typeof`；
+- 原生函数 ABI 不包含返回槽。
+
+## 5. 绑定、函数与闭包
+
+- `val`：不可重新绑定；
+- `var`：可重新绑定；
+- 参数是隐式不可变绑定；
+- 所有类型槽显式，不存在一般的声明类型推断；
+- `func T name = (...) -> ...` 中 `T` 是函数返回类型；当前 `func` RHS 必须直接是函数字面量；
+- 顶层命名函数在检查自身函数体前登记自己的完整签名，因此可以按名字递归；这不开放后续声明的前向引用；
+- `this` 是每个 func 体内的不可变当前函数自引用，携带完整签名；嵌套 func 重新绑定自己的 `this`；
+- 闭包按引用捕获外层绑定单元格，读取捕获变量的最新值；
+- 任意静态类型为完整函数签名的表达式均可作为被调方，包括标识符、`this`、函数字面量、三元和 `match` 结果。
+
+非 unit 函数不存在隐式返回：所有可达落空路径必须由显式 `return <value>` 终止。循环不用于证明必返回。
+
+## 6. struct 与扩展方法
+
+### struct
+
+- 顶层定义；
+- 字段分别声明 `val` / `var`；
+- 实例为共享引用语义；赋值、传参、闭包捕获共享同一实例；
+- 字段是否可写只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
+- 构造使用命名实参，字段默认值按字段声明目标类型检查；
+- 结构体值显示为 `<struct>`。
+
+### 扩展方法
+
+```alias
+pub func Ret Receiver.method = (...) -> ...
+```
+
+- 方法只能顶层定义；
+- `self` 是方法体内隐式不可变接收者；
+- 方法按完整接收者静态类型分派；
+- `pub` 是唯一公开关键字，只允许顶层；旧 `public` 已删除，不是兼容别名；
+- 内建方法不可被用户覆盖。
+
+当前内建包括字符串 `len/upper/lower/trim`，数组 `len/push/pop/iterator`，数值 `plus/minus/times/div`，以及 `bool.not`。
+
+## 7. result / match / Pattern / `?`
+
+`result<T,E>` 是当前内建二参数泛型。`ok(expr)` / `err(expr)` 为构造器。
+
+`match` 主语不限制为 result。当前 Pattern：
+
+- `_`
+- 普通标识符整体绑定
+- 整数字面量
+- `true` / `false`
+- 纯字符串字面量
+- `ok(name|_)`
+- `err(name|_)`
+
+规则：
+
+- `_` 与普通标识符都是 catch-all；普通标识符建立不可变绑定；
+- bool 可由 `true + false` 穷尽；
+- result 可由 `ok + err` 穷尽；
+- 整数/string 等开放域必须存在 catch-all；
+- 重复 Pattern、完整覆盖后的后续 arm 均为编译错误；
+- guard、struct Pattern、嵌套 constructor payload Pattern、用户 Pattern 构造器尚未实现。
+
+`expr?` 仅用于同错误类型的 `result` 传播。
+
+## 8. array / iterator
+
+`array<T>` 为共享 wrapper 引用语义；别名、传参和闭包捕获共享同一数组状态。
+
+- 字面量：`[a, b, c]`；
+- 下标当前只读；`arr[i] = x` 明确拒绝；
+- `len()` / `push(v)` / `pop()` / `iterator()` 为内建；
+- push/pop 属于结构修改，推进共享版本号；
+- iterator 保存创建时版本号，任一别名修改数组结构后旧 iterator 再消费即 fail-fast；
+- 越界、负下标、空 pop、失效 iterator 都由编译产物中止并输出中文诊断。
+
+`for Type name in Expr { ... }` 当前消费 `array<T>` 或 `iterator<T>`；循环变量为不可重新绑定的 `val`。
+
+## 9. 控制流与运算
+
+当前控制流：
+
+- `if / else if / else`
+- `while`
+- `for Type name in Expr`
+- `break / continue`
+- `&& / ||` 运行时短路
+- `?:` 三元，仅求值被选中的分支
+- `match`
+
+整数规则：
+
+- 不允许隐式数值混算；
+- `%` 仅整数；
+- `& | ^ ~ << >>` 仅整数；
+- `+ - *`、一元负号、`<<`、`increase/decrease` 使用声明宽度 checked 语义；
+- `INT_MIN / -1` 属于整数溢出；除数为零单独报「除以零」；
+- `& | ^ ~ >>` 保持固定位宽位模式语义；
+- 不提供复合赋值。
+
+`increase name` / `decrease name` 是独立语句，不是表达式。目标必须为可变数值绑定；整数 checked ±1，浮点同型 ±1.0。
+
+## 10. 转换与目标类型传播
+
+当前转换入口：
+
+- `(T) value`：显式指定目标类型；
+- `from(value)` / `from value`：必须由上下文提供目标类型；
+- `try_from(value)`：若存在转换关系则转换；若不存在关系则保留源表达式类型，再由外层槽正常检查。
+
+旧 `to_*` 内建已物理删除。
+
+转换关系当前覆盖：
+
+- 数值族互转；
+- 所有具有显示规则的具体值 → `string`。
+
+整数目标转换做值域检查；越界报「转换越界」，不会回绕或静默截断。
+
+目标类型必须从声明、赋值、字段默认值、结构体字段、return、函数/方法实参、array 元素、result 载荷、match/三元分支、字符串插值和数值复合表达式持续向内传播。不得为拼诊断再次执行无目标类型检查。
+
+## 11. `typeof`
+
+`typeof(expr)` / `typeof expr` 返回表达式的**静态类型名**字符串。
+
+实参仍必须通过名字解析和静态类型检查，但生成代码不求值实参，因此不能触发副作用、除零或其它运行时中止。
+
+## 12. 显示规则
+
+- 整数：十进制
+- 浮点：runtime 规范化十进制表示
+- bool：`true` / `false`
+- string：原文字节，不附加引号
+- func：`<func>`
+- struct：`<struct>`
+- array：`<array>`
+- result：`<ok>` / `<err>`
+
+`unit` 不在显示域。
+
+## 13. 诊断与 Span
+
+用户可见诊断统一为简体中文。
+
+当前 `Span` 只包含 `line / col / len`，尚不包含源文件路径。真实 lexer span 的**行和列都从 1 开始**；`Span::default()` 的全零值只作为无具体源码位置的哨兵，例如缺少顶层 `main`，此时 `AliasError::Display` 省略 `错误 @ line:col —` 前缀。
+
+运行时错误由已编译产物根据内嵌 span 数据输出；编译器进程不执行语言 runtime。
+
+## 14. CLI 与平台约束
+
+```text
+alias <source.as>          # 等价 run
+alias run <source.as>      # 编译临时 exe → 启动 → 清理
+alias build <source.as>    # 输出同目录同名 .exe
+```
+
+- `build` 输入必须为 `.as`；
+- `main` 必须存在、零参数、返回 `i32`；
+- CLI 最终退出码把 main/子进程退出码 clamp 到 0–255；
+- import 当前只解析，不执行模块加载；标准库尚未接入；
+- 当前链接器、SDK 探测和产物格式只支持 Windows x64。
+
+## 15. 输入健壮性边界
+
+- 源文件最大 8 MiB；
+- token 最大 200000；
+- 语法/类型/字符串插值嵌套最大 128；
+- 表达式链等受 256 级上限保护；
+- 超限、整数字面量越界、非有限浮点等必须产生中文 `AliasError`，不得 panic。
+
+## 16. 开发硬规则
+
+### 禁止防御性兼容
+
+- 新裁决替换旧状态后直接删除旧语法、旧 AST、旧分支、旧诊断和旧测试夹具；
+- 不保留兼容别名、桥接层、fallback、双路径或“以后可能用”的过渡结构；
+- 不为未批准未来特性提前铺公共语法或兼容字段；
+- 未定义行为按当前规范拒绝，不猜测旧调用方；
+- 历史事实只放 `MIGRATION.md`，当前代码和当前规范只能存在一个版本。
+
+### 禁止字符串承载语义控制流
+
+类型、调用解析、错误分类必须使用结构化/类型化通道；不得解析中文诊断字符串恢复类型或控制流信息。
+
+### CI 永久禁用
+
+以 `NO_CI.md` 为硬规则：不得新增、恢复、询问启用 GitHub Actions 或任何其它 CI。验证只能显式手动执行。
+
+## 17. 手动验证命令
 
 ```bash
-cargo run -- demos/count_to_ten.as        # 编译临时 exe 后运行
-cargo run -- build demos/hello_native.as  # 编译为独立 exe 并链接
-cargo test --all-targets                  # 显式手动全量验证
-cargo build                               # 构建
+cargo check
+cargo build
+cargo test --all-targets
+cargo clippy --all-targets
 ```
 
-## NOTES
+是否执行哪些命令由当前任务决定；不得把它们包装成 CI。
 
-- **CI 永久禁用。** 以仓库根目录 `NO_CI.md` 为硬规则；任何工具、代理或后续任务都不得新增、恢复、启用或询问启用 CI/GitHub Actions/其它自动化流水线。验证只能显式手动运行。
-- 无 lint 配置、无 Makefile——构建使用 cargo 默认行为。
-- 数值类型含 i8/i16/i32/i64、u8/u16/u32/u64、f32/f64；跨类型混算禁止，转换使用 `(T) value`、`from(value)` 或 `try_from(value)`。
-- 除零是运行时错误而非 panic（`codegen/emit.rs` 显式守卫 → span-ID 中止存根）；`INT_MIN / -1` 与其它整数算术越界统一报「整数溢出」。
-- 输入上限：源码 8 MiB、200000 token、语法/类型/插值嵌套 128 层、表达式链 256 项。
+## 18. 文档责任边界
+
+- `docs/spec-notes.md`：**当前规范**，只写现在时；
+- `AGENTS.md`：当前工程结构、边界和维护规则；
+- `MIGRATION.md`：历史迁移账本，旧阶段描述允许保留，但不得作为当前规范；
+- `docs/pattern-match-foundation.md`：Pattern 专题，必须与当前 Pattern 集一致；
+- `docs/recursion-literal-noparen-fixes.md`：相关历史修复专题，必须标注其后续已被哪些当前能力扩展；
+- `NO_CI.md`：CI 永久禁用硬规则。
+
+任何语言语义或架构变化必须在同一批改动中同步所有受影响的当前文档；不得只改 `MIGRATION.md` 或只在代码注释里留下新事实。
