@@ -17,6 +17,7 @@ pub enum Tok {
     Struct,
     Pub,
     SelfKw,
+    ThisKw,
     For,
     While,
     If,
@@ -28,7 +29,7 @@ pub enum Tok {
     Match,
 
     // 字面量
-    Int(i64),
+    Int(u64),
     Float(f64),
     Bool(bool),
     Str(Vec<StrPart>),
@@ -285,8 +286,8 @@ impl<'a> Lexer<'a> {
             }
             return Ok(Tok::Float(v));
         }
-        let n = text.parse::<i64>().map_err(|_| AliasError {
-            msg: "整数字面量超出 i64 表示范围".into(),
+        let n = text.parse::<u64>().map_err(|_| AliasError {
+            msg: "整数字面量超出 u64 表示范围".into(),
             span: self.span_here((self.pos - start) as u32),
         })?;
         Ok(Tok::Int(n))
@@ -309,6 +310,7 @@ impl<'a> Lexer<'a> {
             b"struct" => Tok::Struct,
             b"pub" => Tok::Pub,
             b"self" => Tok::SelfKw,
+            b"this" => Tok::ThisKw,
             b"for" => Tok::For,
             b"while" => Tok::While,
             b"if" => Tok::If,

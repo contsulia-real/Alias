@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 编译期/运行期错误的统一载体。
-/// 宪法要求"报错提供详细信息": 从第一天起就带 file:line:col。
+/// 统一携带源码内的 line:col:len；当前不保存文件路径。
 #[derive(Debug, Clone)]
 pub struct AliasError {
     pub msg: String,

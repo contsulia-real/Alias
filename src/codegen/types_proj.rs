@@ -17,12 +17,18 @@ pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str)
 
 pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
     match e {
-        Expr::Int(..) => VTy::I(IntW::W32),
+        Expr::Int(value, ..) => default_positive_int_vty(*value),
         Expr::Float(..) => VTy::F(FloatW::F64),
-        Expr::Neg { expr, .. } => match static_vty(c, frame, expr) {
-            v @ (VTy::I(_) | VTy::F(_)) => v,
-            _ => VTy::Other,
-        },
+        Expr::Neg { expr, .. } => {
+            if let Expr::Int(magnitude, _) = expr.as_ref() {
+                default_negative_int_vty(*magnitude).unwrap_or(VTy::Other)
+            } else {
+                match static_vty(c, frame, expr) {
+                    v @ (VTy::I(_) | VTy::F(_)) => v,
+                    _ => VTy::Other,
+                }
+            }
+        }
         Expr::Not { .. } => VTy::Bool,
         Expr::BitNot { expr, .. } => match static_vty(c, frame, expr) {
             v @ (VTy::I(_) | VTy::U(_)) => v,
@@ -76,6 +82,8 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             _ => VTy::Bool,
         },
         Expr::Ident(name, _) => vty_of_name(c, frame, name),
+        Expr::This(_) => frame.this_vty.clone().unwrap_or(VTy::Other),
+        Expr::Cast { target, .. } => decl_vty(target, &c.struct_layouts),
         Expr::ArrayLit { elems, .. } => VTy::Array(Box::new(
             elems
                 .first()
@@ -98,9 +106,6 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         }
         Expr::Call { callee, .. } => match callee.as_ref() {
             Expr::Ident(name, _) => {
-                if let Some(t) = conv_target_vty(name) {
-                    return t;
-                }
                 if name == "typeof" {
                     return VTy::Str;
                 }
@@ -206,6 +211,26 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
     }
 }
 
+fn default_positive_int_vty(value: u64) -> VTy {
+    if value <= i32::MAX as u64 {
+        VTy::I(IntW::W32)
+    } else if value <= i64::MAX as u64 {
+        VTy::I(IntW::W64)
+    } else {
+        VTy::U(UIntW::U64)
+    }
+}
+
+fn default_negative_int_vty(magnitude: u64) -> Option<VTy> {
+    if magnitude <= (i32::MAX as u64) + 1 {
+        Some(VTy::I(IntW::W32))
+    } else if magnitude <= (i64::MAX as u64) + 1 {
+        Some(VTy::I(IntW::W64))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn infer_ret_vty<M: Module>(
     c: &Compiler<M>,
     frame: &Frame,
@@ -230,6 +255,8 @@ pub(crate) fn infer_ret_vty<M: Module>(
         env: frame.env,
         caps: frame.caps.clone(),
         caps_vty: frame.caps_vty.clone(),
+        this_fid: frame.this_fid,
+        this_vty: frame.this_vty.clone(),
         ret_block: frame.ret_block,
         ret_vty: frame.ret_vty.clone(),
         terminated: false,

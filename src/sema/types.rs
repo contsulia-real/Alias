@@ -125,21 +125,46 @@ pub(crate) fn types_match(want: &Ty, got: &Ty) -> bool {
     }
 }
 
-pub(crate) fn int_literal_fits(ty: &Ty, v: i64) -> bool {
+pub(crate) fn int_literal_fits(ty: &Ty, magnitude: u64, negative: bool) -> bool {
     match ty {
-        Ty::Int(w) => match w {
-            IntW::W8 => v >= i8::MIN as i64 && v <= i8::MAX as i64,
-            IntW::W16 => v >= i16::MIN as i64 && v <= i16::MAX as i64,
-            IntW::W32 => v >= i32::MIN as i64 && v <= i32::MAX as i64,
-            IntW::W64 => true,
-        },
-        Ty::UInt(w) => match w {
-            UIntW::U8 => v >= 0 && v <= u8::MAX as i64,
-            UIntW::U16 => v >= 0 && v <= u16::MAX as i64,
-            UIntW::U32 => v >= 0 && v <= u32::MAX as i64,
-            UIntW::U64 => v >= 0,
-        },
+        Ty::Int(w) => {
+            let limit = 1u64 << (w.bits() - 1);
+            if negative {
+                magnitude <= limit
+            } else {
+                magnitude < limit
+            }
+        }
+        Ty::UInt(w) => {
+            !negative
+                && match w {
+                    UIntW::U8 => magnitude <= u8::MAX as u64,
+                    UIntW::U16 => magnitude <= u16::MAX as u64,
+                    UIntW::U32 => magnitude <= u32::MAX as u64,
+                    UIntW::U64 => true,
+                }
+        }
         _ => true,
+    }
+}
+
+pub(crate) fn default_positive_int_ty(value: u64) -> Ty {
+    if value <= i32::MAX as u64 {
+        Ty::Int(IntW::W32)
+    } else if value <= i64::MAX as u64 {
+        Ty::Int(IntW::W64)
+    } else {
+        Ty::UInt(UIntW::U64)
+    }
+}
+
+pub(crate) fn default_negative_int_ty(magnitude: u64) -> Option<Ty> {
+    if magnitude <= (i32::MAX as u64) + 1 {
+        Some(Ty::Int(IntW::W32))
+    } else if magnitude <= (i64::MAX as u64) + 1 {
+        Some(Ty::Int(IntW::W64))
+    } else {
+        None
     }
 }
 

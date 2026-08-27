@@ -232,10 +232,10 @@ pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<AliasRes
             None
         };
     }
-    let v = match value {
-        Expr::Int(n, _) => *n,
+    let (magnitude, negative) = match value {
+        Expr::Int(n, _) => (*n, false),
         Expr::Neg { expr, .. } => match expr.as_ref() {
-            Expr::Int(n, _) => n.wrapping_neg(),
+            Expr::Int(n, _) => (*n, true),
             _ => return None,
         },
         _ => return None,
@@ -243,11 +243,16 @@ pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<AliasRes
     if !matches!(declared, Ty::Int(_) | Ty::UInt(_)) {
         return None;
     }
-    Some(if int_literal_fits(declared, v) {
+    Some(if int_literal_fits(declared, magnitude, negative) {
         Ok(declared.clone())
     } else {
+        let literal = if negative {
+            format!("-{magnitude}")
+        } else {
+            magnitude.to_string()
+        };
         Err(AliasError {
-            msg: format!("字面量 {v} 超出 {} 的表示范围", declared.name()),
+            msg: format!("字面量 {literal} 超出 {} 的表示范围", declared.name()),
             span,
         })
     })

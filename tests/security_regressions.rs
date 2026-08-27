@@ -23,7 +23,7 @@ fn run_cli(src: &str) -> std::process::Output {
 
 #[test]
 fn narrow_shadow_uses_the_inner_cell_type() {
-    let src = "func i32 main = () -> {\n    var i64 x = 9000000000\n    while true {\n        var i8 x = 1\n        x = 2\n        return to_i32(x)\n    }\n    return 3\n}\n";
+    let src = "func i32 main = () -> {\n    var i64 x = 9000000000\n    while true {\n        var i8 x = 1\n        x = 2\n        return (i32) x\n    }\n    return 3\n}\n";
     assert_eq!(run("shadow.as", src).unwrap(), 2);
 }
 
@@ -60,11 +60,14 @@ fn integer_overflow_aborts_for_every_width_and_checked_operation() {
         "func i32 main = () -> {\n    val u8 x = 255\n    val u8 one = 1\n    val u8 out = x + one\n    return 0\n}\n",
         "func i32 main = () -> {\n    val u16 zero = 0\n    val u16 one = 1\n    val u16 out = zero - one\n    return 0\n}\n",
         "func i32 main = () -> {\n    val u32 x = 65536\n    val u32 out = x * x\n    return 0\n}\n",
-        "func i32 main = () -> {\n    val u64 max = to_u64(-1)\n    val u64 one = 1\n    val u64 out = max + one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u64 max = 18446744073709551615\n    val u64 one = 1\n    val u64 out = max + one\n    return 0\n}\n",
         "func i32 main = () -> {\n    val i8 min = -128\n    val i8 out = -min\n    return 0\n}\n",
         "func i32 main = () -> {\n    var i16 max = 32767\n    increase max\n    return 0\n}\n",
         "func i32 main = () -> {\n    var u16 zero = 0\n    decrease zero\n    return 0\n}\n",
         "func i32 main = () -> {\n    val i32 min = -2147483647 - 1\n    val i32 m1 = -1\n    val i32 out = min / m1\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u8 x = 128\n    val u8 one = 1\n    val u8 out = x << one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val i8 x = 64\n    val i8 one = 1\n    val i8 out = x << one\n    return 0\n}\n",
+        "func i32 main = () -> {\n    val u8 x = 1\n    val u8 width = 8\n    val u8 out = x << width\n    return 0\n}\n",
     ];
 
     for src in cases {
@@ -123,7 +126,7 @@ fn concurrent_native_compilations_keep_span_tables_isolated() {
 
 #[test]
 fn large_integer_literal_is_not_truncated_to_i32() {
-    let src = "func i32 main = () -> {\n    val i64 wide = 2147483649\n    val i64 base = 2147483648\n    return to_i32(wide / base)\n}\n";
+    let src = "func i32 main = () -> {\n    val i64 wide = 2147483649\n    val i64 base = 2147483648\n    return (i32) (wide / base)\n}\n";
     assert_eq!(run("wide.as", src).unwrap(), 1);
 }
 

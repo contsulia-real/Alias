@@ -203,7 +203,7 @@ fn methods_same_native_binary_is_stable() {
 
 #[test]
 fn run_matches_build_artifact_for_wide_and_float_display() {
-    let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = -max - one\n    val u64 b = to_u64(-1)\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
+    let src = "func i32 main = () -> {\n    val i64 a = 2147483648\n    val i64 max = 9223372036854775807\n    val i64 one = 1\n    val i64 min = -max - one\n    val u64 b = 18446744073709551615\n    val f32 c = 12.34\n    val f64 d = 0.125\n    println a\n    println min\n    println b\n    println c\n    println d\n    return 0\n}\n";
     let run = run_command(src);
     assert!(
         String::from_utf8_lossy(&run.0).contains("-9223372036854775808\n18446744073709551615\n")

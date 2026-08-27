@@ -1,6 +1,9 @@
 //! sema::exprs — 表达式静态语义。
 
-use super::types::{types_match, FloatW, IntW, Ty, UIntW};
+use super::types::{
+    check_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
+    types_match, FloatW, IntW, Ty,
+};
 use super::{literal_slot_unify, op_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, Stmt, StrPartAst};
 use crate::{AliasError, AliasResult, Span};
@@ -10,6 +13,19 @@ impl Checker {
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
     /// match 都走这一入口，使窄数值字面量的范围规则完全一致。
     pub(super) fn expr_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
+        if let Some((name, arg, span)) = contextual_conversion(e) {
+            let source = self.expr(arg, env)?;
+            if conversion_exists(&source, expected) {
+                return Ok(expected.clone());
+            }
+            if name == "from" {
+                return Err(AliasError {
+                    msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
+                    span,
+                });
+            }
+            return self.check_inferred_expected(arg, env, expected);
+        }
         if let Some(r) = literal_slot_unify(expected, e) {
             return r;
         }
@@ -144,7 +160,7 @@ impl Checker {
 
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
         match e {
-            Expr::Int(..) => Ok(Ty::Int(IntW::W32)),
+            Expr::Int(value, ..) => Ok(default_positive_int_ty(*value)),
             Expr::Float(..) => Ok(Ty::Float(FloatW::F64)),
             Expr::Bool(..) => Ok(Ty::Bool),
             Expr::Unit(_) => Ok(Ty::Unit),
@@ -164,7 +180,33 @@ impl Checker {
                         span: *span,
                     })
             }
+            Expr::This(span) => {
+                Scope::get(env, "this")
+                    .map(|info| info.ty)
+                    .ok_or_else(|| AliasError {
+                        msg: "this 只能出现在 func 体内".into(),
+                        span: *span,
+                    })
+            }
+            Expr::Cast { target, expr, span } => {
+                let target_ty = check_type_slot(target, *span, &self.structs)?;
+                let source_ty = self.expr(expr, env)?;
+                if conversion_exists(&source_ty, &target_ty) {
+                    Ok(target_ty)
+                } else {
+                    Err(AliasError {
+                        msg: format!("不存在 {} → {} 转换", source_ty.name(), target_ty.name()),
+                        span: *span,
+                    })
+                }
+            }
             Expr::Neg { expr, .. } => {
+                if let Expr::Int(magnitude, span) = expr.as_ref() {
+                    return default_negative_int_ty(*magnitude).ok_or_else(|| AliasError {
+                        msg: "负整数字面量超出 i64 表示范围".into(),
+                        span: *span,
+                    });
+                }
                 let t = self.expr(expr, env)?;
                 if t.is_unknown() {
                     return Ok(Ty::Unknown);
@@ -357,12 +399,13 @@ impl Checker {
                 (Pattern::Wildcard { .. }, _) => None,
                 (Pattern::Binding { name, .. }, _) => Some((name.clone(), st.clone())),
                 (Pattern::Int { value, span: pspan }, Ty::Int(_) | Ty::UInt(_)) => {
-                    let lit = Expr::Int(*value, *pspan);
-                    match literal_slot_unify(&st, &lit) {
-                        Some(r) => {
-                            r?;
-                        }
-                        None => unreachable!(),
+                    let negative = *value < 0;
+                    let magnitude = value.unsigned_abs() as u64;
+                    if !int_literal_fits(&st, magnitude, negative) {
+                        return Err(AliasError {
+                            msg: format!("字面量 {value} 超出 {} 的表示范围", st.name()),
+                            span: *pspan,
+                        });
                     }
                     if !seen_int.insert(*value) {
                         return Err(AliasError {
@@ -666,21 +709,18 @@ impl Checker {
                 self.expr(&arg.value, env)?;
                 return Ok(Ty::Unit);
             }
-            if let Some(target) = conv_builtin_ty(name) {
+            if name == "from" || name == "try_from" {
                 let [arg] = args else {
                     return Err(AliasError {
                         msg: format!("{name} 恰好接受 1 个参数"),
                         span,
                     });
                 };
-                let t = self.expr(&arg.value, env)?;
-                if !t.is_unknown() && !t.is_numeric() {
-                    return Err(AliasError {
-                        msg: format!("{name} 需要数值类型, 实际 {}", t.name()),
-                        span: arg.value.span(),
-                    });
-                }
-                return Ok(target);
+                self.expr(&arg.value, env)?;
+                return Err(AliasError {
+                    msg: format!("{name} 需要目标类型上下文"),
+                    span,
+                });
             }
             if name == "typeof" {
                 let [arg] = args else {
@@ -987,18 +1027,22 @@ fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
     }
 }
 
-fn conv_builtin_ty(name: &str) -> Option<Ty> {
-    Some(match name {
-        "to_i8" => Ty::Int(IntW::W8),
-        "to_i16" => Ty::Int(IntW::W16),
-        "to_i32" => Ty::Int(IntW::W32),
-        "to_i64" => Ty::Int(IntW::W64),
-        "to_u8" => Ty::UInt(UIntW::U8),
-        "to_u16" => Ty::UInt(UIntW::U16),
-        "to_u32" => Ty::UInt(UIntW::U32),
-        "to_u64" => Ty::UInt(UIntW::U64),
-        "to_f32" => Ty::Float(FloatW::F32),
-        "to_f64" => Ty::Float(FloatW::F64),
-        _ => return None,
-    })
+fn conversion_exists(source: &Ty, target: &Ty) -> bool {
+    source.is_numeric() && target.is_numeric()
+}
+
+fn contextual_conversion(e: &Expr) -> Option<(&str, &Expr, Span)> {
+    let Expr::Call { callee, args, span } = e else {
+        return None;
+    };
+    let Expr::Ident(name, _) = callee.as_ref() else {
+        return None;
+    };
+    if name != "from" && name != "try_from" {
+        return None;
+    }
+    let [arg] = args.as_slice() else {
+        return None;
+    };
+    Some((name, &arg.value, *span))
 }

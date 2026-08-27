@@ -144,6 +144,8 @@ impl<'m, M: Module> Compiler<'m, M> {
             env: Some(env_v),
             caps: caps_map,
             caps_vty,
+            this_fid: Some(fid),
+            this_vty: Some(VTy::Func(param_vtys.clone(), Box::new(ret_vty.clone()))),
             terminated: false,
             loop_targets: Vec::new(),
             init_ctx: false,
@@ -224,6 +226,8 @@ impl<'m, M: Module> Compiler<'m, M> {
             env: None,
             caps: HashMap::new(),
             caps_vty: HashMap::new(),
+            this_fid: None,
+            this_vty: None,
             terminated: false,
             loop_targets: Vec::new(),
             init_ctx: false,
@@ -542,9 +546,11 @@ pub(crate) fn scan_expr<M: Module>(
 ) {
     match e {
         Expr::Ident(name, _) => ensure_scanned_name(name, locals, caps, seen, frame),
-        Expr::Neg { expr, .. } | Expr::Not { expr, .. } | Expr::BitNot { expr, .. } => {
-            scan_expr(c, expr, locals, caps, seen, frame)
-        }
+        Expr::This(_) => {}
+        Expr::Neg { expr, .. }
+        | Expr::Not { expr, .. }
+        | Expr::BitNot { expr, .. }
+        | Expr::Cast { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
         Expr::Binary { lhs, rhs, .. } => {
             scan_expr(c, lhs, locals, caps, seen, frame);
             scan_expr(c, rhs, locals, caps, seen, frame);

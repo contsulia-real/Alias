@@ -92,7 +92,10 @@ impl Parser {
                         return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));
                     }
                     let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
-                        if matches!(n.as_str(), "println" | "print" | "increase" | "decrease"));
+                    if matches!(
+                        n.as_str(),
+                        "println" | "print" | "increase" | "decrease" | "from" | "try_from"
+                    ));
                     if callee_is_bare_builtin {
                         let arg = self.parse_unary()?;
                         let a_span = arg.span();
@@ -184,6 +187,7 @@ impl Parser {
             self.peek_at(n),
             Some(Tok::Ident(_))
                 | Some(Tok::SelfKw)
+                | Some(Tok::ThisKw)
                 | Some(Tok::Int(_))
                 | Some(Tok::Float(_))
                 | Some(Tok::Bool(_))
@@ -587,6 +591,16 @@ impl Parser {
             Some(Tok::LParen) => {
                 if self.looks_like_func_lit() {
                     self.parse_func_lit()
+                } else if self.looks_like_cast() {
+                    self.bump();
+                    let target = self.parse_type()?;
+                    self.expect(&Tok::RParen)?;
+                    let expr = self.parse_unary()?;
+                    Ok(Expr::Cast {
+                        target,
+                        expr: Box::new(expr),
+                        span,
+                    })
                 } else {
                     self.bump();
                     if self.peek() == Some(&Tok::RParen) {
@@ -605,6 +619,10 @@ impl Parser {
             Some(Tok::SelfKw) => {
                 self.bump();
                 Ok(Expr::Ident("self".into(), span))
+            }
+            Some(Tok::ThisKw) => {
+                self.bump();
+                Ok(Expr::This(span))
             }
             Some(Tok::Match) => self.parse_match_expr(),
             Some(Tok::LBracket) => self.parse_array_lit(),
@@ -730,15 +748,15 @@ impl Parser {
                     unreachable!()
                 };
                 self.bump();
-                let value = v.checked_neg().ok_or_else(|| AliasError {
-                    msg: "负整数字面量超出 i64 表示范围".into(),
-                    span,
-                })?;
+                let value = -(v as i128);
                 Ok(Pattern::Int { value, span })
             }
             Some(Tok::Int(value)) => {
                 self.bump();
-                Ok(Pattern::Int { value, span })
+                Ok(Pattern::Int {
+                    value: value as i128,
+                    span,
+                })
             }
             Some(Tok::Bool(value)) => {
                 self.bump();
@@ -781,6 +799,30 @@ impl Parser {
             i += 1;
         }
         false
+    }
+
+    /// 显式转换仅接受 `(NamedType) unary`。泛型类型当前没有转换规则，
+    /// 因此不为 `(array<i32>) value` 预留无语义的语法入口。
+    fn looks_like_cast(&self) -> bool {
+        matches!(self.peek_at(0), Some(Tok::LParen))
+            && matches!(self.peek_at(1), Some(Tok::Ident(_)) | Some(Tok::Func))
+            && matches!(self.peek_at(2), Some(Tok::RParen))
+            && matches!(
+                self.peek_at(3),
+                Some(Tok::Ident(_))
+                    | Some(Tok::SelfKw)
+                    | Some(Tok::ThisKw)
+                    | Some(Tok::Int(_))
+                    | Some(Tok::Float(_))
+                    | Some(Tok::Bool(_))
+                    | Some(Tok::Str(_))
+                    | Some(Tok::LParen)
+                    | Some(Tok::LBracket)
+                    | Some(Tok::Match)
+                    | Some(Tok::Minus)
+                    | Some(Tok::Bang)
+                    | Some(Tok::Tilde)
+            )
     }
 
     fn parse_func_lit(&mut self) -> AliasResult<Expr> {

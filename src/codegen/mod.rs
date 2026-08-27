@@ -45,6 +45,8 @@ pub(crate) struct Frame {
     pub(crate) env: Option<Variable>,
     pub(crate) caps: HashMap<String, usize>,
     pub(crate) caps_vty: HashMap<String, VTy>,
+    pub(crate) this_fid: Option<FuncId>,
+    pub(crate) this_vty: Option<VTy>,
     pub(crate) terminated: bool,
     /// 当前函数内由内向外的循环目标：(break 目标, continue 目标)。
     /// 创建新函数帧时永远从空栈开始，禁止跨函数 break/continue。

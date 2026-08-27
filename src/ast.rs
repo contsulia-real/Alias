@@ -161,7 +161,7 @@ pub enum Pattern {
         span: Span,
     },
     Int {
-        value: i64,
+        value: i128,
         span: Span,
     },
     Bool {
@@ -215,11 +215,18 @@ pub struct CallArg {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Int(i64, Span),
+    Int(u64, Span),
     Float(f64, Span),
     Bool(bool, Span),
     Str(Vec<StrPartAst>, Span),
     Ident(String, Span),
+    This(Span),
+
+    Cast {
+        target: TypeExpr,
+        expr: Box<Expr>,
+        span: Span,
+    },
 
     Binary {
         op: BinOp,
@@ -343,8 +350,10 @@ impl Expr {
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Ident(_, s)
+            | Expr::This(s)
             | Expr::Unit(s) => *s,
             Expr::Binary { span, .. }
+            | Expr::Cast { span, .. }
             | Expr::Neg { span, .. }
             | Expr::Not { span, .. }
             | Expr::BitNot { span, .. }

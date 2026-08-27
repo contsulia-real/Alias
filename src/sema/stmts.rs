@@ -96,6 +96,17 @@ impl Checker {
         }
 
         let ret_ty = expected.cloned().unwrap_or(Ty::Unknown);
+        Scope::insert(
+            &local,
+            "this".into(),
+            VarInfo {
+                ty: Ty::Func {
+                    params: param_tys.clone(),
+                    ret: Box::new(ret_ty.clone()),
+                },
+                mutable: false,
+            },
+        );
         self.fn_ret.push(ret_ty.clone());
         let outer_loop_depth = self.loop_depth;
         self.loop_depth = 0;

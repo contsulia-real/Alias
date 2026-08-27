@@ -47,7 +47,7 @@ func i32 main = () -> {
     val i8 a = 10
     val i8 b = 2
     val i8 c = a.plus(b).minus(b).times(b).div(b)
-    return to_i32(c)
+    return (i32) c
 }
 "#;
     assert_eq!(run("operator-width.as", src).unwrap(), 10);
@@ -102,9 +102,9 @@ func i32 main = () -> {
 
     var f32 f32v = 1.5
     increase f32v
-    if f32v != to_f32(2.5) { return 12 }
+    if f32v != (f32) 2.5 { return 12 }
     decrease f32v
-    if f32v != to_f32(1.5) { return 13 }
+    if f32v != (f32) 1.5 { return 13 }
 
     var f64 f64v = 3.25
     increase f64v

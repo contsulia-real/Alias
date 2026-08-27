@@ -96,13 +96,12 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: "错误 @ 22:43 — 无法开始一个表达式: Some(Gt)\n".as_bytes(),
             exit: 1,
         },
-        // forward-spec 文档: 字面量 Pattern 已实现，语料继续前进至尚未
-        // 落地的 `this` 当前函数自引用语义，由 sema 在递归分支拒绝。
+        // `this` 绑定当前函数自身，递归不依赖声明名；import 仍只通知。
         Baseline {
             file: "recursion.as",
-            stdout: b"",
-            stderr: "错误 @ 15:13 — return 需要 i32: 未定义的绑定 'this'\n".as_bytes(),
-            exit: 1,
+            stdout: b"5! = 120",
+            stderr: "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
+            exit: 0,
         },
     ]
 }

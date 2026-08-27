@@ -625,7 +625,7 @@ pub(crate) fn emit_expr<M: Module>(
     e: &Expr,
 ) -> AliasResult<Value> {
     match e {
-        Expr::Int(n, _) => Ok(bcx.ins().iconst(types::I64, *n)),
+        Expr::Int(n, _) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
         Expr::Float(v, _) => Ok(bcx.ins().f64const(*v)),
         Expr::Bool(b, _) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
         Expr::Unit(_) => Ok(bcx.ins().iconst(types::I64, 0)),
@@ -637,6 +637,24 @@ pub(crate) fn emit_expr<M: Module>(
             }
             None => Err(native_err(*span, format!("未定义的绑定 '{name}'"))),
         },
+        Expr::This(span) => {
+            let fid = frame
+                .this_fid
+                .ok_or_else(|| native_err(*span, "this 只能出现在 func 体内"))?;
+            let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
+            let code = bcx.ins().func_addr(c.ptr_ty, fref);
+            let env = frame
+                .env
+                .map(|var| bcx.use_var(var))
+                .unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
+            c.call_rt(bcx, "alias.closure.new", &[code, env])
+        }
+        Expr::Cast { target, expr, span } => {
+            let dst = decl_vty(target, &c.struct_layouts);
+            let src = static_vty(c, frame, expr);
+            let value = emit_expr(c, bcx, frame, expr)?;
+            emit_convert(c, bcx, frame, *span, value, &src, &dst)
+        }
         Expr::Neg { expr, span } => {
             let v = emit_expr(c, bcx, frame, expr)?;
             let t = static_vty(c, frame, expr);
@@ -932,7 +950,7 @@ fn emit_pattern_test<M: Module>(
     Ok(match pattern {
         Pattern::Wildcard { .. } | Pattern::Binding { .. } => bcx.ins().iconst(types::I64, 1),
         Pattern::Int { value, .. } => {
-            let rhs = bcx.ins().iconst(types::I64, *value);
+            let rhs = bcx.ins().iconst(types::I64, *value as i64);
             bcx.ins().icmp(IntCC::Equal, subj, rhs)
         }
         Pattern::Bool { value, .. } => bcx.ins().icmp_imm_s(IntCC::Equal, subj, *value as i64),
@@ -960,6 +978,29 @@ pub(crate) fn emit_expr_expected<M: Module>(
     expected: &VTy,
 ) -> AliasResult<Value> {
     match (e, expected) {
+        (Expr::Int(value, _), VTy::I(_) | VTy::U(_)) => {
+            Ok(bcx.ins().iconst(types::I64, *value as i64))
+        }
+        (Expr::Neg { expr, .. }, VTy::I(_)) if matches!(expr.as_ref(), Expr::Int(..)) => {
+            let Expr::Int(magnitude, _) = expr.as_ref() else {
+                unreachable!()
+            };
+            Ok(bcx
+                .ins()
+                .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64))
+        }
+        (Expr::Call { callee, args, span }, _) if is_contextual_conversion(callee) => {
+            let [arg] = args.as_slice() else {
+                invariant_violation("from/try_from 元数 (sema 已校验)")
+            };
+            let source = static_vty(c, frame, &arg.value);
+            if source.is_numeric() && expected.is_numeric() {
+                let value = emit_expr(c, bcx, frame, &arg.value)?;
+                emit_convert(c, bcx, frame, *span, value, &source, expected)
+            } else {
+                emit_expr(c, bcx, frame, &arg.value)
+            }
+        }
         (
             Expr::Ternary {
                 cond,
@@ -1003,6 +1044,10 @@ pub(crate) fn emit_expr_expected<M: Module>(
         }
         _ => emit_expr(c, bcx, frame, e),
     }
+}
+
+fn is_contextual_conversion(callee: &Expr) -> bool {
+    matches!(callee, Expr::Ident(name, _) if name == "from" || name == "try_from")
 }
 
 fn binary_vty_flows_expected(op: BinOp, expected: &VTy) -> bool {
@@ -1135,7 +1180,7 @@ fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => bcx.ins().ishl(li, ri),
+                    Shl => emit_checked_shl(c, bcx, frame, li, ri, true, w.bits(), span)?,
                     Shr => bcx.ins().sshr(li, ri),
                     _ => unreachable!(),
                 };
@@ -1146,7 +1191,7 @@ fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => bcx.ins().ishl(li, ri),
+                    Shl => emit_checked_shl(c, bcx, frame, li, ri, false, w.bits(), span)?,
                     Shr => bcx.ins().ushr(li, ri),
                     _ => unreachable!(),
                 };
@@ -1209,6 +1254,31 @@ fn emit_checked_int_binary<M: Module>(
         (false, BinOp::Mul) => bcx.ins().umul_overflow(l, r),
         _ => invariant_violation("checked 整数算术仅用于加减乘"),
     };
+    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+    Ok(result)
+}
+
+fn emit_checked_shl<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    value: Value,
+    shift: Value,
+    signed: bool,
+    bits: u32,
+    span: Span,
+) -> AliasResult<Value> {
+    let count_bad = bcx
+        .ins()
+        .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, shift, bits as i64);
+    let result = bcx.ins().ishl(value, shift);
+    let restored = if signed {
+        bcx.ins().sshr(result, shift)
+    } else {
+        bcx.ins().ushr(result, shift)
+    };
+    let lost = bcx.ins().icmp(IntCC::NotEqual, restored, value);
+    let overflow = bcx.ins().bor(count_bad, lost);
     emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
     Ok(result)
 }
@@ -1457,14 +1527,6 @@ pub(crate) fn emit_call<M: Module>(
         if name == "println" || name == "print" {
             return emit_print(c, bcx, frame, name, args, span);
         }
-        if let Some(target) = conv_target_vty(name) {
-            let [arg] = args else {
-                invariant_violation("转换内建元数 (sema 已校验)")
-            };
-            let v = emit_expr(c, bcx, frame, &arg.value)?;
-            let src = static_vty(c, frame, &arg.value);
-            return emit_convert(c, bcx, frame, span, v, &src, &target);
-        }
         if name == "typeof" {
             let [arg] = args else {
                 invariant_violation("typeof 元数 (sema 已校验)")
@@ -1481,6 +1543,13 @@ pub(crate) fn emit_call<M: Module>(
             .map(|p| decl_vty(&p.ty, &c.struct_layouts))
             .collect();
         let ret_vty = infer_ret_vty(c, frame, params, body);
+        return call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args);
+    }
+    if matches!(callee, Expr::This(_)) {
+        let clo = emit_expr(c, bcx, frame, callee)?;
+        let Some(VTy::Func(param_vtys, ret_vty)) = frame.this_vty.clone() else {
+            return Err(native_err(span, "this 只能出现在 func 体内"));
+        };
         return call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args);
     }
     let clo = match callee {
@@ -1553,22 +1622,6 @@ fn jump_zero_return(bcx: &mut FunctionBuilder, frame: &Frame) {
         bcx.ins().iconst(ty, 0)
     };
     bcx.ins().jump(rb, &[BlockArg::Value(zero)]);
-}
-
-pub(crate) fn conv_target_vty(name: &str) -> Option<VTy> {
-    Some(match name {
-        "to_i8" => VTy::I(IntW::W8),
-        "to_i16" => VTy::I(IntW::W16),
-        "to_i32" => VTy::I(IntW::W32),
-        "to_i64" => VTy::I(IntW::W64),
-        "to_u8" => VTy::U(UIntW::U8),
-        "to_u16" => VTy::U(UIntW::U16),
-        "to_u32" => VTy::U(UIntW::U32),
-        "to_u64" => VTy::U(UIntW::U64),
-        "to_f32" => VTy::F(FloatW::F32),
-        "to_f64" => VTy::F(FloatW::F64),
-        _ => return None,
-    })
 }
 
 fn emit_convert<M: Module>(
@@ -1656,6 +1709,44 @@ fn emit_convert_to_int<M: Module>(
             widen_unsigned(bcx, red, wt)
         })
     } else {
+        let no = bcx.ins().iconst(types::I8, 0);
+        let bad = match src {
+            VTy::I(source_w) if signed => {
+                if bits >= source_w.bits() {
+                    no
+                } else {
+                    let min = -(1i128 << (bits - 1)) as i64;
+                    let max = ((1u128 << (bits - 1)) - 1) as i64;
+                    let below = bcx.ins().icmp_imm_s(IntCC::SignedLessThan, v, min);
+                    let above = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, v, max);
+                    bcx.ins().bor(below, above)
+                }
+            }
+            VTy::I(_) => {
+                let negative = bcx.ins().icmp_imm_s(IntCC::SignedLessThan, v, 0);
+                if bits == 64 {
+                    negative
+                } else {
+                    let max = ((1u128 << bits) - 1) as i64;
+                    let above = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, v, max);
+                    bcx.ins().bor(negative, above)
+                }
+            }
+            VTy::U(_) if signed => {
+                let max = ((1u128 << (bits - 1)) - 1) as u64 as i64;
+                bcx.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, v, max)
+            }
+            VTy::U(source_w) => {
+                if bits >= source_w.bits() {
+                    no
+                } else {
+                    let max = ((1u128 << bits) - 1) as u64 as i64;
+                    bcx.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, v, max)
+                }
+            }
+            _ => invariant_violation("整数转换源为整数 (sema 已校验)"),
+        };
+        emit_abort_branch(c, bcx, frame, bad, "alias.abort_conv", span)?;
         let red = narrow(bcx, v, bits);
         Ok(if signed {
             widen_signed(bcx, red, wt)
