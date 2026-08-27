@@ -175,8 +175,8 @@ impl Checker {
                 value,
                 span,
             } => {
-                // 先求 RHS 再解析目标，保留既有求值/诊断顺序。
-                let _ = self.expr(value, env)?;
+                // sema 先解析目标的静态类型，再用它检查 RHS；这只决定类型上下文，
+                // 不改变 codegen 中 RHS 的运行时求值顺序。
                 let Some(info) = Scope::get(env, target) else {
                     return Err(AliasError {
                         msg: format!("赋值目标 '{target}' 未定义"),
@@ -202,9 +202,10 @@ impl Checker {
                 value,
                 span,
             } => {
-                let _ = self.expr(value, env)?;
+                // 字段类型是 RHS 的目标上下文，必须在检查 from/try_from 前解析。
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
+                    self.expr(value, env)?;
                     return Ok(None);
                 }
                 let Ty::Struct(s) = rt else {

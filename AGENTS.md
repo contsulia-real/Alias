@@ -84,7 +84,7 @@ D:\Project\Alias\
 - **数组语义**：语言值 = 共享 wrapper {raw_header,version}；raw header 为 {data_ptr,len,cap}，元素使用 8 字节载荷槽。别名共享 wrapper；push/pop 推进 version 并使旧 iterator fail-fast。下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop/iterator 不可定义。
 - **整数溢出语义**：整数 `+/-/*`、左移 `<<`、一元负号以及 `increase/decrease` 均按声明宽度检查；结果超出范围时，编译产物经表达式 Span 输出「整数溢出」并 `ExitProcess(1)`，不得回绕。`& | ^ ~ >>` 维持固定位宽位模式语义。
 - **自增减语义**：`increase name` / `decrease name` 只允许作为独立语句，目标必须是可变数值绑定；整数执行 checked ±1，f32/f64 按同型 ±1.0。它们不产生可赋值、可返回或可传参的值。
-- **转换语义**：显式目标写 `(T) value`；目标由声明、return、参数、字符串插值等上下文给出时写 `from(value)`；`try_from(value)` 仅在不存在转换关系时静默保留源类型，随后由外层类型槽照常检查。转换关系覆盖数值族互转和所有可显示值到 string；数值越界始终运行时报「转换越界」，不会退回源类型。旧 `to_*` 已物理退役。
+- **转换语义**：显式目标写 `(T) value`；目标由声明、普通/字段赋值、return、参数、字符串插值等上下文给出时写 `from(value)`；`try_from(value)` 仅在不存在转换关系时静默保留源类型，随后由外层类型槽照常检查。转换关系覆盖数值族互转和所有可显示值到 string；数值越界始终运行时报「转换越界」，不会退回源类型。旧 `to_*` 已物理退役。
 - **静态类型查询**：`typeof(expr)` / `typeof expr` 返回表达式静态类型名的 string。实参必须通过 sema，但运行时不求值，因此不得触发副作用或运行时中止。
 - **当前函数自引用**：`this` 是每个 func 体内的不可变当前函数绑定，签名与当前函数一致；改名不影响递归，嵌套 func 各自重新绑定。func 体外使用直接拒绝。
 - **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。

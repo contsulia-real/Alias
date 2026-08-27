@@ -39,6 +39,24 @@ func i32 main = () -> {
 }
 
 #[test]
+fn assignments_propagate_their_target_type_into_conversions() {
+    let src = r#"
+struct aaa {
+    var i32 x = 1
+}
+func i32 main = () -> {
+    val aaa ass = aaa()
+    val u32 u = 7
+    ass.x = from u
+    var i32 direct = 0
+    direct = try_from u
+    return ass.x * 10 + direct
+}
+"#;
+    assert_eq!(run("assignment-target-conversion.as", src).unwrap(), 77);
+}
+
+#[test]
 fn displayable_values_convert_to_string_in_slots_and_interpolation() {
     let src = r#"
 func i32 main = () -> {

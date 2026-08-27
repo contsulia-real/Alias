@@ -213,3 +213,4 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 | M62 | `this` 成为 func 体内当前函数的不可变自引用，携带完整函数签名与当前 closure env；嵌套 func 各自重绑定，func 外拒绝。`recursion.as` 从历史拒绝基线升级为原生成功黄金记录 | demo 中已定稿但实现长期缺失的当前函数绑定语义 | 改名不掉链递归、嵌套递归、体外拒绝与 demos 机械黄金基线 |
 | M63 | string 插值孔向 `from/try_from` 提供 string 目标；所有已有 display 规则的具体类型均可显式或上下文转换到 string。`typeof(expr)` / `typeof expr` 收口为不求值实参的静态类型查询，补齐无括号语法并删除后端的误求值 | 用户实测 `${from u}`、`(string) u` 被拒，并指出 typeof 能力缺失 | string 槽/显式 cast/两种插值形式、bool/array display 转换；typeof 两种文法、泛型名、插值、除零不执行、元数与未定义名负向法律 |
 | M64 | unit 从可构造、存储、传递和 display 的伪值类型收紧为函数无返回值标记；删除 `Expr::Unit`、`()` 值语法、unit 值类型槽和 `alias.display.unit`，unit 用户函数改为真正零返回值 ABI | 用户裁决：unit 表示“函数不返回任何值”，不是一种值类型 | unit 函数自然落空/裸 return 原生正向法律；类型槽与全部值位置负向矩阵；黄金记录删除 unit display；用户函数直接/间接调用验证零返回槽 |
+| M65 | 普通赋值与字段赋值不再对 RHS 做一次无目标预检查；sema 先解析绑定/字段的静态类型，再以该类型检查整个 RHS，使 `x = from u` 与 `obj.x = from u` 获得目标上下文 | 字段赋值已知声明类型却提前报「from 需要目标类型上下文」属于目标传播断链 | 普通赋值和字段赋值的 `from/try_from` 原生正向法律；既有赋值、字段可变性与完整测试矩阵保持 |
