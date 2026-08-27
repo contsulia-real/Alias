@@ -1,7 +1,14 @@
-# 迁移记录 — 解释器 → 编译器
+# Alias 迁移记录（历史账本）
 
-每条记录 = 一个语义含义发生变化的测试/行为。格式: 变化 | 裁决依据 | 为何安全。
-裁决编号见 `.omo/plans/compiler-migration.md` 冻结决策表。
+**当前状态：** 历史演进记录，非当前语言规范  
+**最近同步：** 2026-08-28  
+**当前规范：** `docs/spec-notes.md`  
+**当前工程知识库：** `AGENTS.md`  
+**最新已记录里程碑：** M69 — `CheckedProgram` typed HIR + `Ty → VTy` 单次投影
+
+每条记录 = 一个语义、架构或可观察行为在当时发生的变化；格式通常为：变化 | 裁决/依据 | 为何安全。
+
+> 本文件按时间保存历史事实。早期条目中出现的解释器、JIT、双后端、`public`、wrapping、旧 Pattern、旧 Phase 编号、旧文件路径或旧测试数量，均只表示**当时状态**，不得被视为当前能力，也不要求为了“同步”篡改历史记录。若历史条目与 `docs/spec-notes.md` 冲突，以当前规范为准。旧 `.omo/plans/compiler-migration.md` 已不在当前仓库中，不再作为当前权威来源。
 
 ## Phase 1 — Sema 层 (2026-08-24)
 
@@ -63,6 +70,7 @@ sema 通过的程序其运行时行为与 Phase 0 黄金记录完全一致 (gold
 
 **终态验证**: `grep -ri "interp\|Flow" src/` 零命中; `cargo build` 零警告; 全套件 42 测试绿
 (golden 2 + native_parity 3 + sema_laws 29 + smoke 8); count_to_ten 默认编译执行打印 1..10+通知退 0。
+
 ## Phase 5 — AOT 独立可执行文件 (2026-08-25)
 
 | # | 变更 | 依据 | 安全性 |
