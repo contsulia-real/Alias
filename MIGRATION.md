@@ -93,7 +93,7 @@ struct_laws 22 全绿; demos/structs.as JIT 与 AOT 产物三元组逐字节一�
 | M27 | **文法使能**: match 臂间分隔符逗号可选 (`[,]?` — 换行亦可分隔, 尾逗号容忍); 调用实参尾逗号容忍 (file_wc.as 构造实参跨行书写带尾逗号, 不使能则语料卡在 match 臂体内 47:12 无法「越过 match」) | 用户批准的 match 文法参照 (file_wc.as 34-52 为冻结形状) | 纯增量接受 — 此前这些形状一律解析报错, 无既有语料依赖; golden/sema_laws/smoke/struct_laws 全部零改动通过 |
 | M28 | **Q③ 终结性扩展**: 全 never 臂的 match 表达式语句等价 return 收尾 (每臂 return 即无落空路径) — file_wc.as count 函数体以 match 收尾是该设计的必然形状, 不扩展则规范 demo 本身被 Q③ 拒绝 | 用户批准设计「branch ending in return contributes never flow」+ Q③ | 只放宽此前误拒的空间: 旧规则下此类程序报「必须以 return 语句收尾」, 新规则接受; 锁定于 `result_laws::struct_payload_arms_and_never_tail` |
 | M29 | **funclit 返回类型取声明侧词汇**: expected 已知时函数类型的 ret 用声明类型而非体推断值 — 否则 `ok(1)` 的单侧推断 (E=Unknown) 经函数签名外泄, 使调用点的 ? 同型检查被级联抑制 (other() 返回 result<i32,bool> 被吞成 Unknown) | D3 推断类型永不外泄 + M26 类型流完整性 | 修复 M26 引入的检查缺口; 对 Phase 2b 前类型集无观察差异 (无部分类型时推断==声明); 锁定于 `result_laws::propagate_error_type_mismatch_rejected` |
-| M30 | **基线重探** (探测后冻结): file_wc.as 语料前进至 import 名解析 — stderr 由「错误 @ 34:21 — 无法开始一个表达式: Some(LBrace)」变为「错误 @ 34:10 — 未定义的绑定 'open'」(match/result/?/转义全部可解析, 标准库 Phase 5 前 open 未定义); recursion.as 前进至 P7 字面量模式 match — stderr 由「错误 @ 13:40 — 顶层只允许…」变为「错误 @ 14:4 — match 臂构造器必须是 ok 或 err, 实际 Some(Int(0))」(Phase 2b 仅 result 模式, P7 字面量/通配符模式未立案); 新增 demos/result_match.as 黄金基线 (stdout 15 行含 <ok>/<err>/转义字节, exit 9), JIT 与 AOT 产物三元组逐字节一致 (aot_parity 语料机械入册 structs.as + result_match.as) | M23/M16 测试政策「探测后冻结」 | forward-spec 文档非行为契约 (spec-notes §五); 其余 demo 基线零改动通过 |
+| M30 | **基线重探** (探测后冻结): file_wc.as 语料前进至 import 名解析 — stderr 由「错误 @ 34:21 — 无法开始一个表达式: Some(LBrace)」变为「错误 @ 34:10 — 未定义的绑定 'open'」(match/result/?/转义全部可解析, 标准库 Phase 5 前 open 未定义); recursion.as 前进至 P7 字面量模式 match — stderr 由「错误 @ 13:40 — 顶层只允许…」变为「错误 @ 14:4 — match 臂构造器必须是 ok 或 err, 实际 Some(Int(0))」(Phase 2b 仅 result 模式, P7 字面量/通配符模式未立案); 新增 demos/result_match.as 黄金基线 (stdout 15 行含 <ok>/<err>/转义字节, exit 9), JIT 与 AOT 产物三元组逐字节一致 (aot_parity 黄金基线 + native_pipeline 语料) | M23/M16 测试政策「探测后冻结」 | forward-spec 文档非行为契约 (spec-notes §五); 其余 demo 基线零改动通过 |
 
 **终态验证**: golden 2 + aot_parity 5 + native_parity 3 + sema_laws 29 + smoke 8 +
 struct_laws 22 + result_laws 22 全绿; demos/result_match.as 双形态逐字节一致;
@@ -177,3 +177,13 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 - 赋值/字段赋值补齐静态类型一致性；恢复数组和方法领域诊断的既有精确文案/span。
 - CLI 缺文件错误改由 Alias 生成确定性中文文本，避免宿主 Windows UI 语言改变黄金字节。
 - 新增 `tests/control_flow_operator_laws.rs`，覆盖上述控制流、iterator 与运算函数契约。
+
+## Pattern / 整数运算 / pub 收口（2026-08-27）
+
+- `Pattern` 从 result-only foundation 扩展为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`；`match` 主语不再限 result，统一执行类型适配、重复覆盖、穷尽性与不可达检查。
+- `_` 与普通标识符都是 catch-all；普通标识符以不可变 `val` 绑定整个主语。bool 可由 `true + false` 穷尽，result 可由 `ok + err` 穷尽，整数/string 等开放域必须有 catch-all。
+- 新增 `%` 与 `& | ^ ~ << >>`；`%` 仅整数，位运算/移位要求同型整数；有符号/无符号 `>>` 分别为算术/逻辑右移；复合赋值仍未加入。
+- 整数目标槽传播覆盖新运算表达式，避免窄整数/无符号声明中的字面量退回 `i32`；变量间仍禁止隐式数值混算。
+- `public` 关键字物理退役；唯一公开可见性关键字为顶层 `pub`。不保留兼容 token、别名或迁移诊断；历史记录中旧 `public` 文法描述保留为当时事实。
+- 原 result-only 的两条 match 法律更新为一般 Pattern 法律；demos/tests 当前语料迁移到 `pub`。
+- 扩展 `tests/pattern_laws.rs`，新增 `tests/operator_pub_laws.rs`。本批验证仍需显式手动运行 `cargo test --all-targets`，不使用 CI。
