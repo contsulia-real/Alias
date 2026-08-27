@@ -4,6 +4,7 @@
 //! ([`Checker::method_def`])、Q④ main 校验 ([`Checker::validate_main`])。
 //! 单一命名空间的重名拦截在此收口; 签名先入表后查体 — 方法可递归。
 
+use super::exprs::ExprCheckError;
 use super::types::{check_return_type_slot, check_value_type_slot, IntW, Ty};
 use super::{Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
 use crate::ast::{Binding, Expr, Param, StructDef};
@@ -35,19 +36,19 @@ impl Checker {
             }
             let ty = check_value_type_slot(&f.ty, f.span, &self.structs)?;
             if let Some(d) = &f.default {
-                self.expr_expected(d, env, &ty).map_err(|error| {
-                    let mismatch_prefix = format!("需要 {}, 实际 ", ty.name());
-                    let msg = match error.msg.strip_prefix(&mismatch_prefix) {
-                        Some(actual) => {
-                            format!("字段 '{}' 声明类型为 {}, 实际 {actual}", f.name, ty.name())
-                        }
-                        None => error.msg,
-                    };
-                    AliasError {
-                        msg,
-                        span: error.span,
-                    }
-                })?;
+                self.expr_expected(d, env, &ty)
+                    .map_err(|error| match error {
+                        ExprCheckError::Mismatch { actual, span, .. } => AliasError {
+                            msg: format!(
+                                "字段 '{}' 声明类型为 {}, 实际 {}",
+                                f.name,
+                                ty.name(),
+                                actual.name()
+                            ),
+                            span,
+                        },
+                        other => other.into_alias(),
+                    })?;
             }
             fields.push(FieldInfo {
                 name: f.name.clone(),

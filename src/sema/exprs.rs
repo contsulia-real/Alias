@@ -4,15 +4,66 @@ use super::types::{
     check_value_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
     types_match, FloatW, IntW, Ty,
 };
-use super::{literal_slot_unify, op_mismatch, Checker, Env, Scope, VarInfo};
+use super::{op_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, Stmt, StrPartAst};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashSet;
 
+pub(super) type ExprCheckResult<T> = Result<T, ExprCheckError>;
+
+pub(super) enum ExprCheckError {
+    Mismatch {
+        expected: Ty,
+        actual: Ty,
+        span: Span,
+    },
+    LiteralOutOfRange {
+        literal: String,
+        expected: Ty,
+        span: Span,
+    },
+    Diagnostic(AliasError),
+}
+
+impl ExprCheckError {
+    pub(super) fn into_alias(self) -> AliasError {
+        match self {
+            Self::Mismatch {
+                expected,
+                actual,
+                span,
+            } => AliasError {
+                msg: format!("需要 {}, 实际 {}", expected.name(), actual.name()),
+                span,
+            },
+            Self::LiteralOutOfRange {
+                literal,
+                expected,
+                span,
+            } => AliasError {
+                msg: format!("字面量 {literal} 超出 {} 的表示范围", expected.name()),
+                span,
+            },
+            Self::Diagnostic(error) => error,
+        }
+    }
+}
+
+impl From<AliasError> for ExprCheckError {
+    fn from(error: AliasError) -> Self {
+        Self::Diagnostic(error)
+    }
+}
+
 impl Checker {
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
     /// match 都走这一入口，使窄数值字面量的范围规则完全一致。
-    pub(super) fn expr_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
+    pub(super) fn expr_expected(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+        expected: &Ty,
+    ) -> ExprCheckResult<Ty> {
         if let Some((name, arg, span)) = contextual_conversion(e) {
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
@@ -22,7 +73,8 @@ impl Checker {
                 return Err(AliasError {
                     msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
                     span,
-                });
+                }
+                .into());
             }
             return self.check_inferred_expected(arg, env, expected);
         }
@@ -57,8 +109,9 @@ impl Checker {
                 if types_match(expected, &got) {
                     Ok(expected.clone())
                 } else {
-                    Err(AliasError {
-                        msg: format!("需要 {}, 实际 {}", expected.name(), got.name()),
+                    Err(ExprCheckError::Mismatch {
+                        expected: expected.clone(),
+                        actual: got,
                         span: e.span(),
                     })
                 }
@@ -71,12 +124,16 @@ impl Checker {
                 for item in elems {
                     match self.expr_expected(item, env, elem) {
                         Ok(_) => {}
-                        Err(e) if expected_actual(&e.msg, elem).is_some() => {
-                            let actual = expected_actual(&e.msg, elem).unwrap();
+                        Err(ExprCheckError::Mismatch { actual, .. }) => {
                             return Err(AliasError {
-                                msg: format!("数组元素类型不一致: {} 与 {}", elem.name(), actual),
+                                msg: format!(
+                                    "数组元素类型不一致: {} 与 {}",
+                                    elem.name(),
+                                    actual.name()
+                                ),
                                 span: item.span(),
-                            });
+                            }
+                            .into());
                         }
                         Err(e) => return Err(e),
                     }
@@ -90,13 +147,15 @@ impl Checker {
                             return Err(AliasError {
                                 msg: format!("{name} 构造恰好接受 1 个参数"),
                                 span: *span,
-                            });
+                            }
+                            .into());
                         };
                         if arg.label.is_some() {
                             return Err(AliasError {
                                 msg: "result 构造不接受命名实参".into(),
                                 span: arg.span,
-                            });
+                            }
+                            .into());
                         }
                         let payload = if name == "ok" {
                             ok.as_ref()
@@ -113,13 +172,19 @@ impl Checker {
         }
     }
 
-    fn check_inferred_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
+    fn check_inferred_expected(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+        expected: &Ty,
+    ) -> ExprCheckResult<Ty> {
         let got = require_value(self.expr(e, env)?, e.span())?;
         if types_match(expected, &got) {
             Ok(expected.clone())
         } else {
-            Err(AliasError {
-                msg: format!("需要 {}, 实际 {}", expected.name(), got.name()),
+            Err(ExprCheckError::Mismatch {
+                expected: expected.clone(),
+                actual: got,
                 span: e.span(),
             })
         }
@@ -133,7 +198,7 @@ impl Checker {
         e: &Expr,
         env: &Env,
         expected: &Ty,
-    ) -> AliasResult<Ty> {
+    ) -> ExprCheckResult<Ty> {
         if let Some(result) = literal_slot_unify(expected, e) {
             return result;
         }
@@ -146,17 +211,18 @@ impl Checker {
                 return Err(AliasError {
                     msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
                     span,
-                });
+                }
+                .into());
             }
             // try_from 不存在转换时把源类型交还给运算符，不能在子表达式层
             // 抢先制造外层目标类型错误。
             return Ok(source);
         }
         let Expr::Binary { op, lhs, rhs, span } = e else {
-            return self.expr(e, env);
+            return Ok(self.expr(e, env)?);
         };
         if !binary_flows_expected(*op, expected) {
-            return self.expr(e, env);
+            return Ok(self.expr(e, env)?);
         }
 
         let lhs_ty = self.expr_with_numeric_literal_context(lhs, env, expected)?;
@@ -166,7 +232,7 @@ impl Checker {
             expected
         };
         let rhs_ty = self.expr_with_numeric_literal_context(rhs, env, rhs_expected)?;
-        self.binary(*op, lhs_ty, rhs_ty, *span)
+        Ok(self.binary(*op, lhs_ty, rhs_ty, *span)?)
     }
 
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
@@ -178,7 +244,8 @@ impl Checker {
                 for p in parts {
                     if let StrPartAst::Hole(h) = p {
                         if contextual_conversion(h).is_some() {
-                            self.expr_expected(h, env, &Ty::Str)?;
+                            self.expr_expected(h, env, &Ty::Str)
+                                .map_err(ExprCheckError::into_alias)?;
                         } else {
                             require_value(self.expr(h, env)?, h.span())?;
                         }
@@ -258,7 +325,7 @@ impl Checker {
                 // 仅字面量参与，不放宽变量/表达式之间的隐式混算。
                 let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
                     match literal_slot_unify(&l, rhs) {
-                        Some(r) => r?,
+                        Some(r) => r.map_err(ExprCheckError::into_alias)?,
                         None => self.expr(rhs, env)?,
                     }
                 } else {
@@ -362,7 +429,9 @@ impl Checker {
                 subject,
                 arms,
                 span,
-            } => self.match_expr(subject, arms, *span, env, None),
+            } => self
+                .match_expr(subject, arms, *span, env, None)
+                .map_err(ExprCheckError::into_alias),
             Expr::Propagate { expr, span } => self.propagate(expr, *span, env),
         }
     }
@@ -386,7 +455,7 @@ impl Checker {
         span: Span,
         env: &Env,
         expected: Option<&Ty>,
-    ) -> AliasResult<Ty> {
+    ) -> ExprCheckResult<Ty> {
         let st = require_value(self.expr(subject, env)?, subject.span())?;
         if st.is_unknown() {
             return Ok(Ty::Unknown);
@@ -406,7 +475,8 @@ impl Checker {
                 return Err(AliasError {
                     msg: "match 存在不可达 Pattern".into(),
                     span: arm.pattern.span(),
-                });
+                }
+                .into());
             }
 
             let binding: Option<(String, Ty)> = match (&arm.pattern, &st) {
@@ -419,13 +489,15 @@ impl Checker {
                         return Err(AliasError {
                             msg: format!("字面量 {value} 超出 {} 的表示范围", st.name()),
                             span: *pspan,
-                        });
+                        }
+                        .into());
                     }
                     if !seen_int.insert(*value) {
                         return Err(AliasError {
                             msg: format!("match 重复 Pattern: {value}"),
                             span: *pspan,
-                        });
+                        }
+                        .into());
                     }
                     None
                 }
@@ -433,7 +505,8 @@ impl Checker {
                     return Err(AliasError {
                         msg: format!("整数字面量 Pattern 不适用于 {}", st.name()),
                         span: *pspan,
-                    });
+                    }
+                    .into());
                 }
                 (Pattern::Bool { value, span: pspan }, Ty::Bool) => {
                     let seen = if *value {
@@ -445,7 +518,8 @@ impl Checker {
                         return Err(AliasError {
                             msg: format!("match 重复 Pattern: {value}"),
                             span: *pspan,
-                        });
+                        }
+                        .into());
                     }
                     *seen = true;
                     None
@@ -454,14 +528,16 @@ impl Checker {
                     return Err(AliasError {
                         msg: format!("bool Pattern 不适用于 {}", st.name()),
                         span: *pspan,
-                    });
+                    }
+                    .into());
                 }
                 (Pattern::Str { value, span: pspan }, Ty::Str) => {
                     if !seen_str.insert(value.clone()) {
                         return Err(AliasError {
                             msg: format!("match 重复 Pattern: '{value}'"),
                             span: *pspan,
-                        });
+                        }
+                        .into());
                     }
                     None
                 }
@@ -469,7 +545,8 @@ impl Checker {
                     return Err(AliasError {
                         msg: format!("字符串 Pattern 不适用于 {}", st.name()),
                         span: *pspan,
-                    });
+                    }
+                    .into());
                 }
                 (
                     Pattern::Constructor {
@@ -484,13 +561,15 @@ impl Checker {
                             return Err(AliasError {
                                 msg: "match 重复覆盖 ok 臂".into(),
                                 span: *pspan,
-                            });
+                            }
+                            .into());
                         }
                         CtorKind::Err if seen_err => {
                             return Err(AliasError {
                                 msg: "match 重复覆盖 err 臂".into(),
                                 span: *pspan,
-                            });
+                            }
+                            .into());
                         }
                         CtorKind::Ok => seen_ok = true,
                         CtorKind::Err => seen_err = true,
@@ -507,7 +586,8 @@ impl Checker {
                     return Err(AliasError {
                         msg: format!("构造器 Pattern 需要 result 主语, 实际 {}", st.name()),
                         span: *pspan,
-                    });
+                    }
+                    .into());
                 }
             };
 
@@ -522,7 +602,8 @@ impl Checker {
                             return Err(AliasError {
                                 msg: format!("match 各臂类型不一致: {} 与 {}", a.name(), t.name()),
                                 span: arm.span,
-                            });
+                            }
+                            .into());
                         }
                     });
                 }
@@ -541,7 +622,7 @@ impl Checker {
                 Ty::Bool => "match bool 必须覆盖 true 与 false，或提供兜底 Pattern".into(),
                 _ => format!("match {} 必须提供 _ 或绑定 Pattern 作为兜底", st.name()),
             };
-            return Err(AliasError { msg, span });
+            return Err(AliasError { msg, span }.into());
         }
 
         if let Some(want) = expected {
@@ -557,7 +638,7 @@ impl Checker {
         binding: Option<&(String, Ty)>,
         env: &Env,
         expected: Option<&Ty>,
-    ) -> AliasResult<Option<Ty>> {
+    ) -> ExprCheckResult<Option<Ty>> {
         let local = Scope::child(env);
         if let Some((name, bind_ty)) = binding {
             Scope::insert(
@@ -579,7 +660,8 @@ impl Checker {
                     return Err(AliasError {
                         msg: "顶层不允许 return".into(),
                         span: e.span(),
-                    });
+                    }
+                    .into());
                 };
                 self.expr_expected(e, &local, &ret)?;
                 Ok(None)
@@ -765,19 +847,18 @@ impl Checker {
                 for (i, (a, pt)) in args.iter().zip(&params).enumerate() {
                     match self.expr_expected(&a.value, env, pt) {
                         Ok(_) => {}
-                        Err(e) if expected_actual(&e.msg, pt).is_some() => {
-                            let actual = expected_actual(&e.msg, pt).unwrap();
+                        Err(ExprCheckError::Mismatch { actual, .. }) => {
                             return Err(AliasError {
                                 msg: format!(
                                     "第 {} 个实参需要 {}, 实际 {}",
                                     i + 1,
                                     pt.name(),
-                                    actual
+                                    actual.name()
                                 ),
                                 span: a.value.span(),
                             });
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => return Err(e.into_alias()),
                     }
                 }
                 Ok(*ret)
@@ -827,14 +908,18 @@ impl Checker {
             let want = &info.fields[idx].ty;
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
-                Err(e) if expected_actual(&e.msg, want).is_some() => {
-                    let actual = expected_actual(&e.msg, want).unwrap();
+                Err(ExprCheckError::Mismatch { actual, .. }) => {
                     return Err(AliasError {
-                        msg: format!("字段 '{}' 需要 {}, 实际 {}", lbl, want.name(), actual),
+                        msg: format!(
+                            "字段 '{}' 需要 {}, 实际 {}",
+                            lbl,
+                            want.name(),
+                            actual.name()
+                        ),
                         span: a.value.span(),
                     });
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into_alias()),
             }
         }
         for (f, done) in info.fields.iter().zip(&covered) {
@@ -958,14 +1043,17 @@ impl Checker {
                     }
                     match self.expr_expected(&args[0].value, env, elem) {
                         Ok(_) => {}
-                        Err(e) if expected_actual(&e.msg, elem).is_some() => {
-                            let actual = expected_actual(&e.msg, elem).unwrap();
+                        Err(ExprCheckError::Mismatch { actual, .. }) => {
                             return Err(AliasError {
-                                msg: format!("第 1 个实参需要 {}, 实际 {}", elem.name(), actual),
+                                msg: format!(
+                                    "第 1 个实参需要 {}, 实际 {}",
+                                    elem.name(),
+                                    actual.name()
+                                ),
                                 span: args[0].value.span(),
                             });
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => return Err(e.into_alias()),
                     }
                     return Ok(Ty::Unit);
                 }
@@ -1007,24 +1095,22 @@ impl Checker {
         for (i, (a, want)) in args.iter().zip(&sig.params).enumerate() {
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
-                Err(e) if expected_actual(&e.msg, want).is_some() => {
-                    let actual = expected_actual(&e.msg, want).unwrap();
+                Err(ExprCheckError::Mismatch { actual, .. }) => {
                     return Err(AliasError {
-                        msg: format!("第 {} 个实参需要 {}, 实际 {}", i + 1, want.name(), actual),
+                        msg: format!(
+                            "第 {} 个实参需要 {}, 实际 {}",
+                            i + 1,
+                            want.name(),
+                            actual.name()
+                        ),
                         span: a.value.span(),
                     });
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into_alias()),
             }
         }
         Ok(sig.ret)
     }
-}
-
-fn expected_actual(message: &str, expected: &Ty) -> Option<String> {
-    message
-        .strip_prefix(&format!("需要 {}, 实际 ", expected.name()))
-        .map(str::to_owned)
 }
 
 fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
@@ -1036,6 +1122,42 @@ fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
         }
         Lt | Le | Gt | Ge | EqEq | NotEq | And | Or => false,
     }
+}
+
+fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<ExprCheckResult<Ty>> {
+    let span = value.span();
+    if let Expr::Float(..) = value {
+        return if matches!(declared, Ty::Float(_)) {
+            Some(Ok(declared.clone()))
+        } else {
+            None
+        };
+    }
+    let (magnitude, negative) = match value {
+        Expr::Int(n, _) => (*n, false),
+        Expr::Neg { expr, .. } => match expr.as_ref() {
+            Expr::Int(n, _) => (*n, true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !matches!(declared, Ty::Int(_) | Ty::UInt(_)) {
+        return None;
+    }
+    Some(if int_literal_fits(declared, magnitude, negative) {
+        Ok(declared.clone())
+    } else {
+        let literal = if negative {
+            format!("-{magnitude}")
+        } else {
+            magnitude.to_string()
+        };
+        Err(ExprCheckError::LiteralOutOfRange {
+            literal,
+            expected: declared.clone(),
+            span,
+        })
+    })
 }
 
 fn conversion_exists(source: &Ty, target: &Ty) -> bool {

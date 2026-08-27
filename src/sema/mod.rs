@@ -11,7 +11,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use types::int_literal_fits;
 use types::{FloatW, IntW, Ty, UIntW};
 
 #[derive(Clone)]
@@ -225,39 +224,4 @@ fn decl_mismatch(b: &Binding, want: &Ty, got: &Ty) -> AliasError {
         ),
         span: b.span,
     }
-}
-
-pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<AliasResult<Ty>> {
-    let span = value.span();
-    if let Expr::Float(..) = value {
-        return if matches!(declared, Ty::Float(_)) {
-            Some(Ok(declared.clone()))
-        } else {
-            None
-        };
-    }
-    let (magnitude, negative) = match value {
-        Expr::Int(n, _) => (*n, false),
-        Expr::Neg { expr, .. } => match expr.as_ref() {
-            Expr::Int(n, _) => (*n, true),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    if !matches!(declared, Ty::Int(_) | Ty::UInt(_)) {
-        return None;
-    }
-    Some(if int_literal_fits(declared, magnitude, negative) {
-        Ok(declared.clone())
-    } else {
-        let literal = if negative {
-            format!("-{magnitude}")
-        } else {
-            magnitude.to_string()
-        };
-        Err(AliasError {
-            msg: format!("字面量 {literal} 超出 {} 的表示范围", declared.name()),
-            span,
-        })
-    })
 }

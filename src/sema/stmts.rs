@@ -1,5 +1,6 @@
 //! sema::stmts — 语句、函数体与控制流检查。
 
+use super::exprs::ExprCheckError;
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
@@ -49,21 +50,23 @@ impl Checker {
                 },
             );
         } else {
-            let init_ty = self
-                .expr_expected(&b.value, env, &declared)
-                .map_err(|e| AliasError {
-                    msg: if e.msg.starts_with("字面量") {
-                        e.msg
-                    } else {
-                        format!(
-                            "绑定 '{}' 声明类型为 {}: {}",
-                            b.name,
-                            declared.name(),
-                            e.msg
-                        )
-                    },
-                    span: e.span,
-                })?;
+            let init_ty =
+                self.expr_expected(&b.value, env, &declared)
+                    .map_err(|error| match error {
+                        literal @ ExprCheckError::LiteralOutOfRange { .. } => literal.into_alias(),
+                        other => {
+                            let error = other.into_alias();
+                            AliasError {
+                                msg: format!(
+                                    "绑定 '{}' 声明类型为 {}: {}",
+                                    b.name,
+                                    declared.name(),
+                                    error.msg
+                                ),
+                                span: error.span,
+                            }
+                        }
+                    })?;
             Scope::insert(
                 env,
                 b.name.clone(),
@@ -189,11 +192,13 @@ impl Checker {
                         span: *span,
                     });
                 }
-                self.expr_expected(value, env, &info.ty)
-                    .map_err(|e| AliasError {
-                        msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), e.msg),
-                        span: e.span,
-                    })?;
+                self.expr_expected(value, env, &info.ty).map_err(|error| {
+                    let error = error.into_alias();
+                    AliasError {
+                        msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), error.msg),
+                        span: error.span,
+                    }
+                })?;
                 Ok(None)
             }
             Stmt::FieldAssign {
@@ -227,11 +232,13 @@ impl Checker {
                         span: *span,
                     });
                 }
-                self.expr_expected(value, env, &f.ty)
-                    .map_err(|e| AliasError {
-                        msg: format!("字段 '{field}' 需要 {}: {}", f.ty.name(), e.msg),
-                        span: e.span,
-                    })?;
+                self.expr_expected(value, env, &f.ty).map_err(|error| {
+                    let error = error.into_alias();
+                    AliasError {
+                        msg: format!("字段 '{field}' 需要 {}: {}", f.ty.name(), error.msg),
+                        span: error.span,
+                    }
+                })?;
                 Ok(None)
             }
             Stmt::ExprStmt { expr, .. } => {
@@ -261,9 +268,12 @@ impl Checker {
                         });
                     }
                     Some(e) => {
-                        self.expr_expected(e, env, &ret).map_err(|err| AliasError {
-                            msg: format!("return 需要 {}: {}", ret.name(), err.msg),
-                            span: err.span,
+                        self.expr_expected(e, env, &ret).map_err(|error| {
+                            let error = error.into_alias();
+                            AliasError {
+                                msg: format!("return 需要 {}: {}", ret.name(), error.msg),
+                                span: error.span,
+                            }
                         })?;
                     }
                     None if ret != Ty::Unit && !ret.is_unknown() => {

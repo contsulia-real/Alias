@@ -178,35 +178,54 @@ fn try_from_fallback_preserves_outer_slot_diagnostics() {
         (
             "val array<i32> out = [b]",
             "val array<i32> out = [try_from b]",
+            "绑定 'out' 声明类型为 array<i32>: 数组元素类型不一致: i32 与 string",
         ),
         (
             "val result<i32, string> out = ok(b)",
             "val result<i32, string> out = ok(try_from b)",
+            "绑定 'out' 声明类型为 result<i32, string>: 需要 i32, 实际 string",
         ),
         (
             "val i32 out = match true { true -> b, false -> 0 }",
             "val i32 out = match true { true -> try_from b, false -> 0 }",
+            "绑定 'out' 声明类型为 i32: 需要 i32, 实际 string",
         ),
-        ("val i32 out = b + 1", "val i32 out = (try_from b) + 1"),
+        (
+            "val i32 out = b + 1",
+            "val i32 out = (try_from b) + 1",
+            "绑定 'out' 声明类型为 i32: 运算符 + 不适用于 string 与 i32",
+        ),
         (
             "val i32 out = accept(b)",
             "val i32 out = accept(try_from b)",
+            "绑定 'out' 声明类型为 i32: 第 1 个实参需要 i32, 实际 string",
         ),
         (
             "val box out = box(value = b)",
             "val box out = box(value = try_from b)",
+            "绑定 'out' 声明类型为 box: 字段 'value' 需要 i32, 实际 string",
         ),
-        ("values.push(b)", "values.push(try_from b)"),
+        (
+            "values.push(b)",
+            "values.push(try_from b)",
+            "第 1 个实参需要 i32, 实际 string",
+        ),
+        (
+            "receiver.accept_value(b)",
+            "receiver.accept_value(try_from b)",
+            "第 1 个实参需要 i32, 实际 string",
+        ),
     ];
-    for (direct, attempted) in pairs {
+    for (direct, attempted, expected_message) in pairs {
         let program = |statement: &str| {
             format!(
-                "struct box {{ val i32 value = 0 }}\nfunc i32 accept = (i32 value) -> return value\nfunc i32 main = () -> {{\n    val string b = 'boy'\n    val array<i32> values = []\n    {statement}\n    return 0\n}}\n"
+                "struct box {{ val i32 value = 0 }}\nfunc i32 accept = (i32 value) -> return value\nfunc i32 i32.accept_value = (i32 value) -> return value\nfunc i32 main = () -> {{\n    val string b = 'boy'\n    val array<i32> values = []\n    val i32 receiver = 1\n    {statement}\n    return 0\n}}\n"
             )
         };
         let direct_error = fail(&program(direct));
         let attempted_error = fail(&program(attempted));
         assert_eq!(attempted_error.msg, direct_error.msg, "语句: {attempted}");
+        assert_eq!(attempted_error.msg, expected_message, "语句: {attempted}");
     }
 
     let default_program = |expression: &str| {
@@ -217,6 +236,10 @@ fn try_from_fallback_preserves_outer_slot_diagnostics() {
     let direct_default = fail(&default_program("b"));
     let attempted_default = fail(&default_program("try_from b"));
     assert_eq!(attempted_default.msg, direct_default.msg);
+    assert_eq!(
+        attempted_default.msg,
+        "字段 'value' 声明类型为 i32, 实际 string"
+    );
 }
 
 #[test]
