@@ -1,8 +1,8 @@
 //! Phase 2b result/match/?/转义 法律测试 — 正负矩阵, 负向断言精确中文消息 + 行:列。
 //!
-//! 语义锚点 (用户批准设计, spec-notes 附录四):
+//! 语义锚点：
 //! - result<T,E> 内建枚举: ok/err 为类型构造器 (非名字分派函数)
-//! - match 是表达式: 穷尽性 = 恰一 ok + 恰一 err; 值 = 非 never 臂公共类型
+//! - result 的构造器 Pattern 由 ok/err 穷尽；match 本身已泛化为统一 Pattern AST
 //! - ? 脱糖 = match e { ok(v) -> v, err(e) -> return err(e) } — 仅同型错误
 //! - 全 never 臂 match 等价 return 收尾 (Q③ 终结性扩展)
 //!
@@ -75,6 +75,13 @@ fn struct_payload_arms_and_never_tail() {
     assert_eq!(run("t.as", src).unwrap(), 55);
 }
 
+/// 一般 Pattern 已允许非 result 主语。
+#[test]
+fn general_match_allows_non_result_subject() {
+    let src = "func i32 main = () -> {\n    val i32 v = match 5 {\n        5 -> 42\n        _ -> 0\n    }\n    return v\n}\n";
+    assert_eq!(run("t.as", src).unwrap(), 42);
+}
+
 /// 转义往返: \\0 \\' \\\" \\\\ 解码一致; \\t 与 \\n 解码不同。
 #[test]
 fn escape_round_trips() {
@@ -105,12 +112,10 @@ fn missing_ok_arm_rejected() {
 }
 
 #[test]
-fn unknown_ctor_name_rejected() {
-    assert_law(
-        "func i32 main = () -> {\n    val result<i32, string> r = ok(1)\n    match r {\n        some(x) -> println(x)\n        err(e) -> println(e)\n    }\n    return 0\n}\n",
-        "match 臂构造器必须是 ok 或 err",
-        4, 8,
-    );
+fn constructor_pattern_requires_result_subject() {
+    let src = "func i32 main = () -> {\n    val i32 v = match 5 {\n        ok(x) -> x\n        _ -> 0\n    }\n    return v\n}\n";
+    let e = fail(src);
+    assert!(e.msg.contains("构造器 Pattern 需要 result 主语, 实际 i32"), "实际: {}", e.msg);
 }
 
 #[test]
@@ -119,15 +124,6 @@ fn duplicate_ok_arm_rejected() {
         "func i32 main = () -> {\n    val result<i32, string> r = ok(1)\n    val i32 v = match r {\n        ok(x) -> x\n        ok(y) -> y\n        err(e) -> -1\n    }\n    return v\n}\n",
         "match 重复覆盖 ok 臂",
         5, 8,
-    );
-}
-
-#[test]
-fn subject_not_result_rejected() {
-    assert_law(
-        "func i32 main = () -> {\n    val i32 v = match 5 {\n        ok(x) -> x\n        err(e) -> -1\n    }\n    return v\n}\n",
-        "match 主语需要 result 类型, 实际 i32",
-        2, 22,
     );
 }
 

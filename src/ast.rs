@@ -46,7 +46,7 @@ pub enum BindKind {
 
 #[derive(Debug, Clone)]
 pub struct Binding {
-    pub public: bool,
+    pub is_pub: bool,
     pub kind: BindKind,
     pub ty: TypeExpr,
     pub name: String,
@@ -117,21 +117,39 @@ pub enum StrPartAst {
     Hole(Box<Expr>),
 }
 
-/// 当前 match 表面只支持 result 的两个构造器；构造器身份属于 Pattern，
-/// 不再直接挂在 MatchArm 上。未来扩展其它 pattern 时从 Pattern 节点继续演进。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CtorKind {
     Ok,
     Err,
 }
 
-/// Pattern AST 的第一阶段：result constructor pattern。
-/// 当前合法形态严格保持为 `ok(name)` / `err(name)`，不扩大语言表面。
-#[derive(Debug, Clone)]
-pub struct Pattern {
-    pub ctor: CtorKind,
-    pub binding: String,
-    pub span: Span,
+/// match Pattern 第一批：通配、整体绑定、整数/布尔/字符串字面量，
+/// 以及 result 的 ok/err 构造器 Pattern。构造器载荷当前只允许名字或 `_`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pattern {
+    Wildcard { span: Span },
+    Binding { name: String, span: Span },
+    Int { value: i64, span: Span },
+    Bool { value: bool, span: Span },
+    Str { value: String, span: Span },
+    Constructor {
+        ctor: CtorKind,
+        binding: Option<String>,
+        span: Span,
+    },
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Wildcard { span }
+            | Pattern::Binding { span, .. }
+            | Pattern::Int { span, .. }
+            | Pattern::Bool { span, .. }
+            | Pattern::Str { span, .. }
+            | Pattern::Constructor { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,16 +164,6 @@ pub struct MatchArm {
     pub pattern: Pattern,
     pub body: ArmBody,
     pub span: Span,
-}
-
-/// 现有 sema/codegen 读取 `arm.ctor` / `arm.binding` 时会直接落到 Pattern。
-/// 这不是重复状态：MatchArm 只持有一个 Pattern 节点。
-impl std::ops::Deref for MatchArm {
-    type Target = Pattern;
-
-    fn deref(&self) -> &Self::Target {
-        &self.pattern
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +184,7 @@ pub enum Expr {
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     Neg { expr: Box<Expr>, span: Span },
     Not { expr: Box<Expr>, span: Span },
+    BitNot { expr: Box<Expr>, span: Span },
     Ternary {
         cond: Box<Expr>,
         then_expr: Box<Expr>,
@@ -200,12 +209,18 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Rem,
+    Shl,
+    Shr,
     Lt,
     Le,
     Gt,
     Ge,
     EqEq,
     NotEq,
+    BitAnd,
+    BitXor,
+    BitOr,
     And,
     Or,
 }
@@ -217,12 +232,18 @@ impl BinOp {
             BinOp::Sub => "-",
             BinOp::Mul => "*",
             BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
             BinOp::Lt => "<",
             BinOp::Le => "<=",
             BinOp::Gt => ">",
             BinOp::Ge => ">=",
             BinOp::EqEq => "==",
             BinOp::NotEq => "!=",
+            BinOp::BitAnd => "&",
+            BinOp::BitXor => "^",
+            BinOp::BitOr => "|",
             BinOp::And => "&&",
             BinOp::Or => "||",
         }
@@ -241,6 +262,7 @@ impl Expr {
             Expr::Binary { span, .. }
             | Expr::Neg { span, .. }
             | Expr::Not { span, .. }
+            | Expr::BitNot { span, .. }
             | Expr::Ternary { span, .. }
             | Expr::Call { span, .. }
             | Expr::MethodCall { span, .. }

@@ -14,7 +14,7 @@ fn err(src: &str) -> String {
     }
 }
 
-const COMBINE: &str = "public func i32 i32.combine = (i32 other) -> return self + other\n";
+const COMBINE: &str = "pub func i32 i32.combine = (i32 other) -> return self + other\n";
 
 // ---------- 正向: 表达式位置吞参 ----------
 
@@ -53,7 +53,7 @@ fn method_infix_two_arg() {
 
 #[test]
 fn method_infix_zero_arg() {
-    let src = "public func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    val string s = 'hi'\n    val string t = s shout\n    while t != 'hi!' { return 1 }\n    return 0\n}\n";
+    let src = "pub func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    val string s = 'hi'\n    val string t = s shout\n    while t != 'hi!' { return 1 }\n    return 0\n}\n";
     assert_eq!(ok(src), 0);
 }
 
@@ -66,7 +66,7 @@ fn method_infix_left_assoc_chain() {
 
 #[test]
 fn method_infix_on_struct() {
-    let src = "struct cell {\n    var i32 v = 0\n}\npublic func i32 cell.bump = (i32 d) -> {\n    self.v = self.v + d;\n    return self.v\n}\nfunc i32 main = () -> {\n    var cell c = cell()\n    val i32 r = c bump 5\n    return r\n}\n";
+    let src = "struct cell {\n    var i32 v = 0\n}\npub func i32 cell.bump = (i32 d) -> {\n    self.v = self.v + d;\n    return self.v\n}\nfunc i32 main = () -> {\n    var cell c = cell()\n    val i32 r = c bump 5\n    return r\n}\n";
     assert_eq!(ok(src), 5);
 }
 

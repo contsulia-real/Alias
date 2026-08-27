@@ -516,7 +516,7 @@ pub(crate) fn scan_expr<M: Module>(
 ) {
     match e {
         Expr::Ident(name, _) => ensure_scanned_name(name, locals, caps, seen, frame),
-        Expr::Neg { expr, .. } | Expr::Not { expr, .. } => {
+        Expr::Neg { expr, .. } | Expr::Not { expr, .. } | Expr::BitNot { expr, .. } => {
             scan_expr(c, expr, locals, caps, seen, frame)
         }
         Expr::Binary { lhs, rhs, .. } => {
@@ -561,9 +561,14 @@ pub(crate) fn scan_expr<M: Module>(
         Expr::Match { subject, arms, .. } => {
             scan_expr(c, subject, locals, caps, seen, frame);
             for arm in arms {
-                let binding = arm.binding.clone();
                 let mut arm_locals = locals.clone();
-                arm_locals.insert(binding);
+                match &arm.pattern {
+                    Pattern::Binding { name, .. }
+                    | Pattern::Constructor { binding: Some(name), .. } => {
+                        arm_locals.insert(name.clone());
+                    }
+                    _ => {}
+                }
                 match &arm.body {
                     ArmBody::Block(stmts) => {
                         for s in stmts {

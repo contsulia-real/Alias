@@ -60,8 +60,8 @@ impl Parser {
                 self.require_boundary("continue")?;
                 Ok(Stmt::Continue { span })
             }
-            Some(Tok::Public) => Err(AliasError {
-                msg: "public 只能用于顶层绑定".into(),
+            Some(Tok::Pub) => Err(AliasError {
+                msg: "pub 只能用于顶层绑定".into(),
                 span,
             }),
             Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) => {
@@ -193,11 +193,11 @@ impl Parser {
         }
     }
 
-    // 普通绑定: (public)? (val|var|func) <类型> <名字> = <表达式>
-    // 扩展函数: (public)? func <返回类型> <完整接收者类型>.<名字> = <函数字面量>
+    // 普通绑定: (pub)? (val|var|func) <类型> <名字> = <表达式>
+    // 扩展函数: (pub)? func <返回类型> <完整接收者类型>.<名字> = <函数字面量>
     pub(super) fn parse_binding(&mut self) -> AliasResult<Binding> {
         let span = self.span();
-        let public = self.eat(&Tok::Public);
+        let is_pub = self.eat(&Tok::Pub);
         let kind = match self.peek() {
             Some(Tok::Val) => {
                 self.bump();
@@ -259,6 +259,6 @@ impl Parser {
             return Err(AliasError { msg, span: err_span });
         }
 
-        Ok(Binding { public, kind, ty, name, receiver, value, span })
+        Ok(Binding { is_pub, kind, ty, name, receiver, value, span })
     }
 }

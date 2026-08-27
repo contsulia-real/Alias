@@ -227,7 +227,7 @@ fn run_matches_build_artifact_for_f32_result_match_and_array() {
 
 #[test]
 fn run_matches_build_artifact_for_mixed_struct_layout_and_self_abi() {
-    let src = "struct mixed {\n    var i8 small = 1\n    val f64 wide = 2.5\n    var i16 tail = 3\n    val string tag = 'm'\n}\npublic func string mixed.label = () -> return '${self.tag}:${self.small}:${self.wide}:${self.tail}'\nfunc i32 main = () -> {\n    val mixed value = mixed()\n    value.small = 7\n    value.tail = 9\n    println value.label()\n    return 0\n}\n";
+    let src = "struct mixed {\n    var i8 small = 1\n    val f64 wide = 2.5\n    var i16 tail = 3\n    val string tag = 'm'\n}\npub func string mixed.label = () -> return '${self.tag}:${self.small}:${self.wide}:${self.tail}'\nfunc i32 main = () -> {\n    val mixed value = mixed()\n    value.small = 7\n    value.tail = 9\n    println value.label()\n    return 0\n}\n";
     let run = run_command(src);
     assert_eq!(run.2, 0);
     assert_eq!(build_and_run(src), run);
@@ -239,9 +239,9 @@ fn run_matches_build_artifact_for_layout_permutation_matrix() {
 struct a { val i8 x = 7 val f64 y = 2.5 val i16 z = 9 val string s = 'a' }
 struct b { val string s = 'b' val i8 x = 8 val f32 y = 1.25 val i64 z = 99 }
 struct c { val f64 x = 3.5 val bool ok = true val u8 y = 255 val string s = 'c' val i16 z = -4 }
-public func string a.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
-public func string b.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
-public func string c.show = () -> return '${self.s}:${self.x}:${self.ok}:${self.y}:${self.z}'
+pub func string a.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
+pub func string b.show = () -> return '${self.s}:${self.x}:${self.y}:${self.z}'
+pub func string c.show = () -> return '${self.s}:${self.x}:${self.ok}:${self.y}:${self.z}'
 func i32 main = () -> {
     val a av = a()
     val b bv = b()

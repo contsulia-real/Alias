@@ -1,7 +1,7 @@
 //! Phase 2c 扩展方法法律测试 — 正负矩阵, 负向断言精确中文消息 + 行:列。
 //!
 //! 语义锚点 (用户批准设计, spec-notes 附录五):
-//! - 方法定义文法: public? func <Ret> <RecvType>.<name> = (params) -> 体
+//! - 方法定义文法: pub? func <Ret> <RecvType>.<name> = (params) -> 体
 //! - self 是隐式 val 绑定 (不在参数表), 类型 = 接收者类型
 //! - 方法名按接收者类型划分命名空间; 内建 len/upper/lower/trim 不可覆盖
 //! - 调用点静态分派: 接收者推断类型 → 方法表; 返回类型流入推断
@@ -95,14 +95,14 @@ fn same_method_name_across_types() {
     assert_eq!(run("t.as", src).unwrap(), 4);
 }
 
-/// public 标志被接受并存储 — 单编译单元内恒可调 (spec-notes 附录五)。
+/// pub 标志被接受并存储 — 单编译单元内恒可调 (spec-notes 附录五)。
 #[test]
-fn public_methods_callable_in_same_unit() {
-    let src = "public func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    while 'hey'.shout() != 'hey!' {\n        return 1\n    }\n    return 0\n}\n";
+fn pub_methods_callable_in_same_unit() {
+    let src = "pub func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    while 'hey'.shout() != 'hey!' {\n        return 1\n    }\n    return 0\n}\n";
     assert_eq!(run("t.as", src).unwrap(), 0);
 }
 
-/// 非 public 方法同样可调 — 可见性检查机制就位, 单元内直通。
+/// 非 pub 方法同样可调 — 可见性检查机制就位, 单元内直通。
 #[test]
 fn private_methods_callable_in_same_unit() {
     let src = "func string string.whisper = () -> return '${self}'\nfunc i32 main = () -> {\n    while 'ss'.whisper() != 'ss' {\n        return 1\n    }\n    return 0\n}\n";

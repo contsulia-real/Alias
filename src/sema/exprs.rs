@@ -2,8 +2,9 @@
 
 use super::types::{types_match, FloatW, IntW, Ty, UIntW};
 use super::{literal_slot_unify, op_mismatch, Checker, Env, Scope, VarInfo};
-use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, StrPartAst, Stmt};
+use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, StrPartAst, Stmt};
 use crate::{AliasError, AliasResult, Span};
+use std::collections::HashSet;
 
 impl Checker {
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
@@ -29,6 +30,18 @@ impl Checker {
             }
             (Expr::Match { subject, arms, span }, expected) => {
                 self.match_expr(subject, arms, *span, env, Some(expected))
+            }
+            (Expr::Binary { op, lhs, rhs, span }, expected)
+                if binary_flows_expected(*op, expected) =>
+            {
+                self.expr_expected(lhs, env, expected)?;
+                self.expr_expected(rhs, env, expected)?;
+                self.binary(*op, expected.clone(), expected.clone(), *span)?;
+                Ok(expected.clone())
+            }
+            (Expr::BitNot { expr, .. }, Ty::Int(_) | Ty::UInt(_)) => {
+                self.expr_expected(expr, env, expected)?;
+                Ok(expected.clone())
             }
             (Expr::ArrayLit { elems, .. }, Ty::Array(elem)) => {
                 for item in elems {
@@ -121,6 +134,20 @@ impl Checker {
             Expr::Not { expr, .. } => {
                 self.require_bool(expr, env, "! 操作数")?;
                 Ok(Ty::Bool)
+            }
+            Expr::BitNot { expr, .. } => {
+                let t = self.expr(expr, env)?;
+                if t.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                match t {
+                    Ty::Int(w) => Ok(Ty::Int(w)),
+                    Ty::UInt(w) => Ok(Ty::UInt(w)),
+                    other => Err(AliasError {
+                        msg: format!("~ 操作数需要整数, 实际 {}", other.name()),
+                        span: expr.span(),
+                    }),
+                }
             }
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.expr(lhs, env)?;
@@ -247,61 +274,170 @@ impl Checker {
         if st.is_unknown() {
             return Ok(Ty::Unknown);
         }
-        let Ty::Result(t_ty, e_ty) = st else {
-            return Err(AliasError {
-                msg: format!("match 主语需要 result 类型, 实际 {}", st.name()),
-                span: subject.span(),
-            });
-        };
-        let mut ok_arm = None;
-        let mut err_arm = None;
+
+        let mut seen_ok = false;
+        let mut seen_err = false;
+        let mut seen_true = false;
+        let mut seen_false = false;
+        let mut seen_int = HashSet::new();
+        let mut seen_str = HashSet::new();
+        let mut covered_all = false;
+        let mut common: Option<Ty> = None;
+
         for arm in arms {
-            match arm.ctor {
-                CtorKind::Ok if ok_arm.is_none() => ok_arm = Some(arm),
-                CtorKind::Err if err_arm.is_none() => err_arm = Some(arm),
-                CtorKind::Ok => {
-                    return Err(AliasError { msg: "match 重复覆盖 ok 臂".into(), span: arm.span })
-                }
-                CtorKind::Err => {
-                    return Err(AliasError { msg: "match 重复覆盖 err 臂".into(), span: arm.span })
-                }
+            if covered_all {
+                return Err(AliasError {
+                    msg: "match 存在不可达 Pattern".into(),
+                    span: arm.pattern.span(),
+                });
             }
-        }
-        let (Some(ok_arm), Some(err_arm)) = (ok_arm, err_arm) else {
-            return Err(AliasError { msg: "match 必须同时覆盖 ok 与 err".into(), span });
-        };
-        let ok_t = self.match_arm(ok_arm, &t_ty, env, expected)?;
-        let err_t = self.match_arm(err_arm, &e_ty, env, expected)?;
-        if let Some(want) = expected {
-            return Ok(want.clone());
-        }
-        match (ok_t, err_t) {
-            (None, None) => Ok(Ty::Unknown),
-            (Some(t), None) | (None, Some(t)) => Ok(t),
-            (Some(a), Some(b)) => {
-                if a.is_unknown() {
-                    Ok(b)
-                } else if b.is_unknown() || types_match(&a, &b) {
-                    Ok(a)
-                } else {
-                    Err(AliasError {
-                        msg: format!("match 各臂类型不一致: {} 与 {}", a.name(), b.name()),
-                        span: err_arm.span,
+
+            let binding: Option<(String, Ty)> = match (&arm.pattern, &st) {
+                (Pattern::Wildcard { .. }, _) => None,
+                (Pattern::Binding { name, .. }, _) => Some((name.clone(), st.clone())),
+                (Pattern::Int { value, span: pspan }, Ty::Int(_) | Ty::UInt(_)) => {
+                    let lit = Expr::Int(*value, *pspan);
+                    match literal_slot_unify(&st, &lit) {
+                        Some(r) => {
+                            r?;
+                        }
+                        None => unreachable!(),
+                    }
+                    if !seen_int.insert(*value) {
+                        return Err(AliasError {
+                            msg: format!("match 重复 Pattern: {value}"),
+                            span: *pspan,
+                        });
+                    }
+                    None
+                }
+                (Pattern::Int { span: pspan, .. }, _) => {
+                    return Err(AliasError {
+                        msg: format!("整数字面量 Pattern 不适用于 {}", st.name()),
+                        span: *pspan,
+                    });
+                }
+                (Pattern::Bool { value, span: pspan }, Ty::Bool) => {
+                    let seen = if *value { &mut seen_true } else { &mut seen_false };
+                    if *seen {
+                        return Err(AliasError {
+                            msg: format!("match 重复 Pattern: {value}"),
+                            span: *pspan,
+                        });
+                    }
+                    *seen = true;
+                    None
+                }
+                (Pattern::Bool { span: pspan, .. }, _) => {
+                    return Err(AliasError {
+                        msg: format!("bool Pattern 不适用于 {}", st.name()),
+                        span: *pspan,
+                    });
+                }
+                (Pattern::Str { value, span: pspan }, Ty::Str) => {
+                    if !seen_str.insert(value.clone()) {
+                        return Err(AliasError {
+                            msg: format!("match 重复 Pattern: '{value}'"),
+                            span: *pspan,
+                        });
+                    }
+                    None
+                }
+                (Pattern::Str { span: pspan, .. }, _) => {
+                    return Err(AliasError {
+                        msg: format!("字符串 Pattern 不适用于 {}", st.name()),
+                        span: *pspan,
+                    });
+                }
+                (
+                    Pattern::Constructor { ctor, binding, span: pspan },
+                    Ty::Result(ok_ty, err_ty),
+                ) => {
+                    match ctor {
+                        CtorKind::Ok if seen_ok => {
+                            return Err(AliasError {
+                                msg: "match 重复覆盖 ok 臂".into(),
+                                span: *pspan,
+                            });
+                        }
+                        CtorKind::Err if seen_err => {
+                            return Err(AliasError {
+                                msg: "match 重复覆盖 err 臂".into(),
+                                span: *pspan,
+                            });
+                        }
+                        CtorKind::Ok => seen_ok = true,
+                        CtorKind::Err => seen_err = true,
+                    }
+                    binding.as_ref().map(|name| {
+                        let ty = match ctor {
+                            CtorKind::Ok => (**ok_ty).clone(),
+                            CtorKind::Err => (**err_ty).clone(),
+                        };
+                        (name.clone(), ty)
                     })
                 }
+                (Pattern::Constructor { span: pspan, .. }, _) => {
+                    return Err(AliasError {
+                        msg: format!("构造器 Pattern 需要 result 主语, 实际 {}", st.name()),
+                        span: *pspan,
+                    });
+                }
+            };
+
+            let arm_ty = self.match_arm(arm, binding.as_ref(), env, expected)?;
+            if expected.is_none() {
+                if let Some(t) = arm_ty {
+                    common = Some(match common.take() {
+                        None => t,
+                        Some(a) if a.is_unknown() => t,
+                        Some(a) if t.is_unknown() || types_match(&a, &t) => a,
+                        Some(a) => {
+                            return Err(AliasError {
+                                msg: format!("match 各臂类型不一致: {} 与 {}", a.name(), t.name()),
+                                span: arm.span,
+                            });
+                        }
+                    });
+                }
             }
+
+            covered_all = matches!(&arm.pattern, Pattern::Wildcard { .. } | Pattern::Binding { .. })
+                || (matches!(&st, Ty::Result(_, _)) && seen_ok && seen_err)
+                || (st == Ty::Bool && seen_true && seen_false);
+        }
+
+        if !covered_all {
+            let msg = match &st {
+                Ty::Result(_, _) => "match 必须同时覆盖 ok 与 err，或提供兜底 Pattern".into(),
+                Ty::Bool => "match bool 必须覆盖 true 与 false，或提供兜底 Pattern".into(),
+                _ => format!("match {} 必须提供 _ 或绑定 Pattern 作为兜底", st.name()),
+            };
+            return Err(AliasError { msg, span });
+        }
+
+        if let Some(want) = expected {
+            Ok(want.clone())
+        } else {
+            Ok(common.unwrap_or(Ty::Unknown))
         }
     }
 
     fn match_arm(
         &mut self,
         arm: &MatchArm,
-        bind_ty: &Ty,
+        binding: Option<&(String, Ty)>,
         env: &Env,
         expected: Option<&Ty>,
     ) -> AliasResult<Option<Ty>> {
         let local = Scope::child(env);
-        Scope::insert(&local, arm.binding.clone(), VarInfo { ty: bind_ty.clone(), mutable: false });
+        if let Some((name, bind_ty)) = binding {
+            Scope::insert(
+                &local,
+                name.clone(),
+                VarInfo { ty: bind_ty.clone(), mutable: false },
+            );
+        }
         match &arm.body {
             ArmBody::Value(e) => Ok(Some(match expected {
                 Some(w) => self.expr_expected(e, &local, w)?,
@@ -392,6 +528,16 @@ impl Checker {
                 (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
                 (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
                 (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),
+                _ => Err(mixed(span)),
+            },
+            Rem => match (&l, &r) {
+                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
+                _ => Err(mixed(span)),
+            },
+            Shl | Shr | BitAnd | BitXor | BitOr => match (&l, &r) {
+                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
                 _ => Err(mixed(span)),
             },
             Lt | Le | Gt | Ge | EqEq | NotEq => match (&l, &r) {
@@ -658,6 +804,17 @@ impl Checker {
             }
         }
         Ok(sig.ret)
+    }
+}
+
+fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
+    use BinOp::*;
+    match op {
+        Add | Sub | Mul | Div => expected.is_numeric(),
+        Rem | Shl | Shr | BitAnd | BitXor | BitOr => {
+            matches!(expected, Ty::Int(_) | Ty::UInt(_))
+        }
+        Lt | Le | Gt | Ge | EqEq | NotEq | And | Or => false,
     }
 }
 

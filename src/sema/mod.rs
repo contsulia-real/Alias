@@ -38,7 +38,7 @@ struct MethodInfo {
     params: Vec<Ty>,
     ret: Ty,
     #[allow(dead_code)]
-    public: bool,
+    is_pub: bool,
     builtin: bool,
 }
 
@@ -139,7 +139,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     ];
     let mut strings = HashMap::new();
     for (name, params, ret) in string_seed {
-        strings.insert(name.to_string(), MethodInfo { params, ret, public: true, builtin: true });
+        strings.insert(name.to_string(), MethodInfo { params, ret, is_pub: true, builtin: true });
     }
     methods.insert("string".to_string(), strings);
 
@@ -163,7 +163,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
                 MethodInfo {
                     params: vec![ty.clone()],
                     ret: ty.clone(),
-                    public: true,
+                    is_pub: true,
                     builtin: true,
                 },
             );
@@ -172,7 +172,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
 
     methods.entry("bool".into()).or_default().insert(
         "not".into(),
-        MethodInfo { params: vec![], ret: Ty::Bool, public: true, builtin: true },
+        MethodInfo { params: vec![], ret: Ty::Bool, is_pub: true, builtin: true },
     );
     methods
 }

@@ -453,7 +453,7 @@ fn emit_if<M: Module>(
                     has_fallthrough = true;
                 }
             } else {
-                has_fallthrough = true; // 最后条件为 false 直接到 end
+                has_fallthrough = true;
             }
         } else {
             bcx.switch_to_block(false_b);
@@ -522,7 +522,6 @@ fn emit_for<M: Module>(
     ret_block: Block,
 ) -> AliasResult<()> {
     ensure_current(bcx, frame);
-    // iterable 恰好求值一次。
     let source_vty = static_vty(c, frame, iterable);
     let source = emit_expr(c, bcx, frame, iterable)?;
     let iter = match source_vty {
@@ -637,6 +636,11 @@ pub(crate) fn emit_expr<M: Module>(
             let v = emit_expr(c, bcx, frame, expr)?;
             Ok(emit_bool_not(bcx, v))
         }
+        Expr::BitNot { expr, .. } => {
+            let vty = static_vty(c, frame, expr);
+            let v = emit_expr(c, bcx, frame, expr)?;
+            emit_bit_not_typed(bcx, v, &vty)
+        }
         Expr::Binary { op: BinOp::And, lhs, rhs, .. } => {
             emit_short_circuit(c, bcx, frame, false, lhs, rhs)
         }
@@ -728,6 +732,28 @@ fn emit_bool_not(bcx: &mut FunctionBuilder, v: Value) -> Value {
     bcx.ins().uextend(types::I64, b)
 }
 
+fn emit_bit_not_typed(
+    bcx: &mut FunctionBuilder,
+    v: Value,
+    vty: &VTy,
+) -> AliasResult<Value> {
+    match vty {
+        VTy::I(w) => {
+            let wt = cl_type(vty);
+            let red = narrow(bcx, v, w.bits());
+            let n = bcx.ins().bnot(red);
+            Ok(widen_signed(bcx, n, wt))
+        }
+        VTy::U(w) => {
+            let wt = cl_type(vty);
+            let red = narrow(bcx, v, w.bits());
+            let n = bcx.ins().bnot(red);
+            Ok(widen_unsigned(bcx, n, wt))
+        }
+        _ => invariant_violation("位非操作数为整数 (sema 已校验)"),
+    }
+}
+
 fn emit_short_circuit<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -804,50 +830,50 @@ fn emit_match_typed<M: Module>(
     arms: &[MatchArm],
     result_vty: &VTy,
 ) -> AliasResult<Value> {
+    let subject_vty = static_vty(c, frame, subject);
     let subj = emit_expr(c, bcx, frame, subject)?;
-    let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
-    let is_ok = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 0);
-    let ok_b = bcx.create_block();
-    let err_b = bcx.create_block();
     let join_b = bcx.create_block();
     let jv = bcx.append_block_param(join_b, types::I64);
-    bcx.ins().brif(is_ok, ok_b, &[], err_b, &[]);
-    bcx.seal_block(ok_b);
-    bcx.seal_block(err_b);
+    let mut any_join = false;
 
-    let ok_arm = arms
-        .iter()
-        .find(|a| a.ctor == CtorKind::Ok)
-        .unwrap_or_else(|| invariant_violation("match ok 臂存在 (sema 已校验)"));
-    let err_arm = arms
-        .iter()
-        .find(|a| a.ctor == CtorKind::Err)
-        .unwrap_or_else(|| invariant_violation("match err 臂存在 (sema 已校验)"));
-    let bind_vtys = match static_vty(c, frame, subject) {
-        VTy::Result(ok, err) => (
-            vty_of_type_name(&c.struct_layouts, &ok),
-            vty_of_type_name(&c.struct_layouts, &err),
-        ),
-        _ => (VTy::Other, VTy::Other),
-    };
+    for (idx, arm) in arms.iter().enumerate() {
+        let arm_b = bcx.create_block();
+        let last = idx + 1 == arms.len();
+        let next_b = if last { None } else { Some(bcx.create_block()) };
 
-    bcx.switch_to_block(ok_b);
-    frame.terminated = false;
-    let ok_joined = emit_match_arm(c, bcx, frame, ok_arm, bind_vtys.0, result_vty, subj, join_b)?;
-    bcx.switch_to_block(err_b);
-    frame.terminated = false;
-    let err_joined = emit_match_arm(
-        c,
-        bcx,
-        frame,
-        err_arm,
-        bind_vtys.1,
-        result_vty,
-        subj,
-        join_b,
-    )?;
+        if let Some(next_b) = next_b {
+            let matched = emit_pattern_test(c, bcx, &arm.pattern, subj)?;
+            bcx.ins().brif(matched, arm_b, &[], next_b, &[]);
+            frame.terminated = true;
+            bcx.seal_block(arm_b);
+            bcx.seal_block(next_b);
+        } else {
+            // sema 已证明穷尽；走到最后一臂时剩余值必然命中。
+            bcx.ins().jump(arm_b, &[]);
+            frame.terminated = true;
+            bcx.seal_block(arm_b);
+        }
 
-    if ok_joined || err_joined {
+        bcx.switch_to_block(arm_b);
+        frame.terminated = false;
+        any_join |= emit_match_arm(
+            c,
+            bcx,
+            frame,
+            arm,
+            &subject_vty,
+            result_vty,
+            subj,
+            join_b,
+        )?;
+
+        if let Some(next_b) = next_b {
+            bcx.switch_to_block(next_b);
+            frame.terminated = false;
+        }
+    }
+
+    if any_join {
         bcx.seal_block(join_b);
         bcx.switch_to_block(join_b);
         frame.terminated = false;
@@ -856,6 +882,39 @@ fn emit_match_typed<M: Module>(
         ensure_current(bcx, frame);
         Ok(bcx.ins().iconst(types::I64, 0))
     }
+}
+
+fn emit_pattern_test<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    pattern: &Pattern,
+    subj: Value,
+) -> AliasResult<Value> {
+    Ok(match pattern {
+        Pattern::Wildcard { .. } | Pattern::Binding { .. } => {
+            bcx.ins().iconst(types::I64, 1)
+        }
+        Pattern::Int { value, .. } => {
+            let rhs = bcx.ins().iconst(types::I64, *value);
+            bcx.ins().icmp(IntCC::Equal, subj, rhs)
+        }
+        Pattern::Bool { value, .. } => {
+            bcx.ins().icmp_imm_s(IntCC::Equal, subj, *value as i64)
+        }
+        Pattern::Str { value, .. } => {
+            let rhs = str_literal_handle(c, bcx, value)?;
+            let ord = call_str_cmp(c, bcx, subj, rhs)?;
+            bcx.ins().icmp_imm_s(IntCC::Equal, ord, 0)
+        }
+        Pattern::Constructor { ctor, .. } => {
+            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+            let want = match ctor {
+                CtorKind::Ok => 0,
+                CtorKind::Err => 1,
+            };
+            bcx.ins().icmp_imm_s(IntCC::Equal, tag, want)
+        }
+    })
 }
 
 pub(crate) fn emit_expr_expected<M: Module>(
@@ -871,6 +930,17 @@ pub(crate) fn emit_expr_expected<M: Module>(
         }
         (Expr::Match { subject, arms, .. }, _) => {
             emit_match_typed(c, bcx, frame, subject, arms, expected)
+        }
+        (Expr::Binary { op, lhs, rhs, span }, _)
+            if binary_vty_flows_expected(*op, expected) =>
+        {
+            let l = emit_expr_expected(c, bcx, frame, lhs, expected)?;
+            let r = emit_expr_expected(c, bcx, frame, rhs, expected)?;
+            emit_binary_values(c, bcx, frame, *op, expected, l, r, *span)
+        }
+        (Expr::BitNot { expr, .. }, VTy::I(_) | VTy::U(_)) => {
+            let v = emit_expr_expected(c, bcx, frame, expr, expected)?;
+            emit_bit_not_typed(bcx, v, expected)
         }
         (Expr::ArrayLit { elems, .. }, VTy::Array(elem)) => {
             emit_array_lit_typed(c, bcx, frame, elems, elem)
@@ -893,6 +963,15 @@ pub(crate) fn emit_expr_expected<M: Module>(
             Ok(norm_store(bcx, v, expected))
         }
         _ => emit_expr(c, bcx, frame, e),
+    }
+}
+
+fn binary_vty_flows_expected(op: BinOp, expected: &VTy) -> bool {
+    use BinOp::*;
+    match op {
+        Add | Sub | Mul | Div => expected.is_numeric(),
+        Rem | Shl | Shr | BitAnd | BitXor | BitOr => matches!(expected, VTy::I(_) | VTy::U(_)),
+        Lt | Le | Gt | Ge | EqEq | NotEq | And | Or => false,
     }
 }
 
@@ -945,12 +1024,14 @@ fn emit_binary_values<M: Module>(
 ) -> AliasResult<Value> {
     use BinOp::*;
     match op {
-        Add | Sub | Mul | Div => match lt {
+        Add | Sub | Mul | Div | Rem => match lt {
             VTy::F(_) => match op {
                 Add => Ok(bcx.ins().fadd(l, r)),
                 Sub => Ok(bcx.ins().fsub(l, r)),
                 Mul => Ok(bcx.ins().fmul(l, r)),
-                _ => Ok(bcx.ins().fdiv(l, r)),
+                Div => Ok(bcx.ins().fdiv(l, r)),
+                Rem => invariant_violation("浮点余数已被 sema 拒绝"),
+                _ => unreachable!(),
             },
             VTy::I(w) => {
                 let wt = cl_type(&VTy::I(*w));
@@ -960,7 +1041,9 @@ fn emit_binary_values<M: Module>(
                     Add => bcx.ins().iadd(li, ri),
                     Sub => bcx.ins().isub(li, ri),
                     Mul => bcx.ins().imul(li, ri),
-                    _ => emit_div_guard(c, bcx, frame, li, ri, true, w.bits(), span)?,
+                    Div => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, false)?,
+                    Rem => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, true)?,
+                    _ => unreachable!(),
                 };
                 Ok(widen_signed(bcx, v, wt))
             }
@@ -972,11 +1055,65 @@ fn emit_binary_values<M: Module>(
                     Add => bcx.ins().iadd(li, ri),
                     Sub => bcx.ins().isub(li, ri),
                     Mul => bcx.ins().imul(li, ri),
-                    _ => emit_div_guard(c, bcx, frame, li, ri, false, w.bits(), span)?,
+                    Div => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, false)?,
+                    Rem => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, true)?,
+                    _ => unreachable!(),
                 };
                 Ok(widen_unsigned(bcx, v, wt))
             }
             _ => invariant_violation("算术操作数为数值族 (sema 已校验)"),
+        },
+        BitAnd | BitXor | BitOr => match lt {
+            VTy::I(w) => {
+                let wt = cl_type(lt);
+                let li = narrow(bcx, l, w.bits());
+                let ri = narrow(bcx, r, w.bits());
+                let v = match op {
+                    BitAnd => bcx.ins().band(li, ri),
+                    BitXor => bcx.ins().bxor(li, ri),
+                    BitOr => bcx.ins().bor(li, ri),
+                    _ => unreachable!(),
+                };
+                Ok(widen_signed(bcx, v, wt))
+            }
+            VTy::U(w) => {
+                let wt = cl_type(lt);
+                let li = narrow(bcx, l, w.bits());
+                let ri = narrow(bcx, r, w.bits());
+                let v = match op {
+                    BitAnd => bcx.ins().band(li, ri),
+                    BitXor => bcx.ins().bxor(li, ri),
+                    BitOr => bcx.ins().bor(li, ri),
+                    _ => unreachable!(),
+                };
+                Ok(widen_unsigned(bcx, v, wt))
+            }
+            _ => invariant_violation("位运算操作数为整数 (sema 已校验)"),
+        },
+        Shl | Shr => match lt {
+            VTy::I(w) => {
+                let wt = cl_type(lt);
+                let li = narrow(bcx, l, w.bits());
+                let ri = narrow(bcx, r, w.bits());
+                let v = match op {
+                    Shl => bcx.ins().ishl(li, ri),
+                    Shr => bcx.ins().sshr(li, ri),
+                    _ => unreachable!(),
+                };
+                Ok(widen_signed(bcx, v, wt))
+            }
+            VTy::U(w) => {
+                let wt = cl_type(lt);
+                let li = narrow(bcx, l, w.bits());
+                let ri = narrow(bcx, r, w.bits());
+                let v = match op {
+                    Shl => bcx.ins().ishl(li, ri),
+                    Shr => bcx.ins().ushr(li, ri),
+                    _ => unreachable!(),
+                };
+                Ok(widen_unsigned(bcx, v, wt))
+            }
+            _ => invariant_violation("移位操作数为整数 (sema 已校验)"),
         },
         Lt | Le | Gt | Ge | EqEq | NotEq => {
             use cranelift_codegen::ir::condcodes::FloatCC;
@@ -1048,20 +1185,38 @@ pub(crate) fn emit_match_arm<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     arm: &MatchArm,
-    bind_vty: VTy,
+    subject_vty: &VTy,
     result_vty: &VTy,
     subj: Value,
     join_b: Block,
 ) -> AliasResult<bool> {
-    let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
-    let payload = restore_word(bcx, raw, &bind_vty);
     push_scope(frame);
-    emit_local_cell(c, bcx, frame, payload, bind_vty, &arm.binding)?;
+
+    match (&arm.pattern, subject_vty) {
+        (Pattern::Binding { name, .. }, _) => {
+            emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), name)?;
+        }
+        (
+            Pattern::Constructor { ctor, binding: Some(name), .. },
+            VTy::Result(ok, err),
+        ) => {
+            let bind_vty = match ctor {
+                CtorKind::Ok => vty_of_type_name(&c.struct_layouts, ok),
+                CtorKind::Err => vty_of_type_name(&c.struct_layouts, err),
+            };
+            let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
+            let payload = restore_word(bcx, raw, &bind_vty);
+            emit_local_cell(c, bcx, frame, payload, bind_vty, name)?;
+        }
+        _ => {}
+    }
+
     let joined = match &arm.body {
         ArmBody::Value(e) => {
             let v = emit_expr_expected(c, bcx, frame, e, result_vty)?;
             let word = storage_word(bcx, v, result_vty);
             bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+            frame.terminated = true;
             true
         }
         ArmBody::Ret(e) => {
@@ -1097,6 +1252,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 let v = tail.unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
                 let word = storage_word(bcx, v, result_vty);
                 bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                frame.terminated = true;
                 true
             }
         }
@@ -1524,11 +1680,9 @@ pub(crate) fn emit_method_call<M: Module>(
     args: &[CallArg],
     span: Span,
 ) -> AliasResult<Value> {
-    // 接收者先求值；所有内建/用户方法都保持这一求值顺序。
     let rv = emit_expr(c, bcx, frame, recv)?;
     let svt = static_vty(c, frame, recv);
 
-    // 运算符对应的编译器内建扩展函数：和符号运算走完全同一条机器语义。
     if svt.is_numeric() {
         let op = match name {
             "plus" => Some(BinOp::Add),
@@ -1726,7 +1880,7 @@ pub(crate) fn new_span_id<M: Module>(c: &mut Compiler<M>, span: Span) -> i32 {
     c.span_table.len() as i32 - 1
 }
 
-pub(crate) fn emit_div_guard<M: Module>(
+pub(crate) fn emit_divrem_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
@@ -1735,6 +1889,7 @@ pub(crate) fn emit_div_guard<M: Module>(
     signed: bool,
     bits: u32,
     span: Span,
+    remainder: bool,
 ) -> AliasResult<Value> {
     let span_id = new_span_id(c, span);
     let wt = ir_type_bits(bits);
@@ -1771,7 +1926,12 @@ pub(crate) fn emit_div_guard<M: Module>(
     jump_zero_return(bcx, frame);
 
     bcx.switch_to_block(ok_b);
-    Ok(if signed { bcx.ins().sdiv(l, r) } else { bcx.ins().udiv(l, r) })
+    Ok(match (signed, remainder) {
+        (true, false) => bcx.ins().sdiv(l, r),
+        (false, false) => bcx.ins().udiv(l, r),
+        (true, true) => bcx.ins().srem(l, r),
+        (false, true) => bcx.ins().urem(l, r),
+    })
 }
 
 fn emit_index_guard<M: Module>(

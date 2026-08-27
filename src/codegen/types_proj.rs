@@ -24,6 +24,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             _ => VTy::Other,
         },
         Expr::Not { .. } => VTy::Bool,
+        Expr::BitNot { expr, .. } => match static_vty(c, frame, expr) {
+            v @ (VTy::I(_) | VTy::U(_)) => v,
+            _ => VTy::Other,
+        },
         Expr::Ternary { then_expr, else_expr, .. } => {
             let a = static_vty(c, frame, then_expr);
             if a != VTy::Other { a } else { static_vty(c, frame, else_expr) }
@@ -36,7 +40,16 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             Box::new(infer_ret_vty(c, frame, params, body)),
         ),
         Expr::Binary { op, lhs, rhs, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Rem
+            | BinOp::Shl
+            | BinOp::Shr
+            | BinOp::BitAnd
+            | BinOp::BitXor
+            | BinOp::BitOr => {
                 let lt = static_vty(c, frame, lhs);
                 if lt.is_numeric() {
                     lt
@@ -91,10 +104,11 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             _ => VTy::Other,
         },
         Expr::Match { subject, arms, .. } => {
-            let payloads = match static_vty(c, frame, subject) {
+            let subject_vty = static_vty(c, frame, subject);
+            let payloads = match &subject_vty {
                 VTy::Result(ok, err) => Some((
-                    vty_of_type_name(&c.struct_layouts, &ok),
-                    vty_of_type_name(&c.struct_layouts, &err),
+                    vty_of_type_name(&c.struct_layouts, ok),
+                    vty_of_type_name(&c.struct_layouts, err),
                 )),
                 _ => None,
             };
@@ -111,14 +125,22 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     let mut arm_frame = frame.clone();
                     arm_frame.scopes.push(HashMap::new());
                     let mut types = HashMap::new();
-                    if let Some((ok, err)) = &payloads {
-                        types.insert(
-                            arm.binding.clone(),
-                            match arm.ctor {
-                                CtorKind::Ok => ok.clone(),
-                                CtorKind::Err => err.clone(),
-                            },
-                        );
+                    match &arm.pattern {
+                        Pattern::Binding { name, .. } => {
+                            types.insert(name.clone(), subject_vty.clone());
+                        }
+                        Pattern::Constructor { ctor, binding: Some(name), .. } => {
+                            if let Some((ok, err)) = &payloads {
+                                types.insert(
+                                    name.clone(),
+                                    match ctor {
+                                        CtorKind::Ok => ok.clone(),
+                                        CtorKind::Err => err.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                     arm_frame.locals_vty.push(types);
                     Some(static_vty(c, &arm_frame, value))

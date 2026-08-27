@@ -1,7 +1,7 @@
 //! parser::exprs — 表达式解析。
 //!
-//! 优先级（高→低）：后缀/调用/方法 > 一元 - ! > * / > + - > 比较
-//! > == != > 无括号方法/调用边界 > && > || > ?:。
+//! 优先级（高→低）：后缀/调用/方法 > 一元 - ! ~ > * / % > + - > << >>
+//! > 比较 > == != > & > ^ > | > 无括号方法/调用边界 > && > || > ?:。
 //! `if` 不在表达式文法中；条件取值只有 ?: / match。
 
 use super::{validate_nesting, Parser, MAX_EXPR_CHAIN};
@@ -81,7 +81,7 @@ impl Parser {
     /// 无括号方法中缀：`a plus b` ≡ `a.plus(b)`，`s shout` ≡ `s.shout()`。
     /// 普通无括号调用仍只允许一个参数。函数值作为参数须显式 f(g)。
     fn parse_no_paren(&mut self) -> AliasResult<Expr> {
-        let mut lhs = self.parse_comparison()?;
+        let mut lhs = self.parse_bit_or()?;
         let mut chain = 0usize;
         loop {
             let span = self.span();
@@ -171,24 +171,113 @@ impl Parser {
                 | Some(Tok::Match)
                 | Some(Tok::Minus)
                 | Some(Tok::Bang)
+                | Some(Tok::Tilde)
         )
     }
 
+    fn parse_bit_or(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_bit_xor()?;
+        let mut chain = 0usize;
+        while self.peek() == Some(&Tok::Pipe) {
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("位或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_bit_xor()?;
+            let span = lhs.span();
+            lhs = Expr::Binary { op: BinOp::BitOr, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bit_xor(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_bit_and()?;
+        let mut chain = 0usize;
+        while self.peek() == Some(&Tok::Caret) {
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("位异或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_bit_and()?;
+            let span = lhs.span();
+            lhs = Expr::Binary { op: BinOp::BitXor, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bit_and(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_equality()?;
+        let mut chain = 0usize;
+        while self.peek() == Some(&Tok::Amp) {
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("位与表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_equality()?;
+            let span = lhs.span();
+            lhs = Expr::Binary { op: BinOp::BitAnd, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_equality(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_comparison()?;
+        let mut chain = 0usize;
+        loop {
+            let op = match self.peek() {
+                Some(Tok::EqEq) => BinOp::EqEq,
+                Some(Tok::NotEq) => BinOp::NotEq,
+                _ => break,
+            };
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("相等比较表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_comparison()?;
+            let span = lhs.span();
+            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
     fn parse_comparison(&mut self) -> AliasResult<Expr> {
-        let lhs = self.parse_additive()?;
+        let lhs = self.parse_shift()?;
         let op = match self.peek() {
             Some(Tok::Lt) => BinOp::Lt,
             Some(Tok::Le) => BinOp::Le,
             Some(Tok::Gt) => BinOp::Gt,
             Some(Tok::Ge) => BinOp::Ge,
-            Some(Tok::EqEq) => BinOp::EqEq,
-            Some(Tok::NotEq) => BinOp::NotEq,
             _ => return Ok(lhs),
         };
         self.bump();
-        let rhs = self.parse_additive()?;
+        let rhs = self.parse_shift()?;
         let span = lhs.span();
         Ok(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span })
+    }
+
+    fn parse_shift(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_additive()?;
+        let mut chain = 0usize;
+        loop {
+            let op = match self.peek() {
+                Some(Tok::Shl) => BinOp::Shl,
+                Some(Tok::Shr) => BinOp::Shr,
+                _ => break,
+            };
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("移位表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_additive()?;
+            let span = lhs.span();
+            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
     }
 
     fn parse_additive(&mut self) -> AliasResult<Expr> {
@@ -219,12 +308,13 @@ impl Parser {
             let op = match self.peek() {
                 Some(Tok::Star) => BinOp::Mul,
                 Some(Tok::Slash) => BinOp::Div,
+                Some(Tok::Percent) => BinOp::Rem,
                 _ => break,
             };
             self.bump();
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
-                return Err(self.err_here(format!("乘除表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+                return Err(self.err_here(format!("乘除余表达式超过 {MAX_EXPR_CHAIN} 项上限")));
             }
             let rhs = self.parse_unary()?;
             let span = lhs.span();
@@ -293,6 +383,7 @@ impl Parser {
             let tok = match self.peek() {
                 Some(Tok::Minus) => Tok::Minus,
                 Some(Tok::Bang) => Tok::Bang,
+                Some(Tok::Tilde) => Tok::Tilde,
                 _ => break,
             };
             if prefixes.len() >= MAX_EXPR_CHAIN {
@@ -306,6 +397,7 @@ impl Parser {
             expr = match tok {
                 Tok::Minus => Expr::Neg { expr: Box::new(expr), span },
                 Tok::Bang => Expr::Not { expr: Box::new(expr), span },
+                Tok::Tilde => Expr::BitNot { expr: Box::new(expr), span },
                 _ => unreachable!(),
             };
         }
@@ -470,25 +562,7 @@ impl Parser {
 
     fn parse_match_arm(&mut self) -> AliasResult<MatchArm> {
         let span = self.span();
-        let ctor = match self.peek().cloned() {
-            Some(Tok::Ident(n)) if n == "ok" => {
-                self.bump();
-                CtorKind::Ok
-            }
-            Some(Tok::Ident(n)) if n == "err" => {
-                self.bump();
-                CtorKind::Err
-            }
-            other => {
-                return Err(self.err_here(format!(
-                    "match 臂构造器必须是 ok 或 err, 实际 {:?}",
-                    other
-                )));
-            }
-        };
-        self.expect(&Tok::LParen)?;
-        let binding = self.expect_ident()?;
-        self.expect(&Tok::RParen)?;
+        let pattern = self.parse_pattern()?;
         self.expect(&Tok::Arrow)?;
         let body = if self.peek() == Some(&Tok::LBrace) {
             ArmBody::Block(self.parse_block()?)
@@ -497,11 +571,78 @@ impl Parser {
         } else {
             ArmBody::Value(Box::new(self.parse_expr()?))
         };
-        Ok(MatchArm {
-            pattern: Pattern { ctor, binding, span },
-            body,
-            span,
-        })
+        Ok(MatchArm { pattern, body, span })
+    }
+
+    fn parse_pattern(&mut self) -> AliasResult<Pattern> {
+        let span = self.span();
+        match self.peek().cloned() {
+            Some(Tok::Ident(name))
+                if matches!(name.as_str(), "ok" | "err")
+                    && self.peek_at(1) == Some(&Tok::LParen) =>
+            {
+                self.bump();
+                let ctor = if name == "ok" { CtorKind::Ok } else { CtorKind::Err };
+                self.expect(&Tok::LParen)?;
+                let binding = match self.peek().cloned() {
+                    Some(Tok::Ident(n)) => {
+                        self.bump();
+                        if n == "_" { None } else { Some(n) }
+                    }
+                    other => {
+                        return Err(self.err_here(format!(
+                            "result 构造器 Pattern 的载荷必须是标识符或 _, 实际 {:?}",
+                            other
+                        )));
+                    }
+                };
+                self.expect(&Tok::RParen)?;
+                Ok(Pattern::Constructor { ctor, binding, span })
+            }
+            Some(Tok::Ident(name)) => {
+                self.bump();
+                if name == "_" {
+                    Ok(Pattern::Wildcard { span })
+                } else {
+                    Ok(Pattern::Binding { name, span })
+                }
+            }
+            Some(Tok::Minus) if matches!(self.peek_at(1), Some(Tok::Int(_))) => {
+                self.bump();
+                let Some(Tok::Int(v)) = self.peek().cloned() else { unreachable!() };
+                self.bump();
+                let value = v.checked_neg().ok_or_else(|| AliasError {
+                    msg: "负整数字面量超出 i64 表示范围".into(),
+                    span,
+                })?;
+                Ok(Pattern::Int { value, span })
+            }
+            Some(Tok::Int(value)) => {
+                self.bump();
+                Ok(Pattern::Int { value, span })
+            }
+            Some(Tok::Bool(value)) => {
+                self.bump();
+                Ok(Pattern::Bool { value, span })
+            }
+            Some(Tok::Str(parts)) => {
+                self.bump();
+                let mut value = String::new();
+                for part in parts {
+                    match part {
+                        StrPart::Lit(s) => value.push_str(&s),
+                        StrPart::Hole(_) => {
+                            return Err(AliasError {
+                                msg: "match 字符串 Pattern 必须是纯字面量".into(),
+                                span,
+                            });
+                        }
+                    }
+                }
+                Ok(Pattern::Str { value, span })
+            }
+            other => Err(self.err_here(format!("无法开始 match Pattern: {:?}", other))),
+        }
     }
 
     fn looks_like_func_lit(&self) -> bool {

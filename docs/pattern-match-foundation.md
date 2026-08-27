@@ -1,41 +1,52 @@
-# Pattern AST + Match Foundation
+# Pattern AST + Match 第一批正式语义
 
 日期：2026-08-27
 
 ## 当前冻结状态
 
-`match` 已不再把 result 构造器和绑定名直接存放在 `MatchArm` 上；每个 match 臂持有独立的 `Pattern` AST 节点。
+`match` 的每个臂持有独立 `Pattern` AST 节点。`MatchArm` 只负责 pattern + arm body + arm span，不再直接拥有构造器或绑定状态，也不存在兼容 `Deref` 层。
 
-当前公开语法**没有扩大**，仍只接受：
+第一批公开 Pattern：
 
 ```alias
 match value {
+    _ -> ...
+    name -> ...
+    0 -> ...
+    true -> ...
+    'text' -> ...
     ok(v) -> ...
-    err(e) -> ...
+    err(_) -> ...
 }
 ```
 
-`Pattern` 当前承载：
+其中：
 
-- result constructor：`ok` / `err`；
-- 臂内不可变绑定名；
-- pattern 自身 span。
+- `_`：匹配任意值，不创建绑定；
+- 任意合法标识符：匹配任意值，并以不可变 `val` 语义绑定整个主语；
+- 整数字面量：仅适用于整数主语，并按主语静态整数类型执行范围检查；
+- `true` / `false`：仅适用于 `bool`；
+- 纯字符串字面量：仅适用于 `string`；插值字符串不是字面量 Pattern；
+- `ok(name|_)` / `err(name|_)`：仅适用于 `result<T, E>`，可绑定或丢弃对应 payload。
 
-`MatchArm` 只负责 pattern + arm body + arm span，不再自己拥有构造器/绑定状态，因此不存在两份 pattern 状态。
+## 穷尽性与不可达
 
-## 兼容语义
+- `_` 和普通绑定 Pattern 都是 catch-all；其后的 arm 不可达；
+- `bool` 可由 `true` + `false` 穷尽，也可由 catch-all 穷尽；
+- `result<T, E>` 可由 `ok(...)` + `err(...)` 穷尽，也可由 catch-all 穷尽；
+- 整数、字符串等开放取值域不能靠有限字面量列表证明穷尽，必须提供 `_` 或普通绑定 Pattern；
+- 重复字面量 Pattern、重复 `ok` / `err` 均为编译错误；
+- 一旦前序 Pattern 已覆盖全部剩余取值，后续 arm 为编译错误。
 
-本次是 AST/编译器结构迁移，不改变已接受程序的可观察行为：
+`match` 不再限定主语必须为 `result`。Pattern 是否适用于某个主语类型由统一 sema 检查决定。
 
-- `match` 主语仍必须是 `result<T, E>`；
-- 必须恰好覆盖一个 `ok` 和一个 `err`；
-- 重复 `ok` / `err` 继续报原有诊断；
-- `ok(name)` / `err(name)` 的绑定仍是 arm-local `val`；
-- match 值类型、never/return 臂、`?` 传播规则保持不变；
-- `some(x)` 等其它 constructor pattern 仍被拒绝，错误文本保持现有契约。
+## 仍未加入
 
-## 后续扩展边界
+本批不加入：
 
-未来若增加 wildcard、literal、struct 或其它 constructor pattern，应扩展 `Pattern` 节点和统一 coverage 检查，而不是重新把 pattern 语义塞回 `MatchArm` 或为每种类型增加独立 match AST。
+- match guard；
+- struct Pattern；
+- 嵌套 constructor payload Pattern；
+- 用户自定义 Pattern 构造器。
 
-这次不引入这些新语法，也不提前定义其穷尽性规则。
+这些能力以后继续扩展同一个 `Pattern` AST 和统一 coverage 检查，不得重新把类型特例塞回 `MatchArm`。

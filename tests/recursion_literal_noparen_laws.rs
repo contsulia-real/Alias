@@ -12,8 +12,8 @@ fn err(src: &str) -> String {
 }
 
 #[test]
-fn public_u32_named_recursion_and_nested_print_call_run() {
-    let src = "public func u32 fact_while = (u32 x) -> {\n    if x == 0 {\n        return 1\n    }\n    return fact_while (x-1);\n}\nfunc i32 main = () -> {\n    println fact_while 3;\n    println fact_while 0;\n    return 0;\n}\n";
+fn pub_u32_named_recursion_and_nested_print_call_run() {
+    let src = "pub func u32 fact_while = (u32 x) -> {\n    if x == 0 {\n        return 1\n    }\n    return fact_while (x-1);\n}\nfunc i32 main = () -> {\n    println fact_while 3;\n    println fact_while 0;\n    return 0;\n}\n";
     assert_eq!(run("test.as", src).unwrap(), 0);
 }
 

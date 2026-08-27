@@ -64,7 +64,7 @@ impl Checker {
 
     // ---------- 扩展函数定义 ----------
 
-    /// 扩展函数定义: public? func <Ret> <ReceiverType>.<name> = (params) -> 体。
+    /// 扩展函数定义: pub? func <Ret> <ReceiverType>.<name> = (params) -> 体。
     /// 所有合法 Alias 类型都可作为 receiver，唯一例外是 unit。
     /// self 为隐式首参数 (val 语义, 类型 = 完整 receiver 类型)。
     pub(super) fn method_def(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
@@ -110,7 +110,7 @@ impl Checker {
             }
             table.insert(
                 mname.clone(),
-                MethodInfo { params: ptys, ret: declared.clone(), public: b.public, builtin: false },
+                MethodInfo { params: ptys, ret: declared.clone(), is_pub: b.is_pub, builtin: false },
             );
         }
 

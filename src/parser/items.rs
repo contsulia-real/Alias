@@ -2,7 +2,7 @@
 //!
 //! 拥有: 程序结构循环 ([`Parser::parse_program`])、struct 定义
 //! (字段即实例内绑定)、import 解析 (Phase 1 暂存不执行)。
-//! 绑定项 (含 public? func 扩展方法定义) 委托 stmts::parse_binding。
+//! 绑定项 (含 pub? func 扩展方法定义) 委托 stmts::parse_binding。
 
 use super::Parser;
 use crate::ast::{Import, Item, Program, StructDef, StructField};
@@ -23,7 +23,7 @@ impl Parser {
                     imports.push(self.parse_import()?);
                     self.end_stmt();
                 }
-                Some(Tok::Public) | Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) => {
+                Some(Tok::Pub) | Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) => {
                     items.push(Item::Binding(self.parse_binding()?));
                     self.end_stmt();
                 }
@@ -34,7 +34,7 @@ impl Parser {
                 }
                 other => {
                     return Err(self.err_here(format!(
-                        "顶层只允许 val/var/func/public 绑定, 实际 {:?}",
+                        "顶层只允许 val/var/func/pub 绑定, 实际 {:?}",
                         other.cloned()
                     )));
                 }

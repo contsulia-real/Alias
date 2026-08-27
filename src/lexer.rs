@@ -15,7 +15,7 @@ pub enum Tok {
     Var,
     Func,
     Struct,
-    Public,
+    Pub,
     SelfKw,
     For,
     While,
@@ -41,9 +41,16 @@ pub enum Tok {
     Minus,        // -
     Star,         // *
     Slash,        // /
+    Percent,      // %
     Bang,         // !
+    Tilde,        // ~
+    Amp,          // &
+    Pipe,         // |
+    Caret,        // ^
     AndAnd,       // &&
     OrOr,         // ||
+    Shl,          // <<
+    Shr,          // >>
     Lt,           // <
     Le,           // <=
     Gt,           // >
@@ -284,7 +291,7 @@ impl<'a> Lexer<'a> {
             b"var" => Tok::Var,
             b"func" => Tok::Func,
             b"struct" => Tok::Struct,
-            b"public" => Tok::Public,
+            b"pub" => Tok::Pub,
             b"self" => Tok::SelfKw,
             b"for" => Tok::For,
             b"while" => Tok::While,
@@ -323,10 +330,16 @@ impl<'a> Lexer<'a> {
             b'+' => Tok::Plus,
             b'*' => Tok::Star,
             b'/' => Tok::Slash,
+            b'%' => Tok::Percent,
+            b'~' => Tok::Tilde,
+            b'^' => Tok::Caret,
             b'<' => {
                 if self.peek() == Some(b'=') {
                     self.bump();
                     Tok::Le
+                } else if self.peek() == Some(b'<') {
+                    self.bump();
+                    Tok::Shl
                 } else {
                     Tok::Lt
                 }
@@ -335,6 +348,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some(b'=') {
                     self.bump();
                     Tok::Ge
+                } else if self.peek() == Some(b'>') {
+                    self.bump();
+                    Tok::Shr
                 } else {
                     Tok::Gt
                 }
@@ -352,7 +368,7 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Tok::AndAnd
                 } else {
-                    return self.err("孤立的 '&' — 逻辑与写作 &&");
+                    Tok::Amp
                 }
             }
             b'|' => {
@@ -360,7 +376,7 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Tok::OrOr
                 } else {
-                    return self.err("孤立的 '|' — 逻辑或写作 ||");
+                    Tok::Pipe
                 }
             }
             b'(' => {

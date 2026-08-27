@@ -1,6 +1,6 @@
 // ============================================================
 // demos/methods.as — Phase 2c 扩展方法演练夹具
-// 覆盖: 方法定义文法 (public? func <Ret> <Recv>.<name>) /
+// 覆盖: 方法定义文法 (pub? func <Ret> <Recv>.<name>) /
 //   self 隐式不可变绑定 / 结构体方法经 self 写 var 字段 /
 //   同名方法跨类型命名空间共存 / 方法链式调用 /
 //   内建 len·upper·lower·trim 往返 (含 trim 边界)
@@ -12,16 +12,16 @@ struct counter {
 }
 
 // 用户扩展方法: string 拼接 (helper.as 冻结形状)
-public func string string.append = (string tail) -> return '${self}${tail}'
+pub func string string.append = (string tail) -> return '${self}${tail}'
 
 // 同名方法跨类型共存: 命名空间按接收者类型划分
-public func i32 counter.bump = (i32 by) -> {
+pub func i32 counter.bump = (i32 by) -> {
     self.n = self.n + by
     return self.n
 }
 
 // 无参方法 + self 只读 (字段读经插值洞)
-public func string counter.label = () -> return '${self.tag}(${self.n})'
+pub func string counter.label = () -> return '${self.tag}(${self.n})'
 
 func i32 main = () -> {
     // ---- 用户字符串方法 ----

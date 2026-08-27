@@ -43,9 +43,9 @@ println(fact_while(0))
 
 ## 验证
 
-新增 `tests/recursion_literal_noparen_laws.rs`，覆盖：
+`tests/recursion_literal_noparen_laws.rs` 覆盖：
 
-- `public func u32` 命名递归；
+- `pub func u32` 命名递归；
 - `x == 0` / `x - 1` 的整数目标类型；
 - 字面量越界诊断；
 - 不允许 `u32`/`i32` 变量隐式混算；
