@@ -6,7 +6,7 @@
 
 use super::{validate_nesting, Parser, MAX_EXPR_CHAIN};
 use crate::ast::{
-    ArmBody, BinOp, Body, CallArg, CtorKind, Expr, MatchArm, Param, StrPartAst,
+    ArmBody, BinOp, Body, CallArg, CtorKind, Expr, MatchArm, Param, Pattern, StrPartAst,
 };
 use crate::lexer::{StrPart, Tok, Token};
 use crate::{AliasError, AliasResult};
@@ -497,7 +497,11 @@ impl Parser {
         } else {
             ArmBody::Value(Box::new(self.parse_expr()?))
         };
-        Ok(MatchArm { ctor, binding, body, span })
+        Ok(MatchArm {
+            pattern: Pattern { ctor, binding, span },
+            body,
+            span,
+        })
     }
 
     fn looks_like_func_lit(&self) -> bool {

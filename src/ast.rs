@@ -117,10 +117,21 @@ pub enum StrPartAst {
     Hole(Box<Expr>),
 }
 
+/// 当前 match 表面只支持 result 的两个构造器；构造器身份属于 Pattern，
+/// 不再直接挂在 MatchArm 上。未来扩展其它 pattern 时从 Pattern 节点继续演进。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtorKind {
     Ok,
     Err,
+}
+
+/// Pattern AST 的第一阶段：result constructor pattern。
+/// 当前合法形态严格保持为 `ok(name)` / `err(name)`，不扩大语言表面。
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub ctor: CtorKind,
+    pub binding: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -132,10 +143,19 @@ pub enum ArmBody {
 
 #[derive(Debug, Clone)]
 pub struct MatchArm {
-    pub ctor: CtorKind,
-    pub binding: String,
+    pub pattern: Pattern,
     pub body: ArmBody,
     pub span: Span,
+}
+
+/// 现有 sema/codegen 读取 `arm.ctor` / `arm.binding` 时会直接落到 Pattern。
+/// 这不是重复状态：MatchArm 只持有一个 Pattern 节点。
+impl std::ops::Deref for MatchArm {
+    type Target = Pattern;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pattern
+    }
 }
 
 #[derive(Debug, Clone)]
