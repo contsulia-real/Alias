@@ -155,7 +155,7 @@ fn targeted_table() -> Vec<Targeted> {
         // 闭包引用捕获哨兵: cond 读外层 n 最新值 (smoke closure_reads_latest_value)
         Targeted {
             name: "closure_reads_latest_value",
-            src: "\nfunc i32 main = () -> {\n    var i32 n = 0;\n    func bool lt3 = (i32 cap) -> return n < cap\n    var i32 rounds = 0;\n    for lt3(3) {\n        increase n\n        increase rounds\n    }\n    return rounds\n}\n",
+            src: "\nfunc i32 main = () -> {\n    var i32 n = 0;\n    func bool lt3 = (i32 cap) -> return n < cap\n    var i32 rounds = 0;\n    while lt3(3) {\n        increase n\n        increase rounds\n    }\n    return rounds\n}\n",
             stdout: b"",
             stderr: b"",
             exit: 3,

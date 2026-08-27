@@ -127,7 +127,7 @@ fn golden_table() -> Vec<Golden> {
         Golden {
             name: "closure_reference_capture_latest_value",
             input: Input::Inline(
-                "func i32 main = () -> {\n    var i32 n = 0;\n    func bool lt3 = (i32 cap) -> return n < cap\n    var i32 rounds = 0;\n    for lt3(3) {\n        increase n\n        increase rounds\n    }\n    return rounds\n}\n",
+                "func i32 main = () -> {\n    var i32 n = 0;\n    func bool lt3 = (i32 cap) -> return n < cap\n    var i32 rounds = 0;\n    while lt3(3) {\n        increase n\n        increase rounds\n    }\n    return rounds\n}\n",
             ),
             stdout: b"",
             stderr: b"",

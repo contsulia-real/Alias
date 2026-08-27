@@ -166,3 +166,14 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 缺失链接器时失败、run/build 原生产物逐字节一致、16 路并发完整编译及同一
 `methods.as` exe 重复执行 100 次。`cargo check`、`cargo clippy --all-targets`
 和依赖/符号静态审计均通过；Clippy 仅保留非阻断风格警告。
+
+## 控制流 / iterator / 运算方法收口（2026-08-27）
+
+- `func` 收紧为函数字面量 RHS；非 unit 返回检查升级为所有可达路径显式 return。
+- 新增 `if/else if/else`、短路 `&&/||`、三元 `?:`、`break/continue`。
+- `for` 改为 `for Type name in Expr`，仅作集合迭代；旧 condition-for 与 C 风格 for 退役，条件循环统一归 `while`。
+- `iterator<T>` 落地；array iterator 使用共享结构版本号进行别名可见的 fail-fast 失效检测。
+- 数值内建 `plus/minus/times/div` 与符号运算共用 lowering，`bool.not` 与 `!` 共用取反路径。
+- 赋值/字段赋值补齐静态类型一致性；恢复数组和方法领域诊断的既有精确文案/span。
+- CLI 缺文件错误改由 Alias 生成确定性中文文本，避免宿主 Windows UI 语言改变黄金字节。
+- 新增 `tests/control_flow_operator_laws.rs`，覆盖上述控制流、iterator 与运算函数契约。

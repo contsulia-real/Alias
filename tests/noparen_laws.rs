@@ -14,7 +14,7 @@ fn err(src: &str) -> String {
     }
 }
 
-const PLUS: &str = "public func i32 i32.plus = (i32 other) -> return self + other\n";
+const COMBINE: &str = "public func i32 i32.combine = (i32 other) -> return self + other\n";
 
 // ---------- 正向: 表达式位置吞参 ----------
 
@@ -47,7 +47,7 @@ fn explicit_parens_allow_binop_after() {
 
 #[test]
 fn method_infix_two_arg() {
-    let src = format!("{PLUS}func i32 main = () -> {{\n    val i32 b = 3 plus 4\n    return b\n}}\n");
+    let src = format!("{COMBINE}func i32 main = () -> {{\n    val i32 b = 3 combine 4\n    return b\n}}\n");
     assert_eq!(ok(&src), 7);
 }
 
@@ -59,8 +59,8 @@ fn method_infix_zero_arg() {
 
 #[test]
 fn method_infix_left_assoc_chain() {
-    // 左结合: (1 plus 2) plus 3 = 6
-    let src = format!("{PLUS}func i32 main = () -> {{\n    return 1 plus 2 plus 3\n}}\n");
+    // 左结合: (1 combine 2) combine 3 = 6
+    let src = format!("{COMBINE}func i32 main = () -> {{\n    return 1 combine 2 combine 3\n}}\n");
     assert_eq!(ok(&src), 6);
 }
 

@@ -5,7 +5,7 @@ func i32 main = () -> {
 
     func bool cond = (i32 x) -> return i < x
 
-    for cond(10) {
+    while cond(10) {
         increase i
 
         println i

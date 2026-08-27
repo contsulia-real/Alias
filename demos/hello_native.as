@@ -42,7 +42,7 @@ func i32 main = () -> {
     println fib(10)
 
     var i32 i = 3;
-    for i < 6 {
+    while i < 6 {
         println i
         increase i
     }

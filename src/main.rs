@@ -1,4 +1,5 @@
 use alias::{build, run};
+use std::io::ErrorKind;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -27,7 +28,13 @@ fn main() -> ExitCode {
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("无法读取 {path}: {e}");
+            // 不把宿主 Windows 的 UI 语言泄漏进 Alias 的可观察契约。
+            // NotFound 使用编译器自有的固定文本，其余 I/O 错误保留系统详情。
+            if e.kind() == ErrorKind::NotFound {
+                eprintln!("无法读取 {path}: 系统找不到指定的文件。 (os error 2)");
+            } else {
+                eprintln!("无法读取 {path}: {e}");
+            }
             return ExitCode::from(2);
         }
     };

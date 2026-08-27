@@ -1,9 +1,8 @@
-//! parser::exprs — 表达式解析 (优先级爬升)。
+//! parser::exprs — 表达式解析。
 //!
-//! 拥有: 中缀优先级链 (comparison → additive → multiplicative → unary)、
-//! 后缀链 (.field / .method(args) / [idx] / (args) / ?)、实参表与
-//! 命名实参探测、match 文法 (ok/err 臂, file_wc.as 34-52 冻结形状)、
-//! 字符串插值子表达式切分、函数字面量判定与解析。
+//! 优先级（高→低）：后缀/调用/方法 > 一元 - ! > * / > + - > 比较
+//! > == != > 无括号方法/调用边界 > && > || > ?:。
+//! `if` 不在表达式文法中；条件取值只有 ?: / match。
 
 use super::{validate_nesting, Parser, MAX_EXPR_CHAIN};
 use crate::ast::{
@@ -13,21 +12,74 @@ use crate::lexer::{StrPart, Tok, Token};
 use crate::{AliasError, AliasResult};
 
 impl Parser {
-    // ---------- 表达式 (优先级爬升) ----------
-
     pub(super) fn parse_expr(&mut self) -> AliasResult<Expr> {
-        self.parse_no_paren()
+        self.parse_ternary()
     }
 
-    /// 无括号文法泛化 (P2e): 表达式位置的两类无括号形态。
-    ///
-    /// 优先级铁律: 无括号绑定紧于一切二元运算 — `dup 5 + 1` 在 + 处
-    /// 悬空报错, 须写 `(dup 5) + 1` 或 `dup (5 + 1)` (spec-notes 附录八)。
-    ///
-    /// - 方法中缀: `a plus b` ≡ `a.plus(b)`; `s shout` ≡ `s.shout()` (零参);
-    ///   左结合链 `a plus b times c`
-    /// - 原生吞参: 仅裸名 callee — `val x = dup 5`; 实参位遇 Ident 必然
-    ///   按方法中缀解释 (函数值传参须显式 f(g) — breaking change M38)
+    /// ?: 最低优先级、右结合。后缀 result `?` 在 parse_postfix_on 中只在
+    /// `?` 后不能开始表达式时消费；若后面能开始表达式，则留给本层并要求 `:`。
+    fn parse_ternary(&mut self) -> AliasResult<Expr> {
+        let cond = self.parse_or()?;
+        if self.peek() != Some(&Tok::Question) {
+            return Ok(cond);
+        }
+        let span = cond.span();
+        self.bump();
+        let then_expr = self.parse_ternary()?;
+        self.expect(&Tok::Colon)?;
+        let else_expr = self.parse_ternary()?;
+        Ok(Expr::Ternary {
+            cond: Box::new(cond),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+            span,
+        })
+    }
+
+    fn parse_or(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_and()?;
+        let mut chain = 0usize;
+        while self.peek() == Some(&Tok::OrOr) {
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("逻辑或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_and()?;
+            let span = lhs.span();
+            lhs = Expr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_and(&mut self) -> AliasResult<Expr> {
+        let mut lhs = self.parse_no_paren()?;
+        let mut chain = 0usize;
+        while self.peek() == Some(&Tok::AndAnd) {
+            self.bump();
+            chain += 1;
+            if chain > MAX_EXPR_CHAIN {
+                return Err(self.err_here(format!("逻辑与表达式超过 {MAX_EXPR_CHAIN} 项上限")));
+            }
+            let rhs = self.parse_no_paren()?;
+            let span = lhs.span();
+            lhs = Expr::Binary {
+                op: BinOp::And,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// 无括号方法中缀：`a plus b` ≡ `a.plus(b)`，`s shout` ≡ `s.shout()`。
+    /// 普通无括号调用仍只允许一个参数。函数值作为参数须显式 f(g)。
     fn parse_no_paren(&mut self) -> AliasResult<Expr> {
         let mut lhs = self.parse_comparison()?;
         let mut chain = 0usize;
@@ -39,13 +91,9 @@ impl Parser {
                     if chain > MAX_EXPR_CHAIN {
                         return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));
                     }
-                    // 内建名单 callee: Ident 实参无条件吞入 (println a);
-                    // 实参后同行再无括号起点 → 链式限制报错 (≤1 参裁决)
                     let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
                         if matches!(n.as_str(), "println" | "print" | "increase" | "decrease"));
                     if callee_is_bare_builtin {
-                        // 实参 = 单个 unary/后缀链 (≤1 参裁决); 嵌套无括号
-                        // (println wrap 'yo') 须显式括号 println (wrap 'yo')
                         let arg = self.parse_unary()?;
                         let a_span = arg.span();
                         let args = vec![CallArg { label: None, value: arg, span: a_span }];
@@ -94,7 +142,6 @@ impl Parser {
                             })
                         }
                     };
-                    // 实参 token 由 parse_unary 自行消费 — 此处不可预 bump
                     let a = self.parse_unary()?;
                     let a_span = a.span();
                     let c_span = callee.span();
@@ -110,19 +157,20 @@ impl Parser {
         Ok(lhs)
     }
 
-
-    /// lookahead n 处是否可启动一个 unary 表达式 (P2e 无括号判定)
     fn starts_unary_at(&self, n: usize) -> bool {
         matches!(
             self.peek_at(n),
             Some(Tok::Ident(_))
+                | Some(Tok::SelfKw)
                 | Some(Tok::Int(_))
                 | Some(Tok::Float(_))
                 | Some(Tok::Bool(_))
                 | Some(Tok::Str(_))
                 | Some(Tok::LParen)
                 | Some(Tok::LBracket)
+                | Some(Tok::Match)
                 | Some(Tok::Minus)
+                | Some(Tok::Bang)
         )
     }
 
@@ -185,7 +233,9 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// 后缀链主体: 从已解析的头部 expr 继续消费 .field/.method/[idx]/(args)/?
+    /// `?` 的两种用途：
+    /// - `expr?`：后缀 result 传播；
+    /// - `cond ? a : b`：若问号后能开始表达式，问号留给最低优先级三元层。
     fn parse_postfix_on(&mut self, mut expr: Expr) -> AliasResult<Expr> {
         let mut chain = 0usize;
         loop {
@@ -219,8 +269,11 @@ impl Parser {
                     let args = self.parse_args()?;
                     expr = Expr::Call { callee: Box::new(expr), args, span };
                 }
-                // ? 传播糖 (P6): 与字段访问/调用同级的后缀
                 Some(Tok::Question) => {
+                    // 后一 token 能启动表达式 => 三元，不能在这里吞掉。
+                    if self.starts_unary_at(1) {
+                        break;
+                    }
                     chain += 1;
                     self.bump();
                     expr = Expr::Propagate { expr: Box::new(expr), span };
@@ -235,23 +288,30 @@ impl Parser {
     }
 
     pub(super) fn parse_unary(&mut self) -> AliasResult<Expr> {
-        let mut spans = Vec::new();
-        while self.peek() == Some(&Tok::Minus) {
-            if spans.len() >= MAX_EXPR_CHAIN {
+        let mut prefixes = Vec::new();
+        loop {
+            let tok = match self.peek() {
+                Some(Tok::Minus) => Tok::Minus,
+                Some(Tok::Bang) => Tok::Bang,
+                _ => break,
+            };
+            if prefixes.len() >= MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("一元表达式超过 {MAX_EXPR_CHAIN} 层上限")));
             }
-            spans.push(self.span());
+            prefixes.push((tok, self.span()));
             self.bump();
         }
         let mut expr = self.parse_postfix()?;
-        for span in spans.into_iter().rev() {
-            expr = Expr::Neg { expr: Box::new(expr), span };
+        for (tok, span) in prefixes.into_iter().rev() {
+            expr = match tok {
+                Tok::Minus => Expr::Neg { expr: Box::new(expr), span },
+                Tok::Bang => Expr::Not { expr: Box::new(expr), span },
+                _ => unreachable!(),
+            };
         }
         Ok(expr)
     }
 
-    /// primary + 后缀链: .field / .method(args) / [idx] / (args) / ?
-    /// primary + 后缀链 (主体见 parse_postfix_on)
     fn parse_postfix(&mut self) -> AliasResult<Expr> {
         let head = self.parse_primary()?;
         self.parse_postfix_on(head)
@@ -267,7 +327,6 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
-            // 尾逗号容忍 (Phase 2b): file_wc.as 构造实参跨行书写带尾逗号
             if self.peek() == Some(&Tok::RParen) {
                 break;
             }
@@ -283,14 +342,12 @@ impl Parser {
         Ok(args)
     }
 
-    /// 命名/位置实参共用语法空间 (用户裁决): 当前 Ident 且下一 token 为单
-    /// '=' (lexer 已把 '==' 折成 EqEq) 时解析为标签; 合法性归 sema 裁决
     fn parse_call_arg(&mut self) -> AliasResult<CallArg> {
         if let Some(Tok::Ident(label)) = self.peek().cloned() {
             if self.peek_at(1) == Some(&Tok::Assign) {
                 let span = self.span();
-                self.bump(); // 标签名
-                self.bump(); // =
+                self.bump();
+                self.bump();
                 let value = self.parse_expr()?;
                 return Ok(CallArg { label: Some(label), value, span });
             }
@@ -307,7 +364,6 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Int(v, span))
             }
-            // 浮点字面量 (Phase 3a): f64 承载, 目标 f32 由 sema 编译期舍入检查
             Some(Tok::Float(v)) => {
                 self.bump();
                 Ok(Expr::Float(v, span))
@@ -341,10 +397,9 @@ impl Parser {
             }
             Some(Tok::LParen) => {
                 if self.looks_like_func_lit() {
-                    return self.parse_func_lit();
+                    self.parse_func_lit()
                 } else {
-                    self.bump(); // (
-                    // () 是 unit 空占位
+                    self.bump();
                     if self.peek() == Some(&Tok::RParen) {
                         self.bump();
                         return Ok(Expr::Unit(span));
@@ -358,26 +413,21 @@ impl Parser {
                 let name = self.expect_ident()?;
                 Ok(Expr::Ident(name, span))
             }
-            // self (Phase 2c): 关键字降为普通名字表达式 — 方法体内由 sema
-            // 作用域解析 (隐式 val 绑定); 方法体外按未定义绑定拒绝
             Some(Tok::SelfKw) => {
                 self.bump();
                 Ok(Expr::Ident("self".into(), span))
             }
-            // match 表达式 (Phase 2b): match <expr> { ctor(绑定) -> 体, ... }
             Some(Tok::Match) => self.parse_match_expr(),
-            // 数组字面量 (Phase 2d): [e1, e2, ...] — 元素逗号分隔,
-            // 尾逗号容忍 (M27 先例); 括号内换行由 skip_newlines 吸收
             Some(Tok::LBracket) => self.parse_array_lit(),
+            // if 永远不是表达式；让这里产生明确诊断而非创建 Expr::If。
+            Some(Tok::If) => Err(self.err_here("if 只能作为语句使用；条件取值请使用 ?: 或 match")),
             other => Err(self.err_here(format!("无法开始一个表达式: {:?}", other))),
         }
     }
 
-    /// '[' 处进入: [ 元素, 元素, ... ] — 空字面量 [] 合法
-    /// (元素类型由声明上下文统一; 裸空字面量推断为 array<未知>)
     fn parse_array_lit(&mut self) -> AliasResult<Expr> {
         let span = self.span();
-        self.bump(); // [
+        self.bump();
         let mut elems = Vec::new();
         loop {
             self.skip_newlines();
@@ -396,13 +446,9 @@ impl Parser {
         Ok(Expr::ArrayLit { elems, span })
     }
 
-    /// match 文法 (file_wc.as 34-52 为冻结形状):
-    ///   arm := ("ok"|"err") "(" IDENT ")" "->" 体 [","]?   尾逗号容忍
-    ///   体  := "{" 块 "}" | "return" 表达式 | 表达式
-    /// 臂构造器名只接受 ok/err — 其余在语法层拒绝 (语言无用户自定义枚举)
     fn parse_match_expr(&mut self) -> AliasResult<Expr> {
         let span = self.span();
-        self.bump(); // match
+        self.bump();
         let subject = self.parse_expr()?;
         self.expect(&Tok::LBrace)?;
         let mut arms = Vec::new();
@@ -413,7 +459,6 @@ impl Parser {
                 _ => {
                     arms.push(self.parse_match_arm()?);
                     self.skip_newlines();
-                    // 臂间逗号可选 ([,]?): 换行与逗号皆可分隔, 尾逗号容忍
                     self.eat(&Tok::Comma);
                 }
             }
@@ -455,9 +500,6 @@ impl Parser {
         Ok(MatchArm { ctor, binding, body, span })
     }
 
-    /// 判定 '(' 开头是否为函数字面量:
-    /// 从 '(' 向前扫描到配对的 ')', 其后紧跟 '->' 即是。
-    /// (i32 x) -> ... / () -> { ... }; 分组表达式内不存在顶层 ') ->' 序列。
     fn looks_like_func_lit(&self) -> bool {
         let mut depth: u32 = 0;
         let mut i = self.pos;
@@ -465,7 +507,7 @@ impl Parser {
             match t.tok {
                 Tok::LParen | Tok::LBrace | Tok::LBracket => depth += 1,
                 Tok::RParen | Tok::RBrace | Tok::RBracket => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         return matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Arrow));
                     }
@@ -477,7 +519,6 @@ impl Parser {
         false
     }
 
-    /// '(' 处进入, 解析 (类型 名字, ...) -> 体
     fn parse_func_lit(&mut self) -> AliasResult<Expr> {
         let span = self.span();
         self.expect(&Tok::LParen)?;
@@ -504,14 +545,12 @@ impl Parser {
         Ok(Expr::FuncLit { params, body: Box::new(body), span })
     }
 
-    /// 体: '{' 块 '}' 或 'return' 表达式 (demo 先例均带 return; 宽容接受裸表达式)
+    /// 无花括号体 = 恰好一条真正的语句。绝不把裸表达式改写成 return。
     fn parse_func_body(&mut self) -> AliasResult<Body> {
         if self.peek() == Some(&Tok::LBrace) {
             Ok(Body::Block(self.parse_block()?))
         } else {
-            self.eat(&Tok::Return);
-            let e = self.parse_expr()?;
-            Ok(Body::ArrowExpr(Box::new(e)))
+            Ok(Body::Single(Box::new(self.parse_stmt()?)))
         }
     }
 }

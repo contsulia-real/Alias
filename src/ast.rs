@@ -1,10 +1,4 @@
-//! AST — 严格对应已定稿文法。
-//!
-//! 核心不变式(违反即 parser 报错, 不静默):
-//! - 绑定统一文法: (public)? (val|var|func) <类型> <名字> = <表达式>
-//!   类型槽强制非空 — 语言没有类型推断
-//! - 函数字面量是裸表达式: (参数) -> 体; func 只是绑定词
-//! - for/while 条件必须是 bool 表达式(语义检查在 sema)
+//! AST — 严格对应已冻结文法。
 
 use crate::Span;
 
@@ -16,13 +10,10 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    /// 顶层绑定: 目前主要是 func main 等
     Binding(Binding),
-    /// struct 定义 (Phase 2a): 名字与 func/绑定共用单一命名空间
     StructDef(StructDef),
 }
 
-/// struct <名字> { 字段... } — 字段即实例内绑定 (val/var 显式可变性)
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
@@ -30,8 +21,6 @@ pub struct StructDef {
     pub span: Span,
 }
 
-/// 字段: (val|var) <类型> <名字> (= 表达式)?
-/// default = 声明期默认值; 无默认的字段在构造点必须显式命名传入
 #[derive(Debug, Clone)]
 pub struct StructField {
     pub name: String,
@@ -41,7 +30,6 @@ pub struct StructField {
     pub span: Span,
 }
 
-/// import { a.b } from './x.as' — Phase 1 解析后暂存不执行
 #[derive(Debug, Clone)]
 pub struct Import {
     pub names: Vec<String>,
@@ -56,24 +44,18 @@ pub enum BindKind {
     Func,
 }
 
-/// 统一绑定: val/var/func <类型> <名字> = <表达式>
-/// name 允许点路径(string.append)以承载扩展方法定义
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub public: bool,
     pub kind: BindKind,
     pub ty: TypeExpr,
     pub name: String,
-    /// 扩展方法定义 (Phase 2c): Some((接收者类型名, 方法名)) —
-    /// 仅 func 绑定且名字为单点路径时由 parser 产出;
-    /// 此时 name = 方法名, ty = 返回类型槽。方法不是绑定:
-    /// 不进作用域/全局槽位, 由 sema 方法表与 codegen 静态分派接管
-    pub receiver: Option<(String, String)>,
+    pub receiver: Option<TypeExpr>,
     pub value: Expr,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Named(String),
     Generic(String, Vec<TypeExpr>),
@@ -98,25 +80,35 @@ pub struct Param {
     pub span: Span,
 }
 
-/// 函数体两种形态:
-///   块体   = () -> { 语句... }
-///   箭头体 = () -> return 表达式   (demo 先例均带 return)
+/// 花括号块，或恰好一条无花括号语句。单语句不是隐式返回。
 #[derive(Debug, Clone)]
 pub enum Body {
     Block(Vec<Stmt>),
-    ArrowExpr(Box<Expr>),
+    Single(Box<Stmt>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Binding(Binding),
     Assign { target: String, value: Expr, span: Span },
-    /// recv.field = expr (Phase 2a) — 字段级可变性独立于绑定可变性
     FieldAssign { recv: Box<Expr>, field: String, value: Expr, span: Span },
     ExprStmt { expr: Expr, span: Span },
     Return { value: Option<Expr>, span: Span },
-    For { cond: Expr, body: Vec<Stmt>, span: Span },
+    If {
+        branches: Vec<(Expr, Vec<Stmt>)>,
+        else_body: Option<Vec<Stmt>>,
+        span: Span,
+    },
     While { cond: Expr, body: Vec<Stmt>, span: Span },
+    For {
+        ty: TypeExpr,
+        name: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    Break { span: Span },
+    Continue { span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -125,17 +117,12 @@ pub enum StrPartAst {
     Hole(Box<Expr>),
 }
 
-/// match 臂构造器种类 — result<T,E> 内建枚举的 ok/err (Phase 2b)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtorKind {
     Ok,
     Err,
 }
 
-/// match 臂体三形态:
-///   块体       = { 语句... }        尾表达式语句 = 臂值; return 收尾 = never 流
-///   箭头值体   = -> 表达式          臂值即该表达式
-///   箭头返回体 = -> return 表达式   never 流 (函数返回, 无臂值)
 #[derive(Debug, Clone)]
 pub enum ArmBody {
     Block(Vec<Stmt>),
@@ -143,7 +130,6 @@ pub enum ArmBody {
     Ret(Box<Expr>),
 }
 
-/// match 分支: ctor(绑定) -> 体; 绑定为 val 语义新绑定, 作用域 = 臂体
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub ctor: CtorKind,
@@ -152,9 +138,6 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-/// 调用实参: label = Some 时为命名实参 (`name = expr`)。
-/// 文法上命名/位置实参共用一处语法空间 — 是否合法由 sema 按被调方裁决
-/// (结构体构造必须全命名, 函数调用必须全位置)。
 #[derive(Debug, Clone)]
 pub struct CallArg {
     pub label: Option<String>,
@@ -165,7 +148,6 @@ pub struct CallArg {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64, Span),
-    /// 浮点字面量 (Phase 3a) — f64 承载, f32 目标按编译期舍入检查
     Float(f64, Span),
     Bool(bool, Span),
     Str(Vec<StrPartAst>, Span),
@@ -173,30 +155,22 @@ pub enum Expr {
 
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     Neg { expr: Box<Expr>, span: Span },
+    Not { expr: Box<Expr>, span: Span },
+    Ternary {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+        span: Span,
+    },
 
-    /// f(args) 与语句级无括号调用 increase i / println x 统一为 Call;
-    /// 结构体构造 stat(k = v) 同形 — callee 为结构体名时 sema 判定为构造
     Call { callee: Box<Expr>, args: Vec<CallArg>, span: Span },
-    /// receiver.name(args) — 实参形态与 Call 同 (命名实参在此恒非法, sema 拒)
     MethodCall { recv: Box<Expr>, name: String, args: Vec<CallArg>, span: Span },
-    /// receiver.name
     Field { recv: Box<Expr>, name: String, span: Span },
-    /// arr[i] (P5 已裁决; Phase 2d 落地为读语义 + 越界运行时守卫)
     Index { recv: Box<Expr>, idx: Box<Expr>, span: Span },
-
-    /// 数组字面量 (Phase 2d): [e1, e2, ...] — 元素类型须一致,
-    /// 实例 = 泄漏堆块, 变量持指针 (引用语义)
     ArrayLit { elems: Vec<Expr>, span: Span },
-
     FuncLit { params: Vec<Param>, body: Box<Body>, span: Span },
-
-    /// match 表达式 (Phase 2b): 主语须为 result<T,E>, ok/err 臂必须穷尽;
-    /// 值 = 非 never 臂的公共类型
     Match { subject: Box<Expr>, arms: Vec<MatchArm>, span: Span },
-    /// expr? 传播糖 (P6): 脱糖 = match expr { ok(v) -> v, err(e) -> return err(e) };
-    /// 仅当所在函数声明返回同型错误 result 时合法
     Propagate { expr: Box<Expr>, span: Span },
-
     Unit(Span),
 }
 
@@ -212,6 +186,8 @@ pub enum BinOp {
     Ge,
     EqEq,
     NotEq,
+    And,
+    Or,
 }
 
 impl BinOp {
@@ -227,6 +203,8 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::EqEq => "==",
             BinOp::NotEq => "!=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
         }
     }
 }
@@ -242,6 +220,8 @@ impl Expr {
             | Expr::Unit(s) => *s,
             Expr::Binary { span, .. }
             | Expr::Neg { span, .. }
+            | Expr::Not { span, .. }
+            | Expr::Ternary { span, .. }
             | Expr::Call { span, .. }
             | Expr::MethodCall { span, .. }
             | Expr::Field { span, .. }

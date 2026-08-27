@@ -6,15 +6,12 @@
 
 use super::types::{check_type_slot, types_match, IntW, Ty};
 use super::{literal_slot_unify, Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
-use crate::ast::{Binding, Expr, Param, StructDef, TypeExpr};
+use crate::ast::{Binding, Expr, Param, StructDef};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
     // ---------- 结构体定义 (Phase 2a) ----------
 
-    /// 登记结构体: 重名拦截 (单一命名空间) + 字段类型槽校验 +
-    /// 字段重名/默认值一致性检查。字段类型只见表内已登记结构体 —
-    /// 声明前不可见, 与绑定同序。
     pub(super) fn struct_def(&mut self, sd: &StructDef, env: &Env) -> AliasResult<()> {
         if self.structs.contains_key(&sd.name) {
             return Err(AliasError {
@@ -38,8 +35,6 @@ impl Checker {
             }
             let ty = check_type_slot(&f.ty, f.span, &self.structs)?;
             if let Some(d) = &f.default {
-                // 默认值按声明期词汇环境校验 (构造期求值 — 无顶层副作用);
-                // 裸数值字面量同样经槽位统一
                 let dt = match literal_slot_unify(&ty, d) {
                     Some(r) => r?,
                     None => self.expr(d, env)?,
@@ -67,34 +62,27 @@ impl Checker {
         Ok(())
     }
 
-    // ---------- 方法定义与调用点 (Phase 2c) ----------
+    // ---------- 扩展函数定义 ----------
 
-    /// 扩展方法定义: public? func <Ret> <RecvType>.<name> = (params) -> 体。
-    /// 接收者 ∈ {string, bool, i32, 已登记结构体}; self 为隐式首参数
-    /// (val 语义, 类型 = 接收者); 签名先入表后查体 — 方法可递归。
+    /// 扩展函数定义: public? func <Ret> <ReceiverType>.<name> = (params) -> 体。
+    /// 所有合法 Alias 类型都可作为 receiver，唯一例外是 unit。
+    /// self 为隐式首参数 (val 语义, 类型 = 完整 receiver 类型)。
     pub(super) fn method_def(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
-        let Some((recv, mname)) = b.receiver.clone() else {
+        let Some(recv_expr) = b.receiver.clone() else {
             return Err(AliasError {
                 msg: "内部: 无接收者的方法定义".into(),
                 span: b.span,
             });
         };
-        // 接收者合法性: 内建标量类型或已登记结构体; 已知但非法的类型
-        // (unit/func) 与未知名各有独立诊断
-        if !matches!(recv.as_str(), "string" | "bool" | "i32")
-            && !self.structs.contains_key(&recv)
-        {
-            if recv == "unit" || recv == "func" {
-                return Err(AliasError {
-                    msg: format!("类型 {recv} 不能作为方法接收者"),
-                    span: b.span,
-                });
-            }
+        let recv_ty = check_type_slot(&recv_expr, b.span, &self.structs)?;
+        if recv_ty == Ty::Unit {
             return Err(AliasError {
-                msg: format!("未知类型名 '{recv}'"),
+                msg: format!("类型 {} 不能作为方法接收者", recv_expr.display()),
                 span: b.span,
             });
         }
+        let recv = recv_ty.name();
+        let mname = b.name.clone();
         let declared = check_type_slot(&b.ty, b.span, &self.structs)?;
         let Expr::FuncLit { params, body, span: fspan } = &b.value else {
             return Err(AliasError {
@@ -125,10 +113,12 @@ impl Checker {
                 MethodInfo { params: ptys, ret: declared.clone(), public: b.public, builtin: false },
             );
         }
-        // 体检查: self 注入为首个参数 (Q② val 语义 → 赋值/increase 静态拦截);
-        // 返回类型槽即期望返回类型 — Q③/return 一致性/推断全部复用 funclit
-        let self_param =
-            Param { ty: TypeExpr::Named(recv.clone()), name: "self".into(), span: b.span };
+
+        let self_param = Param {
+            ty: recv_expr,
+            name: "self".into(),
+            span: b.span,
+        };
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
@@ -137,11 +127,8 @@ impl Checker {
     }
 
     /// Q④ main 校验: 存在 / 零参 / 返回必须为 i32。
-    /// kind 非 Func 或初始化非函数值的 main 不入候选 — 与迁移前判定
-    /// 的判定一致, 同样落入「找不到顶层 func main」。
     pub(super) fn validate_main(&mut self) -> AliasResult<()> {
         let Some((sig, bspan)) = self.main.take() else {
-            // Q⑤: Span 为 default 时 Display 省略位置前缀 (lib.rs)
             return Err(AliasError {
                 msg: "找不到顶层 func main".into(),
                 span: Span::default(),
@@ -167,7 +154,6 @@ impl Checker {
                     })
                 }
             }
-            // 多态函数值做 main: 签名不可知, 归入返回类型非法
             _ => Err(AliasError {
                 msg: format!(
                     "顶层 func main 返回类型必须是 i32, 实际 {}",

@@ -1,15 +1,9 @@
 //! parser::stmts — 语句解析。
-//!
-//! 拥有: 块解析 ([`Parser::parse_block`])、语句分派
-//! ([`Parser::parse_stmt`], 含无括号单参调用吞参与字段链赋值承接)、
-//! 左值赋值收口 ([`Parser::assign_from_lvalue`])、绑定声明解析
-//! ([`Parser::parse_binding`], 顶层项与语句位共用; 扩展方法接收者
-//! 在此拆出)。
 
 use super::Parser;
 use crate::ast::{BindKind, Binding, CallArg, Expr, Stmt};
 use crate::lexer::Tok;
-use crate::{AliasResult, Span};
+use crate::{AliasError, AliasResult, Span};
 
 impl Parser {
     pub(super) fn parse_block(&mut self) -> AliasResult<Vec<Stmt>> {
@@ -29,23 +23,26 @@ impl Parser {
         Ok(stmts)
     }
 
-    fn parse_stmt(&mut self) -> AliasResult<Stmt> {
+    pub(super) fn parse_stmt(&mut self) -> AliasResult<Stmt> {
         let span = self.span();
         match self.peek() {
             Some(Tok::Return) => {
                 self.bump();
-                // return 后可无表达式? demo 里 return 总带值; 宽容支持裸 return
                 let value = match self.peek() {
                     None | Some(Tok::Newline) | Some(Tok::Semi) | Some(Tok::RBrace) => None,
                     Some(_) => Some(self.parse_expr()?),
                 };
                 Ok(Stmt::Return { value, span })
             }
+            Some(Tok::If) => self.parse_if_stmt(),
             Some(Tok::For) => {
                 self.bump();
-                let cond = self.parse_expr()?;
+                let ty = self.parse_type()?;
+                let name = self.expect_ident()?;
+                self.expect(&Tok::In)?;
+                let iterable = self.parse_expr()?;
                 let body = self.parse_block()?;
-                Ok(Stmt::For { cond, body, span })
+                Ok(Stmt::For { ty, name, iterable, body, span })
             }
             Some(Tok::While) => {
                 self.bump();
@@ -53,32 +50,37 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::While { cond, body, span })
             }
-            Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) | Some(Tok::Public) => {
+            Some(Tok::Break) => {
+                self.bump();
+                self.require_boundary("break")?;
+                Ok(Stmt::Break { span })
+            }
+            Some(Tok::Continue) => {
+                self.bump();
+                self.require_boundary("continue")?;
+                Ok(Stmt::Continue { span })
+            }
+            Some(Tok::Public) => Err(AliasError {
+                msg: "public 只能用于顶层绑定".into(),
+                span,
+            }),
+            Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) => {
                 Ok(Stmt::Binding(self.parse_binding()?))
             }
-            // 赋值语句: target = expr (P1 已裁决)
             Some(Tok::Ident(_)) if self.peek_at(1) == Some(&Tok::Assign) => {
                 let target = self.expect_ident()?;
-                self.bump(); // =
+                self.bump();
                 let value = self.parse_expr()?;
                 Ok(Stmt::Assign { target, value, span })
             }
-            // self = expr (Phase 2c): 解析为普通赋值 — val 语义由 sema 拒绝
             Some(Tok::SelfKw) if self.peek_at(1) == Some(&Tok::Assign) => {
-                self.bump(); // self
-                self.bump(); // =
+                self.bump();
+                self.bump();
                 let value = self.parse_expr()?;
                 Ok(Stmt::Assign { target: "self".into(), value, span })
             }
-            // 其余一律按表达式语句处理:
-            //   带括号调用 cond(10) / 方法调用 ch.sender()
-            //   无括号调用 increase i / println msg — 裸标识符后
-            //   同行还跟着一个一元表达式起点时, 它被吞作唯一实参
-            //   (文法上限 <= 1 参, 已裁决)
             Some(_) => {
                 let expr = self.parse_expr()?;
-                // 表达式后紧跟 '=' → 赋值语句 (简名已在上方特判;
-                // 此处承接 Phase 2a 字段链 recv.field = expr)
                 if self.peek() == Some(&Tok::Assign) {
                     return self.assign_from_lvalue(expr, span);
                 }
@@ -110,13 +112,47 @@ impl Parser {
         }
     }
 
-    /// '=' 前的表达式必须是左值形态: 简名已在语句入口特判,
-    /// 此处承接字段链; 下标目标 Phase 2d 明确拒绝 (只读索引裁决);
-    /// 其余维持既有报错形态 ('=' 处无法开始表达式)
+    fn parse_if_stmt(&mut self) -> AliasResult<Stmt> {
+        let span = self.span();
+        self.expect(&Tok::If)?;
+        let first_cond = self.parse_expr()?;
+        let first_body = self.parse_block()?;
+        let mut branches = vec![(first_cond, first_body)];
+        let mut else_body = None;
+
+        loop {
+            self.skip_newlines();
+            if !self.eat(&Tok::Else) {
+                break;
+            }
+            if self.eat(&Tok::If) {
+                let cond = self.parse_expr()?;
+                let body = self.parse_block()?;
+                branches.push((cond, body));
+                continue;
+            }
+            else_body = Some(self.parse_block()?);
+            break;
+        }
+
+        Ok(Stmt::If { branches, else_body, span })
+    }
+
+    fn require_boundary(&self, kw: &str) -> AliasResult<()> {
+        if matches!(
+            self.peek(),
+            None | Some(Tok::Newline) | Some(Tok::Semi) | Some(Tok::RBrace)
+        ) {
+            Ok(())
+        } else {
+            Err(self.err_here(format!("{kw} 后不能跟值或标签")))
+        }
+    }
+
     fn assign_from_lvalue(&mut self, expr: Expr, span: Span) -> AliasResult<Stmt> {
         match expr {
             Expr::Field { recv, name, .. } => {
-                self.bump(); // =
+                self.bump();
                 let value = self.parse_expr()?;
                 Ok(Stmt::FieldAssign { recv, field: name, value, span })
             }
@@ -128,8 +164,8 @@ impl Parser {
         }
     }
 
-    // ---------- 绑定: (public)? (val|var|func) 类型 名字 = 表达式 ----------
-
+    // 普通绑定: (public)? (val|var|func) <类型> <名字> = <表达式>
+    // 扩展函数: (public)? func <返回类型> <完整接收者类型>.<名字> = <函数字面量>
     pub(super) fn parse_binding(&mut self) -> AliasResult<Binding> {
         let span = self.span();
         let public = self.eat(&Tok::Public);
@@ -149,8 +185,6 @@ impl Parser {
             _ => return Err(self.err_here("绑定声明必须以 val/var/func 开头")),
         };
 
-        // 类型槽强制非空 — 无推断
-        // 前瞻 [Ident, Assign]: 名字后直接 '=', 说明类型槽被省略
         if matches!(self.peek(), Some(Tok::Ident(_))) && self.peek_at(1) == Some(&Tok::Assign)
         {
             return Err(self.err_here(format!(
@@ -159,9 +193,7 @@ impl Parser {
             )));
         }
         let ty = match self.peek() {
-            Some(Tok::Ident(_)) | Some(Tok::Bool(true)) | Some(Tok::Bool(false)) => {
-                self.parse_type()?
-            }
+            Some(Tok::Ident(_)) => self.parse_type()?,
             _ => {
                 return Err(self.err_here(format!(
                     "{:?} 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注",
@@ -170,38 +202,33 @@ impl Parser {
             }
         };
 
-        // 名字允许点路径(string.append 扩展方法定义)
-        let name_tok = self.expect_ident()?;
-        let mut name = name_tok;
-        while self.peek() == Some(&Tok::Dot) {
-            if matches!(self.peek_at(1), Some(Tok::Ident(_))) {
-                self.bump(); // .
-                name.push('.');
-                name.push_str(&self.expect_ident()?);
-            } else {
-                break;
+        let (name, receiver) = if kind == BindKind::Func {
+            let save = self.pos;
+            match self.parse_type() {
+                Ok(recv_ty) if self.peek() == Some(&Tok::Dot) => {
+                    self.bump();
+                    let method = self.expect_ident()?;
+                    (method, Some(recv_ty))
+                }
+                _ => {
+                    self.pos = save;
+                    (self.expect_ident()?, None)
+                }
             }
-        }
-
-        // Phase 2c: func 绑定的单点路径名 = 扩展方法定义
-        // (func <Ret> <RecvType>.<method>) — 拆出接收者, 名字归位为方法名。
-        // 多点路径与非 func 绑定维持既有形态 (带点名字的普通绑定)。
-        let mut receiver = None;
-        if kind == BindKind::Func {
-            let dotted: Vec<String> = name.split('.').map(str::to_string).collect();
-            if dotted.len() == 2 {
-                name = dotted[1].clone();
-                receiver = Some((dotted[0].clone(), dotted[1].clone()));
-            }
-        }
+        } else {
+            (self.expect_ident()?, None)
+        };
 
         self.expect(&Tok::Assign)?;
-        let value = if kind == BindKind::Func {
-            // func 绑定的值几乎总是函数字面量; 也允许引用既有函数值
-            self.parse_expr()?
-        } else {
-            self.parse_expr()?
-        };
+        let value = self.parse_expr()?;
+        if kind == BindKind::Func && !matches!(value, Expr::FuncLit { .. }) {
+            let msg = match &receiver {
+                Some(recv) => format!("方法 {}.{} 的体必须是函数字面量", recv.display(), name),
+                None => "func 绑定必须由函数字面量初始化".into(),
+            };
+            let err_span = if receiver.is_some() { span } else { value.span() };
+            return Err(AliasError { msg, span: err_span });
+        }
 
         Ok(Binding { public, kind, ty, name, receiver, value, span })
     }

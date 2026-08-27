@@ -167,8 +167,8 @@ fn calling_non_function_value() {
 fn declared_type_vs_initializer_mismatch() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val string s = 1\n    return 0\n}\n",
-        "绑定 's' 声明类型为 string, 实际 i32",
-        3, 4,
+        "绑定 's' 声明类型为 string: 需要 string, 实际 i32",
+        3, 19,
     );
 }
 
@@ -185,7 +185,7 @@ fn argument_type_vs_param_mismatch() {
 fn return_expr_vs_declared_mismatch() {
     assert_law(
         "\nfunc i32 f = () -> return true\nfunc i32 main = () -> {\n    return 0\n}\n",
-        "return 需要 i32, 实际 bool",
+        "return 需要 i32: 需要 i32, 实际 bool",
         2, 26,
     );
 }
@@ -218,7 +218,7 @@ fn unknown_type_name_rejected() {
 fn tightened_q1_ordered_comparison_on_bool() {
     assert_law(
         "\nfunc bool main = () -> {\n    return true < false\n}\n",
-        "运算符 < 不适用于 bool 与 bool — 有序比较仅限 i32 与 string",
+        "运算符 < 不适用于 bool 与 bool",
         3, 11,
     );
 }
@@ -244,7 +244,7 @@ fn q1_string_ordering_still_legal() {
 fn tightened_q3_block_fall_off_rejected() {
     assert_law(
         "\nfunc i32 f = () -> {\n    val i32 a = 1\n}\nfunc i32 main = () -> {\n    return 0\n}\n",
-        "返回类型为 i32 的函数体必须以 return 语句收尾",
+        "返回类型为 i32 的函数所有可达路径都必须显式 return",
         2, 13,
     );
 }
@@ -253,8 +253,8 @@ fn tightened_q3_block_fall_off_rejected() {
 #[test]
 fn tightened_q3_loop_tail_rejected() {
     assert_law(
-        "\nfunc i32 main = () -> {\n    var i32 i = 0\n    for i < 2 {\n        increase i\n    }\n}\n",
-        "返回类型为 i32 的函数体必须以 return 语句收尾",
+        "\nfunc i32 main = () -> {\n    var i32 i = 0\n    while i < 2 {\n        increase i\n    }\n}\n",
+        "返回类型为 i32 的函数所有可达路径都必须显式 return",
         2, 16,
     );
 }

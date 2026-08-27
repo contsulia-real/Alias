@@ -4,14 +4,10 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 impl<'m, M: Module> Compiler<'m, M> {
-    /// 混合签名 (Phase 3a): (globals:I64, env:I64, params...) -> ret —
-    /// 参数/返回按静态类型逐位定型; 浮点经 ABI 寄存器传递 (win64 XMM)。
-    /// Unit 函数统一携带 I64 哑字返回 (cl_type(Unit)=I64), 简化调用点。
     pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
         user_signature(self.cc, params, ret)
     }
 
-    /// 操作系统外部符号签名。语言 runtime 必须通过 `runtime_contract` 声明。
     pub(crate) fn external_signature(
         &self,
         params: &[cranelift_codegen::ir::Type],
@@ -27,7 +23,6 @@ impl<'m, M: Module> Compiler<'m, M> {
         s
     }
 
-    /// 具名混合签名内部函数声明 (用户函数与方法共用)
     pub(crate) fn declare_user_func_typed(
         &mut self,
         params: &[VTy],
@@ -65,7 +60,6 @@ impl<'m, M: Module> Compiler<'m, M> {
             .map_err(|e| native_err(Span::default(), format!("内部: runtime 声明失败 {e}")))
     }
 
-    /// 调用原生 runtime 符号的单返回值辅助。
     pub(crate) fn call_rt(
         &mut self,
         bcx: &mut FunctionBuilder,
@@ -151,12 +145,12 @@ impl<'m, M: Module> Compiler<'m, M> {
             caps: caps_map,
             caps_vty,
             terminated: false,
+            loop_targets: Vec::new(),
             init_ctx: false,
             ret_block: None,
             ret_vty: Some(ret_vty.clone()),
         };
 
-        // 参数 → 新鲜单元格 (引用语义; 参数入局部作用域, spec-notes §附录二)]
         for (i, p) in params.iter().enumerate() {
             let raw = bcx.block_params(entry)[i + 2];
             let vty = decl_vty(&p.ty, &self.struct_layouts);
@@ -169,8 +163,13 @@ impl<'m, M: Module> Compiler<'m, M> {
         let ret_val = bcx.append_block_param(ret_block, cl_type(&ret_vty));
         emit_body(self, &mut bcx, &mut frame, body, ret_block)?;
         if !frame.terminated {
-            // 落空回退: 仅 unit 函数可达 (非 unit 落空已被 Q③ 严格版在 sema 拒绝) → 哑值 0
-            let zero = bcx.ins().iconst(cl_type(&ret_vty), 0);
+            let zero = if cl_type(&ret_vty) == types::F32 {
+                bcx.ins().f32const(0.0)
+            } else if cl_type(&ret_vty) == types::F64 {
+                bcx.ins().f64const(0.0)
+            } else {
+                bcx.ins().iconst(cl_type(&ret_vty), 0)
+            };
             bcx.ins().jump(ret_block, &[BlockArg::Value(zero)]);
         }
         bcx.switch_to_block(ret_block);
@@ -186,10 +185,6 @@ impl<'m, M: Module> Compiler<'m, M> {
             .map_err(|e| native_err(Span::default(), format!("内部: 函数定义失败 {e}")))
     }
 
-    /// 入口 wrapper: Q⑥ 顶层初始化按序求值 (insert-after-eval 可见性),
-    /// 随后间接调用 i32 main 闭包并把返回值映射为进程退出码。
-    /// 导出 alias_start — 无 CRT 环境, 显式 ExitProcess 传递退出码,
-    /// 链接参数 /ENTRY:alias_start (linker.rs 单一拥有者)。
     pub(crate) fn compile_entry(
         &mut self,
         items: &[Item],
@@ -197,10 +192,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         main_ret: VTy,
     ) -> AliasResult<FuncId> {
         if main_ret != VTy::I(IntW::W32) {
-            return Err(native_err(
-                Span::default(),
-                "内部: sema 未将 main 收紧为 i32",
-            ));
+            return Err(native_err(Span::default(), "内部: sema 未将 main 收紧为 i32"));
         }
         let entry_sig = Signature::new(self.cc);
         let fid = self
@@ -218,7 +210,6 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         let byte_count = bcx.ins().iconst(types::I64, self.global_bytes as i64);
         let gword = self.call_rt(&mut bcx, "alias.globals.new", &[byte_count])?;
-
         let globals_v = bcx.declare_var(types::I64);
         bcx.def_var(globals_v, gword);
         let abort_ret = bcx.create_block();
@@ -231,15 +222,13 @@ impl<'m, M: Module> Compiler<'m, M> {
             caps: HashMap::new(),
             caps_vty: HashMap::new(),
             terminated: false,
+            loop_targets: Vec::new(),
             init_ctx: false,
             ret_block: Some(abort_ret),
             ret_vty: Some(VTy::I(IntW::W32)),
         };
-        // 顶层槽位偏移在编译期已知 → 记录供 slot_of 解析 (init 语境)
         frame.init_ctx = true;
 
-        // 名字随项序增长可见 — 按源码逐项插入 (insert-after-eval);
-        // 方法不是绑定, 不参与初始化序列
         for (binding_index, b) in items
             .iter()
             .filter_map(|i| match i {
@@ -268,10 +257,7 @@ impl<'m, M: Module> Compiler<'m, M> {
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
             } else {
                 let vty = decl_vty(&b.ty, &self.struct_layouts);
-                (
-                    emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?,
-                    vty,
-                )
+                (emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?, vty)
             };
             let off = self.top_slots[binding_index];
             let sv = norm_store(&mut bcx, v, &svty);
@@ -281,11 +267,9 @@ impl<'m, M: Module> Compiler<'m, M> {
             frame.locals_vty[0].insert(b.name.clone(), svty);
         }
 
-        // main 闭包: 从全局槽位加载 → 间接调用 (混合签名 — 返回类型定型)
         let clo = {
             let base = bcx.use_var(frame.globals);
-            bcx.ins()
-                .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
+            bcx.ins().load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
         let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
         let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
@@ -294,14 +278,12 @@ impl<'m, M: Module> Compiler<'m, M> {
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
         let code_word = norm_load(&mut bcx, raw, &main_ret);
-        // 无 CRT 环境：原生产物传递完整 i32；CLI 外壳负责 0..255 映射。
         let exit_code = bcx.ins().ireduce(types::I32, code_word);
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
         let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
         bcx.ins().call(epr, &[exit_code]);
-        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO); // 不可达兜底
+        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
-        // abort runtime 正常不会返回，兜底仍以错误码终止进程。
         bcx.switch_to_block(abort_ret);
         bcx.seal_block(abort_ret);
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
@@ -320,11 +302,11 @@ impl<'m, M: Module> Compiler<'m, M> {
         Ok(fid)
     }
 }
+
 // ---------------------------------------------------------------------------
 // 函数字面量: 捕获扫描 + 闭包对象创建
 // ---------------------------------------------------------------------------
 
-/// 创建闭包值: 扫描捕获 → 声明并排队函数体 → 组装 env 数组与闭包对象。
 pub(crate) fn emit_funclit_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -336,8 +318,6 @@ pub(crate) fn emit_funclit_value<M: Module>(
     emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty)
 }
 
-/// 绑定位置的函数字面量使用声明返回类型，避免把 f32 字面量等按默认 f64
-/// 推断后生成与闭包静态签名不一致的机器函数。
 pub(crate) fn emit_funclit_value_typed<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -356,7 +336,6 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
     c.fn_ids.push(fid);
     c.fn_rets.push(ret_vty.clone());
-    // 捕获项静态类型在捕获帧就地解析 — 闭包体内不可再回查外层帧
     let cap_vtys: Vec<(String, VTy)> = caps
         .iter()
         .map(|n| (n.clone(), vty_of_name(c, frame, n)))
@@ -369,7 +348,6 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         ret_vty,
     });
 
-    // env 数组: 捕获单元格指针按序排列 (引用捕获 — 最新值双向可见)
     let env_word = if caps.is_empty() {
         bcx.ins().iconst(types::I64, 0)
     } else {
@@ -380,15 +358,9 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         first_result(bcx, ecall)
     };
     for (i, name) in caps.iter().enumerate() {
-        // 捕获项必可解析为本帧局部或本帧捕获 (扫描保证)
         let cellw = if let Some(idx) = frame.caps.get(name) {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                base,
-                ((*idx as i64) * 8) as i32,
-            )
+            bcx.ins().load(types::I64, MemFlagsData::new(), base, ((*idx as i64) * 8) as i32)
         } else {
             let mut found: Option<Value> = None;
             for scope in frame.scopes.iter().rev() {
@@ -399,15 +371,9 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
             }
             found.unwrap_or_else(|| invariant_violation("捕获项解析"))
         };
-        bcx.ins().store(
-            MemFlagsData::new(),
-            cellw,
-            env_word,
-            ((i as i64) * 8) as i32,
-        );
+        bcx.ins().store(MemFlagsData::new(), cellw, env_word, ((i as i64) * 8) as i32);
     }
 
-    // 直取函数地址 (func_addr)，免运行时指针表
     let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
     let code = bcx.ins().func_addr(c.ptr_ty, fref);
     let cn = c.import_runtime("alias.closure.new")?;
@@ -416,10 +382,6 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     Ok(first_result(bcx, cncall))
 }
 
-/// 捕获扫描 (扁平顺序遍历): 对字面量体内每个名字, 若非本函数局部
-/// 且可经外层链解析 → 记入捕获表。嵌套字面量的名字同样记入 (传递捕获),
-/// 其自身捕获在其发射时按本帧捕获表再解析。insert-after-eval:
-/// 绑定名于初始化器求值后方才生效。
 pub(crate) fn scan_captures<M: Module>(
     c: &Compiler<M>,
     params: &[Param],
@@ -442,7 +404,7 @@ pub(crate) fn scan_body<M: Module>(
     frame: &Frame,
 ) {
     match body {
-        Body::ArrowExpr(e) => scan_expr(c, e, locals, caps, seen, frame),
+        Body::Single(stmt) => scan_stmt(c, stmt, locals, caps, seen, frame),
         Body::Block(stmts) => {
             for s in stmts {
                 scan_stmt(c, s, locals, caps, seen, frame);
@@ -454,6 +416,20 @@ pub(crate) fn scan_body<M: Module>(
 pub(crate) fn record_cap(name: &str, caps: &mut Vec<String>, seen: &mut HashSet<String>) {
     if seen.insert(name.to_string()) {
         caps.push(name.to_string());
+    }
+}
+
+fn scan_scoped_stmts<M: Module>(
+    c: &Compiler<M>,
+    stmts: &[Stmt],
+    locals: &HashSet<String>,
+    caps: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    frame: &Frame,
+) {
+    let mut child_locals = locals.clone();
+    for s in stmts {
+        scan_stmt(c, s, &mut child_locals, caps, seen, frame);
     }
 }
 
@@ -474,7 +450,6 @@ pub(crate) fn scan_stmt<M: Module>(
             scan_expr(c, value, locals, caps, seen, frame);
             ensure_scanned_name(target, locals, caps, seen, frame);
         }
-        // 字段赋值: 值与 recv 内的名字同样需要捕获扫描 (Phase 2a)
         Stmt::FieldAssign { recv, value, .. } => {
             scan_expr(c, value, locals, caps, seen, frame);
             scan_expr(c, recv, locals, caps, seen, frame);
@@ -485,10 +460,28 @@ pub(crate) fn scan_stmt<M: Module>(
                 scan_expr(c, e, locals, caps, seen, frame);
             }
         }
-        Stmt::For { cond, body, .. } | Stmt::While { cond, body, .. } => {
-            scan_expr(c, cond, locals, caps, seen, frame);
-            scan_body(c, &Body::Block(body.clone()), locals, caps, seen, frame);
+        Stmt::If { branches, else_body, .. } => {
+            for (cond, body) in branches {
+                scan_expr(c, cond, locals, caps, seen, frame);
+                scan_scoped_stmts(c, body, locals, caps, seen, frame);
+            }
+            if let Some(body) = else_body {
+                scan_scoped_stmts(c, body, locals, caps, seen, frame);
+            }
         }
+        Stmt::While { cond, body, .. } => {
+            scan_expr(c, cond, locals, caps, seen, frame);
+            scan_scoped_stmts(c, body, locals, caps, seen, frame);
+        }
+        Stmt::For { name, iterable, body, .. } => {
+            scan_expr(c, iterable, locals, caps, seen, frame);
+            let mut child_locals = locals.clone();
+            child_locals.insert(name.clone());
+            for stmt in body {
+                scan_stmt(c, stmt, &mut child_locals, caps, seen, frame);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
 }
 
@@ -502,7 +495,6 @@ pub(crate) fn ensure_scanned_name(
     if locals.contains(name) || seen.contains(name) {
         return;
     }
-    // 仅外层函数局部需要捕获; 顶层槽位经 globals 参数可达, 不捕获
     let outer_local = frame.caps.contains_key(name)
         || frame
             .scopes
@@ -524,10 +516,17 @@ pub(crate) fn scan_expr<M: Module>(
 ) {
     match e {
         Expr::Ident(name, _) => ensure_scanned_name(name, locals, caps, seen, frame),
-        Expr::Neg { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
+        Expr::Neg { expr, .. } | Expr::Not { expr, .. } => {
+            scan_expr(c, expr, locals, caps, seen, frame)
+        }
         Expr::Binary { lhs, rhs, .. } => {
             scan_expr(c, lhs, locals, caps, seen, frame);
             scan_expr(c, rhs, locals, caps, seen, frame);
+        }
+        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+            scan_expr(c, cond, locals, caps, seen, frame);
+            scan_expr(c, then_expr, locals, caps, seen, frame);
+            scan_expr(c, else_expr, locals, caps, seen, frame);
         }
         Expr::Str(parts, _) => {
             for p in parts {
@@ -542,7 +541,6 @@ pub(crate) fn scan_expr<M: Module>(
                 scan_expr(c, &a.value, locals, caps, seen, frame);
             }
         }
-        // 字段链的 recv 可能携带外层绑定 (闭包内 s.field) — 必须扫描
         Expr::Field { recv, .. } => scan_expr(c, recv, locals, caps, seen, frame),
         Expr::MethodCall { recv, args, .. } => {
             scan_expr(c, recv, locals, caps, seen, frame);
@@ -554,7 +552,6 @@ pub(crate) fn scan_expr<M: Module>(
             scan_expr(c, recv, locals, caps, seen, frame);
             scan_expr(c, idx, locals, caps, seen, frame);
         }
-        // 数组字面量元素可携带外层绑定 (闭包内 [a, b]) — 必须扫描
         Expr::ArrayLit { elems, .. } => {
             for el in elems {
                 scan_expr(c, el, locals, caps, seen, frame);
@@ -564,33 +561,31 @@ pub(crate) fn scan_expr<M: Module>(
         Expr::Match { subject, arms, .. } => {
             scan_expr(c, subject, locals, caps, seen, frame);
             for arm in arms {
-                // 臂绑定是本层局部 — 遮蔽后再扫描臂体 (FuncLit 参数同规约)
                 let binding = arm.binding.clone();
-                locals.insert(binding.clone());
+                let mut arm_locals = locals.clone();
+                arm_locals.insert(binding);
                 match &arm.body {
                     ArmBody::Block(stmts) => {
                         for s in stmts {
-                            scan_stmt(c, s, locals, caps, seen, frame);
+                            scan_stmt(c, s, &mut arm_locals, caps, seen, frame);
                         }
                     }
                     ArmBody::Value(e) | ArmBody::Ret(e) => {
-                        scan_expr(c, e, locals, caps, seen, frame)
+                        scan_expr(c, e, &mut arm_locals, caps, seen, frame)
                     }
                 }
-                locals.remove(&binding);
             }
         }
         Expr::FuncLit { params, body, .. } => {
-            // 嵌套字面量: 其参数遮蔽本层; 子树名字按本层扁平处理 (传递捕获)
-            let saved: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-            for p in &saved {
-                locals.insert(p.clone());
+            let mut nested_locals = locals.clone();
+            for p in params {
+                nested_locals.insert(p.name.clone());
             }
-            scan_body(c, body, locals, caps, seen, frame);
-            for p in &saved {
-                locals.remove(p);
-            }
+            scan_body(c, body, &mut nested_locals, caps, seen, frame);
         }
-        _ => {}
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Unit(_) => {}
     }
 }

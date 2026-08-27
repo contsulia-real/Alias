@@ -1,7 +1,6 @@
 use super::*;
+
 pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
-    // 必须与 cell_addr 一样从最内层向外层解析；地址与类型若命中不同绑定，
-    // 窄单元格会被按外层宽类型读写，直接造成原生堆越界。
     for vtys in frame.locals_vty.iter().rev() {
         if let Some(vty) = vtys.get(name) {
             return vty.clone();
@@ -16,7 +15,6 @@ pub(crate) fn vty_of_name<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str)
         .unwrap_or(VTy::Other)
 }
 
-/// 打印分派所需的最小静态类型投影 (推断不外泄 — 仅后端内部消费)。
 pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) -> VTy {
     match e {
         Expr::Int(..) => VTy::I(IntW::W32),
@@ -25,17 +23,18 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             v @ (VTy::I(_) | VTy::F(_)) => v,
             _ => VTy::Other,
         },
+        Expr::Not { .. } => VTy::Bool,
+        Expr::Ternary { then_expr, else_expr, .. } => {
+            let a = static_vty(c, frame, then_expr);
+            if a != VTy::Other { a } else { static_vty(c, frame, else_expr) }
+        }
         Expr::Bool(..) => VTy::Bool,
         Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
         Expr::FuncLit { params, body, .. } => VTy::Func(
-            params
-                .iter()
-                .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-                .collect(),
+            params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
             Box::new(infer_ret_vty(c, frame, params, body)),
         ),
-        // 算术结果 = 操作数族 (sema 已保证同族同宽); 比较恒 Bool
         Expr::Binary { op, lhs, rhs, .. } => match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                 let lt = static_vty(c, frame, lhs);
@@ -43,30 +42,19 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     lt
                 } else {
                     let rt = static_vty(c, frame, rhs);
-                    if rt.is_numeric() {
-                        rt
-                    } else {
-                        VTy::Other
-                    }
+                    if rt.is_numeric() { rt } else { VTy::Other }
                 }
             }
             _ => VTy::Bool,
         },
         Expr::Ident(name, _) => vty_of_name(c, frame, name),
-        // 数组字面量 (Phase 2d): 元素静态投影取首元素 (sema 已统一全元素)
         Expr::ArrayLit { elems, .. } => VTy::Array(Box::new(
-            elems
-                .first()
-                .map(|e| static_vty(c, frame, e))
-                .unwrap_or(VTy::Other),
+            elems.first().map(|e| static_vty(c, frame, e)).unwrap_or(VTy::Other),
         )),
-        // 下标读 (Phase 2d): 主语元素投影即结果类型 —
-        // 链式 arr[i].field / println arr[i] 的分派由此流动
         Expr::Index { recv, .. } => match static_vty(c, frame, recv) {
             VTy::Array(inner) => *inner,
             _ => VTy::Other,
         },
-        // 字段链: recv 的结构体名 → 布局表 → 字段静态类型 (嵌套可递归)
         Expr::Field { recv, name, .. } => {
             if let VTy::Struct(s) = static_vty(c, frame, recv) {
                 if let Some(layout) = c.struct_layouts.get(&s) {
@@ -79,7 +67,6 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
         }
         Expr::Call { callee, .. } => match callee.as_ref() {
             Expr::Ident(name, _) => {
-                // 转换内建 → 目标类型; typeof → string
                 if let Some(t) = conv_target_vty(name) {
                     return t;
                 }
@@ -90,12 +77,7 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     VTy::Func(_, ret) => Some(*ret),
                     _ => None,
                 }
-                // 结构体构造调用的结果即实例 (打印分派/字段偏移回查所需)
-                .or_else(|| {
-                    c.struct_layouts
-                        .contains_key(name)
-                        .then(|| VTy::Struct(name.clone()))
-                })
+                .or_else(|| c.struct_layouts.contains_key(name).then(|| VTy::Struct(name.clone())))
                 .unwrap_or(VTy::Other)
             }
             Expr::FuncLit { params, body, .. } => infer_ret_vty(c, frame, params, body),
@@ -104,14 +86,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 _ => VTy::Other,
             },
         },
-        // expr? 的静态类型 = 主语 T 侧反解 (打印 f(x)? 所需)
         Expr::Propagate { expr, .. } => match static_vty(c, frame, expr) {
             VTy::Result(t, _) => vty_of_type_name(&c.struct_layouts, &t),
             _ => VTy::Other,
         },
-        // match 的公共值类型由首个产值臂投影。臂绑定只在臂内可见，
-        // 因此必须把 result 的 T/E 临时压入类型作用域；直接在外层帧投影
-        // `ok(v) -> v` 会把 v 误判为 Other，随后把原生 F32 送进 I64 join。
         Expr::Match { subject, arms, .. } => {
             let payloads = match static_vty(c, frame, subject) {
                 VTy::Result(ok, err) => Some((
@@ -147,24 +125,26 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 })
                 .unwrap_or(VTy::Other)
         }
-        // 方法调用 (Phase 2c): 用户方法回查发射期返回类型表;
-        // 内建字符串方法按冻结签名投影 — 链式调用由此逐级流动;
-        // 数组内建三件套 (Phase 2d) 按冻结签名投影
         Expr::MethodCall { recv, name, .. } => {
-            let rn = match static_vty(c, frame, recv) {
-                VTy::Str => "string".to_string(),
-                VTy::I(_) => "i32".to_string(),
-                VTy::Bool => "bool".to_string(),
-                VTy::Struct(s) => s.clone(),
-                VTy::Array(elem) => {
-                    return match name.as_str() {
-                        "len" => VTy::I(IntW::W32),
-                        "push" => VTy::Unit,
-                        "pop" => *elem,
-                        _ => VTy::Other,
-                    };
+            let rvty = static_vty(c, frame, recv);
+            if rvty.is_numeric() && matches!(name.as_str(), "plus" | "minus" | "times" | "div") {
+                return rvty;
+            }
+            if rvty == VTy::Bool && name == "not" {
+                return VTy::Bool;
+            }
+            if let VTy::Array(elem) = &rvty {
+                match name.as_str() {
+                    "len" => return VTy::I(IntW::W32),
+                    "push" => return VTy::Unit,
+                    "pop" => return (**elem).clone(),
+                    "iterator" => return VTy::Iterator(elem.clone()),
+                    _ => {}
                 }
-                _ => return VTy::Other,
+            }
+            let rn = match rvty {
+                VTy::Other | VTy::Unit => return VTy::Other,
+                ref other => other.display_name(),
             };
             if let Some(v) = c.method_rets.get(&(rn.clone(), name.clone())) {
                 return v.clone();
@@ -174,12 +154,10 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                 ("string", "upper" | "lower" | "trim") => VTy::Str,
                 _ => VTy::Other,
             }
-        } // Expr 变体已全覆盖 — 新增变体时编译器强制补投影 (穷尽匹配)
+        }
     }
 }
 
-/// 函数字面量返回类型的保守推断 (箭头体=体类型; 块体=末条 return 类型;
-/// 其余落空=Unit)。仅用于打印分派与调用结果宽度 — 不外泄诊断。
 pub(crate) fn infer_ret_vty<M: Module>(
     c: &Compiler<M>,
     frame: &Frame,
@@ -207,16 +185,27 @@ pub(crate) fn infer_ret_vty<M: Module>(
         ret_block: frame.ret_block,
         ret_vty: frame.ret_vty.clone(),
         terminated: false,
+        loop_targets: Vec::new(),
         init_ctx: true,
     };
     match body {
-        Body::ArrowExpr(e) => static_vty(c, &inner, e),
-        Body::Block(stmts) => match stmts.last() {
-            Some(Stmt::Return { value, .. }) => match value {
-                Some(e) => static_vty(c, &inner, e),
-                None => VTy::Unit,
-            },
-            _ => VTy::Unit,
-        },
+        Body::Single(stmt) => ret_from_stmt(c, &inner, stmt).unwrap_or(VTy::Unit),
+        Body::Block(stmts) => stmts
+            .iter()
+            .find_map(|s| ret_from_stmt(c, &inner, s))
+            .unwrap_or(VTy::Unit),
+    }
+}
+
+fn ret_from_stmt<M: Module>(c: &Compiler<M>, frame: &Frame, stmt: &Stmt) -> Option<VTy> {
+    match stmt {
+        Stmt::Return { value: Some(e), .. } => Some(static_vty(c, frame, e)),
+        Stmt::Return { value: None, .. } => Some(VTy::Unit),
+        Stmt::If { branches, else_body, .. } => branches
+            .iter()
+            .flat_map(|(_, body)| body.iter())
+            .chain(else_body.iter().flat_map(|body| body.iter()))
+            .find_map(|s| ret_from_stmt(c, frame, s)),
+        _ => None,
     }
 }

@@ -4,8 +4,7 @@
 //! - 单引号字符串 '...' 内含 $name / ${expr} 插值 → 切成 StrPart 片段
 //! - 分号 Kotlin 式可省略 → lexer 发出 Newline token, 由 parser 决定边界;
 //!   括号深度 > 0 时换行视为普通空白
-//! - 行首延续符 '.' 抑制 Newline (支持 file_wc.as 的链式调用续行)
-//! - 转义: \n \t \r \\ \' \" \0 \$ (P8 已裁决; \$ 为临时补充, 待追认)
+//! - 行首延续符 '.' 抑制 Newline (支持链式调用续行)
 
 use crate::{AliasError, AliasResult, Span};
 
@@ -20,12 +19,16 @@ pub enum Tok {
     SelfKw,
     For,
     While,
+    If,
+    Else,
+    In,
+    Break,
+    Continue,
     Return,
     Match,
 
     // 字面量
     Int(i64),
-    /// 浮点字面量 (Phase 3a)
     Float(f64),
     Bool(bool),
     Str(Vec<StrPart>),
@@ -38,6 +41,9 @@ pub enum Tok {
     Minus,        // -
     Star,         // *
     Slash,        // /
+    Bang,         // !
+    AndAnd,       // &&
+    OrOr,         // ||
     Lt,           // <
     Le,           // <=
     Gt,           // >
@@ -54,13 +60,13 @@ pub enum Tok {
     Semi,         // ;
     Dot,          // .
     Question,     // ?
-    Newline,      // 逻辑行终止(括号内已被 lexer 吞掉)
+    Colon,        // :
+    Newline,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     Lit(String),
-    /// 插值洞: $name 或 ${expr} — 存原始 token 子流, 交给 parser 再解析
     Hole(Vec<(Tok, Span)>),
 }
 
@@ -158,7 +164,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// 换行是否应被抑制: 下一行第一个非空白字符是 '.', 表示链式调用续行
     fn newline_is_continuation(&self) -> bool {
         let mut i = self.pos;
         while i < self.src.len() {
@@ -172,7 +177,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> AliasResult<Option<Token>> {
-        // 用循环吞掉被抑制的换行，避免恶意空行在词法器自身形成递归栈。
         loop {
             self.skip_trivia();
             let Some(c) = self.peek() else { return Ok(None) };
@@ -188,7 +192,6 @@ impl<'a> Lexer<'a> {
 
         let c = self.peek().expect("上方已排除 EOF");
         let start_span = self.span_here(1);
-
         let tok = match c {
             b'0'..=b'9' => self.lex_int()?,
             b'\'' => self.lex_string()?,
@@ -196,7 +199,6 @@ impl<'a> Lexer<'a> {
             _ => self.lex_symbol()?,
         };
 
-        // lex_ident 等内部推进了 pos, 这里统一取结束位置
         let end_line = self.line;
         let end_col = self.col;
         let span = Span {
@@ -220,14 +222,12 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // 浮点字面量 (Phase 3a): 数字后跟 '.' + 数字 (排除方法链 `.` 后非数字
-        // 的形态 — 5.foo 非法, 5 .len() 不受影响因 Dot 前有空格由 parser 处理)
         let mut is_float = false;
         if self.peek() == Some(b'.')
             && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false)
         {
             is_float = true;
-            self.bump(); // .
+            self.bump();
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     self.bump();
@@ -236,7 +236,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        // 科学计数法既允许 1e5，也允许 1.25e-3。
         if matches!(self.peek(), Some(b'e') | Some(b'E')) {
             is_float = true;
             self.bump();
@@ -289,6 +288,11 @@ impl<'a> Lexer<'a> {
             b"self" => Tok::SelfKw,
             b"for" => Tok::For,
             b"while" => Tok::While,
+            b"if" => Tok::If,
+            b"else" => Tok::Else,
+            b"in" => Tok::In,
+            b"break" => Tok::Break,
+            b"continue" => Tok::Continue,
             b"return" => Tok::Return,
             b"match" => Tok::Match,
             b"true" => Tok::Bool(true),
@@ -340,7 +344,23 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Tok::NotEq
                 } else {
-                    return self.err("孤立的 '!' — 不相等写作 !=");
+                    Tok::Bang
+                }
+            }
+            b'&' => {
+                if self.peek() == Some(b'&') {
+                    self.bump();
+                    Tok::AndAnd
+                } else {
+                    return self.err("孤立的 '&' — 逻辑与写作 &&");
+                }
+            }
+            b'|' => {
+                if self.peek() == Some(b'|') {
+                    self.bump();
+                    Tok::OrOr
+                } else {
+                    return self.err("孤立的 '|' — 逻辑或写作 ||");
                 }
             }
             b'(' => {
@@ -359,6 +379,7 @@ impl<'a> Lexer<'a> {
             b';' => Tok::Semi,
             b'.' => Tok::Dot,
             b'?' => Tok::Question,
+            b':' => Tok::Colon,
             other => {
                 return self.err(format!(
                     "无法识别的字符 '{}'",
@@ -369,10 +390,8 @@ impl<'a> Lexer<'a> {
         Ok(tok)
     }
 
-    /// 单引号字符串: 切成 Lit / Hole 片段。
-    /// 插值: $ident / $ident.chain / ${任意表达式}
     fn lex_string(&mut self) -> AliasResult<Tok> {
-        self.bump(); // 吃掉开头 '
+        self.bump();
         let mut parts: Vec<StrPart> = Vec::new();
         let mut lit = String::new();
 
@@ -406,7 +425,6 @@ impl<'a> Lexer<'a> {
                         Some(c2) if is_ident_start(c2) => {
                             let name_start = self.pos;
                             while let Some(c3) = self.peek() {
-                                // $name 仅允许单个标识符 (P3a 收紧) — 点链须 ${...}
                                 if is_ident_continue(c3) {
                                     self.bump();
                                 } else {
@@ -419,7 +437,6 @@ impl<'a> Lexer<'a> {
                                 );
                             }
                             let name = String::from_utf8_lossy(&self.src[name_start..self.pos]).into_owned();
-                            // $name 是 ${name} 的简写 — 复用同一通道
                             let sub = lex(&name).map_err(|mut e| {
                                 e.msg = format!("插值片段 '{name}' 解析失败: {}", e.msg);
                                 e
@@ -430,9 +447,7 @@ impl<'a> Lexer<'a> {
                             }
                             parts.push(StrPart::Hole(toks));
                         }
-                        _ => {
-                            lit.push('$'); // 孤立 $ 暂按字面量, 归属待立案(P8 追认范围)
-                        }
+                        _ => lit.push('$'),
                     }
                 }
                 b'\\' => {
@@ -458,7 +473,6 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
-                    // 多字节 UTF-8: 按 byte 推进但整段收集, from_utf8_lossy 兜底
                     let start = self.pos;
                     while let Some(n) = self.peek() {
                         if n == b'\'' || n == b'$' || n == b'\\' || n == b'\n' {
@@ -478,9 +492,8 @@ impl<'a> Lexer<'a> {
         Ok(Tok::Str(parts))
     }
 
-    /// 已吃掉 '${', 收集到配对 '}' 为止的 token 子流。
     fn lex_hole_until_rbrace(&mut self) -> AliasResult<Vec<(Tok, Span)>> {
-        let mut depth = 1u32; // '{' 已消耗一层
+        let mut depth = 1u32;
         let mut toks: Vec<(Tok, Span)> = Vec::new();
         loop {
             self.skip_trivia();

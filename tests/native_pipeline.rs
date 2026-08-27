@@ -160,7 +160,7 @@ fn run_matches_build_artifact_for_arithmetic_and_loops() {
 #[test]
 fn build_artifact_prints_integers() {
     // exit 48 用例的打印版: 输出可观察
-    let src = "func i32 main = () -> {\n    var i32 i = 0;\n    for i < 3 {\n        increase i\n        println i\n    }\n    return 0\n}\n";
+    let src = "func i32 main = () -> {\n    var i32 i = 0;\n    while i < 3 {\n        increase i\n        println i\n    }\n    return 0\n}\n";
     let (so, se, code) = build_and_run(src);
     assert_eq!(String::from_utf8_lossy(&so), "1\n2\n3\n");
     assert_eq!(se, b"");

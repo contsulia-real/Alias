@@ -1,23 +1,4 @@
 //! 递归下降 Parser。
-//!
-//! 关键裁决的落地位置:
-//! - 分号 Kotlin 式可省略: 语句边界 = 显式 ';' 或 Newline;
-//!   括号内的 Newline 已被 lexer 吞掉; 行首 '.' 续行同理
-//! - 无括号调用仅当参数量 <= 1: 语句起始 Ident 后不跟 '='/'(' 时,
-//!   吃一个一元级表达式作为参数(increase i / println x)
-//! - 类型槽强制非空: val/var/func 后必须跟类型, 缺失即报错 —
-//!   "语言没有类型推断"的法律在语法层执行
-//! - 命名实参歧义裁决 (Phase 2a): `Ident = expr` (单 '=', lexer 已把
-//!   '==' 折成 EqEq) 统一解析为带标签实参 — 被调方是结构体还是函数
-//!   由 sema 裁决, parser 不预判
-//!
-//! 模块划分 (纯机械拆分, 无逻辑改动):
-//! - [`items`]: 顶层项 (func 定义 / 扩展方法接收者拆分 / struct 定义 /
-//!   import 解析)
-//! - [`stmts`]: 语句解析 (绑定 / 赋值 / 表达式语句 / return / for /
-//!   while / 块)
-//! - [`exprs`]: 表达式 (前缀 / 中缀优先级 / 后缀链 call-field-index-? /
-//!   match / 插值切分 / 命名实参探测)
 
 mod exprs;
 mod items;
@@ -41,9 +22,7 @@ fn validate_nesting(tokens: &[Token]) -> AliasResult<()> {
     for t in tokens {
         match t.tok {
             Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-            Tok::RParen | Tok::RBracket | Tok::RBrace => {
-                depth = depth.saturating_sub(1)
-            }
+            Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
             _ => {}
         }
         if depth > MAX_NESTING {
@@ -62,8 +41,6 @@ struct Parser {
 }
 
 impl Parser {
-    // ---------- 基础导航 ----------
-
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos).map(|t| &t.tok)
     }
@@ -103,8 +80,6 @@ impl Parser {
         AliasError { msg: msg.into(), span: self.span() }
     }
 
-    /// 语句收尾: 可选 ';' + 任意换行/空行。
-    /// 分号与换行都缺席时静默通过(箭头体等自含边界的场景)。
     fn end_stmt(&mut self) {
         self.eat(&Tok::Semi);
         while self.eat(&Tok::Newline) {}
@@ -124,7 +99,7 @@ impl Parser {
         }
     }
 
-    /// 类型表达式: i32 / bool / string / array<string> / sender<string> 等
+    /// 类型表达式。`func` 同时是声明关键字和类型名，在类型槽位置降为 Named("func")。
     fn parse_type(&mut self) -> AliasResult<TypeExpr> {
         self.parse_type_at_depth(0)
     }
@@ -138,10 +113,11 @@ impl Parser {
                 self.bump();
                 n
             }
-            // true/false 被 lexer 当关键字了, 但作为类型名不该出现 — 报清晰错误
-            Some(Tok::Bool(_)) => {
-                return Err(self.err_here("bool 才是布尔类型名"));
+            Some(Tok::Func) => {
+                self.bump();
+                "func".to_string()
             }
+            Some(Tok::Bool(_)) => return Err(self.err_here("bool 才是布尔类型名")),
             other => return Err(self.err_here(format!("期望类型名, 实际 {:?}", other))),
         };
 

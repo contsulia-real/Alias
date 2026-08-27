@@ -135,8 +135,8 @@ fn subject_not_result_rejected() {
 fn incompatible_arm_types_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val result<i32, string> r = ok(1)\n    val i32 v = match r {\n        ok(x) -> x\n        err(e) -> 'str'\n    }\n    return v\n}\n",
-        "match 各臂类型不一致: i32 与 string",
-        5, 8,
+        "绑定 'v' 声明类型为 i32: 需要 i32, 实际 string",
+        5, 18,
     );
 }
 
@@ -157,8 +157,8 @@ fn arm_binding_is_val_semantics() {
 fn wrong_payload_type_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val result<i32, string> r = ok('x')\n    return 0\n}\n",
-        "绑定 'r' 声明类型为 result<i32, string>, 实际 result<string, 未知>",
-        2, 4,
+        "绑定 'r' 声明类型为 result<i32, string>: 需要 i32, 实际 string",
+        2, 35,
     );
 }
 

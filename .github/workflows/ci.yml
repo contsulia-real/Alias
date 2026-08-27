@@ -1,0 +1,16 @@
+name: Alias CI
+
+on:
+  push:
+    branches:
+      - lang/control-flow-operator-methods
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --all-targets

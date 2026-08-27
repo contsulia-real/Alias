@@ -1,7 +1,4 @@
 //! Alias 值 ABI 与内存布局的唯一真相源。
-//!
-//! 任何后端代码需要知道“值在寄存器、参数、返回值、内存或 8 字节载荷字中
-//! 长什么样”时，都必须经过本模块。禁止在 emit/funcgen/shim 中另写类型宽度表。
 
 use crate::ast::{Expr, Item, TypeExpr};
 use crate::sema::types::{FloatW, IntW, UIntW};
@@ -22,10 +19,10 @@ pub(crate) enum VTy {
     Struct(String),
     Result(String, String),
     Array(Box<VTy>),
+    Iterator(Box<VTy>),
     Other,
 }
 
-/// 8 字节通用载荷槽如何封装一个值。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WordRepr {
     Signed,
@@ -35,18 +32,13 @@ pub(crate) enum WordRepr {
     Direct,
 }
 
-/// 一种语言值在所有后端边界上的完整物理契约。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValueAbi {
-    /// 表达式求值完成后的规范在途类型。
     pub(crate) register: Type,
-    /// 单元格、全局槽、字段和紧凑数组元素的实际 load/store 类型。
     pub(crate) storage: Type,
     pub(crate) storage_bytes: usize,
     pub(crate) align_bytes: usize,
-    /// 用户函数显式参数的机器 ABI 类型。
     pub(crate) param: Type,
-    /// 用户函数返回值的机器 ABI 类型。
     pub(crate) ret: Type,
     pub(crate) word: WordRepr,
 }
@@ -74,7 +66,6 @@ impl VTy {
                 ret: types::F64,
                 word: WordRepr::F64Bits,
             },
-            // bool 与所有引用/复合值当前都以一个 64 位字传递和存储。
             VTy::Bool
             | VTy::Str
             | VTy::Unit
@@ -82,6 +73,7 @@ impl VTy {
             | VTy::Struct(_)
             | VTy::Result(..)
             | VTy::Array(_)
+            | VTy::Iterator(_)
             | VTy::Other => ValueAbi {
                 register: types::I64,
                 storage: types::I64,
@@ -114,11 +106,12 @@ impl VTy {
             },
             VTy::Bool => "bool".into(),
             VTy::Str => "string".into(),
-            VTy::Unit => "()".into(),
+            VTy::Unit => "unit".into(),
             VTy::Func(..) => "func".into(),
             VTy::Struct(s) => s.clone(),
             VTy::Result(t, e) => format!("result<{t}, {e}>"),
             VTy::Array(t) => format!("array<{}>", t.display_name()),
+            VTy::Iterator(t) => format!("iterator<{}>", t.display_name()),
             VTy::Other => "未知".into(),
         }
     }
@@ -137,11 +130,7 @@ fn integer_abi(bits: u32, signed: bool) -> ValueAbi {
         align_bytes: (bits / 8) as usize,
         param: storage,
         ret: storage,
-        word: if signed {
-            WordRepr::Signed
-        } else {
-            WordRepr::Unsigned
-        },
+        word: if signed { WordRepr::Signed } else { WordRepr::Unsigned },
     }
 }
 
@@ -155,7 +144,6 @@ pub(crate) fn ir_type_bits(bits: u32) -> Type {
     }
 }
 
-/// 兼容调用点的物理 load/store 类型；定义只存在于此处。
 pub(crate) fn cl_type(vty: &VTy) -> Type {
     vty.abi().storage
 }
@@ -169,7 +157,6 @@ pub(crate) fn align_to(off: usize, align: usize) -> usize {
     off.div_ceil(align) * align
 }
 
-/// 用户函数统一包含 globals/env 两个隐藏 I64 参数。
 pub(crate) fn user_signature(
     cc: cranelift_codegen::isa::CallConv,
     params: &[VTy],
@@ -178,8 +165,7 @@ pub(crate) fn user_signature(
     let mut sig = Signature::new(cc);
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
-    sig.params
-        .extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
+    sig.params.extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
     sig.returns.push(AbiParam::new(ret.abi().ret));
     sig
 }
@@ -192,7 +178,6 @@ pub(crate) struct StructFieldLayout {
     pub(crate) offset: i32,
 }
 
-/// 完整结构体布局，包含尾随填充和实例最大对齐。
 #[derive(Clone, Debug)]
 pub(crate) struct StructLayout {
     pub(crate) fields: Vec<StructFieldLayout>,
@@ -202,18 +187,13 @@ pub(crate) struct StructLayout {
 
 pub(crate) type StructTable = HashMap<String, StructLayout>;
 
-/// 两阶段登记名字后再计算字段，避免结构体声明顺序影响引用字段投影。
 pub(crate) fn build_struct_layouts(items: &[Item]) -> StructTable {
     let mut table = StructTable::new();
     for item in items {
         if let Item::StructDef(sd) = item {
             table.insert(
                 sd.name.clone(),
-                StructLayout {
-                    fields: Vec::new(),
-                    size: 0,
-                    align: 1,
-                },
+                StructLayout { fields: Vec::new(), size: 0, align: 1 },
             );
         }
     }
@@ -256,16 +236,25 @@ pub(crate) fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
         TypeExpr::Generic(n, args) if n == "array" && args.len() == 1 => {
             VTy::Array(Box::new(decl_vty(&args[0], structs)))
         }
+        TypeExpr::Generic(n, args) if n == "iterator" && args.len() == 1 => {
+            VTy::Iterator(Box::new(decl_vty(&args[0], structs)))
+        }
         TypeExpr::Generic(..) => VTy::Other,
     }
 }
 
 pub(crate) fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
-    if let Some(inner) = name
-        .strip_prefix("array<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
+    let name = name.trim();
+    if let Some(inner) = generic_inner(name, "array") {
         return VTy::Array(Box::new(vty_of_type_name(structs, inner)));
+    }
+    if let Some(inner) = generic_inner(name, "iterator") {
+        return VTy::Iterator(Box::new(vty_of_type_name(structs, inner)));
+    }
+    if let Some(inner) = generic_inner(name, "result") {
+        if let Some((a, b)) = split_top_level_pair(inner) {
+            return VTy::Result(a.trim().to_string(), b.trim().to_string());
+        }
     }
     match name {
         "i8" => VTy::I(IntW::W8),
@@ -281,10 +270,28 @@ pub(crate) fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
         "bool" => VTy::Bool,
         "string" => VTy::Str,
         "unit" => VTy::Unit,
-        "func" => VTy::Other,
+        // 当前函数签名类型尚未最终定稿；物理上仍是闭包指针，显示/方法键为 func。
+        "func" => VTy::Func(Vec::new(), Box::new(VTy::Other)),
         _ if structs.contains_key(name) => VTy::Struct(name.to_string()),
         _ => VTy::Other,
     }
+}
+
+fn generic_inner<'a>(name: &'a str, ctor: &str) -> Option<&'a str> {
+    name.strip_prefix(ctor)?.strip_prefix('<')?.strip_suffix('>')
+}
+
+fn split_top_level_pair(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub(crate) fn norm_load(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
@@ -384,6 +391,7 @@ mod tests {
             VTy::Struct("s".into()),
             VTy::Result("i32".into(), "string".into()),
             VTy::Array(Box::new(VTy::I(IntW::W8))),
+            VTy::Iterator(Box::new(VTy::I(IntW::W8))),
         ];
         for value in values {
             let abi = value.abi();
@@ -404,9 +412,6 @@ mod tests {
         let layout = &layouts["mixed"];
         assert_eq!(layout.align, 8);
         assert_eq!(layout.size, 24);
-        assert_eq!(
-            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
-            [0, 8, 16]
-        );
+        assert_eq!(layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(), [0, 8, 16]);
     }
 }

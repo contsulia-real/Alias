@@ -40,7 +40,7 @@ func i32 main = () -> {
     var i32 n = 0;
     func bool lt3 = (i32 cap) -> return n < cap
     var i32 rounds = 0;
-    for lt3(3) {
+    while lt3(3) {
         increase n
         increase rounds
     }
