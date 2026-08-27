@@ -67,7 +67,10 @@ impl TypeExpr {
             TypeExpr::Named(n) => n.clone(),
             TypeExpr::Generic(n, args) => format!(
                 "{n}<{}>",
-                args.iter().map(|a| a.display()).collect::<Vec<_>>().join(", ")
+                args.iter()
+                    .map(|a| a.display())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -90,16 +93,35 @@ pub enum Body {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Binding(Binding),
-    Assign { target: String, value: Expr, span: Span },
-    FieldAssign { recv: Box<Expr>, field: String, value: Expr, span: Span },
-    ExprStmt { expr: Expr, span: Span },
-    Return { value: Option<Expr>, span: Span },
+    Assign {
+        target: String,
+        value: Expr,
+        span: Span,
+    },
+    FieldAssign {
+        recv: Box<Expr>,
+        field: String,
+        value: Expr,
+        span: Span,
+    },
+    ExprStmt {
+        expr: Expr,
+        span: Span,
+    },
+    Return {
+        value: Option<Expr>,
+        span: Span,
+    },
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
         else_body: Option<Vec<Stmt>>,
         span: Span,
     },
-    While { cond: Expr, body: Vec<Stmt>, span: Span },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     For {
         ty: TypeExpr,
         name: String,
@@ -107,8 +129,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
-    Break { span: Span },
-    Continue { span: Span },
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -127,11 +153,25 @@ pub enum CtorKind {
 /// 以及 result 的 ok/err 构造器 Pattern。构造器载荷当前只允许名字或 `_`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
-    Wildcard { span: Span },
-    Binding { name: String, span: Span },
-    Int { value: i64, span: Span },
-    Bool { value: bool, span: Span },
-    Str { value: String, span: Span },
+    Wildcard {
+        span: Span,
+    },
+    Binding {
+        name: String,
+        span: Span,
+    },
+    Int {
+        value: i64,
+        span: Span,
+    },
+    Bool {
+        value: bool,
+        span: Span,
+    },
+    Str {
+        value: String,
+        span: Span,
+    },
     Constructor {
         ctor: CtorKind,
         binding: Option<String>,
@@ -181,10 +221,24 @@ pub enum Expr {
     Str(Vec<StrPartAst>, Span),
     Ident(String, Span),
 
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
-    Neg { expr: Box<Expr>, span: Span },
-    Not { expr: Box<Expr>, span: Span },
-    BitNot { expr: Box<Expr>, span: Span },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
+    Neg {
+        expr: Box<Expr>,
+        span: Span,
+    },
+    Not {
+        expr: Box<Expr>,
+        span: Span,
+    },
+    BitNot {
+        expr: Box<Expr>,
+        span: Span,
+    },
     Ternary {
         cond: Box<Expr>,
         then_expr: Box<Expr>,
@@ -192,14 +246,45 @@ pub enum Expr {
         span: Span,
     },
 
-    Call { callee: Box<Expr>, args: Vec<CallArg>, span: Span },
-    MethodCall { recv: Box<Expr>, name: String, args: Vec<CallArg>, span: Span },
-    Field { recv: Box<Expr>, name: String, span: Span },
-    Index { recv: Box<Expr>, idx: Box<Expr>, span: Span },
-    ArrayLit { elems: Vec<Expr>, span: Span },
-    FuncLit { params: Vec<Param>, body: Box<Body>, span: Span },
-    Match { subject: Box<Expr>, arms: Vec<MatchArm>, span: Span },
-    Propagate { expr: Box<Expr>, span: Span },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<CallArg>,
+        span: Span,
+    },
+    MethodCall {
+        recv: Box<Expr>,
+        name: String,
+        args: Vec<CallArg>,
+        span: Span,
+    },
+    Field {
+        recv: Box<Expr>,
+        name: String,
+        span: Span,
+    },
+    Index {
+        recv: Box<Expr>,
+        idx: Box<Expr>,
+        span: Span,
+    },
+    ArrayLit {
+        elems: Vec<Expr>,
+        span: Span,
+    },
+    FuncLit {
+        params: Vec<Param>,
+        body: Box<Body>,
+        span: Span,
+    },
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
+    Propagate {
+        expr: Box<Expr>,
+        span: Span,
+    },
     Unit(Span),
 }
 

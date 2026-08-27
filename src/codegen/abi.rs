@@ -130,7 +130,11 @@ fn integer_abi(bits: u32, signed: bool) -> ValueAbi {
         align_bytes: (bits / 8) as usize,
         param: storage,
         ret: storage,
-        word: if signed { WordRepr::Signed } else { WordRepr::Unsigned },
+        word: if signed {
+            WordRepr::Signed
+        } else {
+            WordRepr::Unsigned
+        },
     }
 }
 
@@ -165,7 +169,8 @@ pub(crate) fn user_signature(
     let mut sig = Signature::new(cc);
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
-    sig.params.extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
+    sig.params
+        .extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
     sig.returns.push(AbiParam::new(ret.abi().ret));
     sig
 }
@@ -193,7 +198,11 @@ pub(crate) fn build_struct_layouts(items: &[Item]) -> StructTable {
         if let Item::StructDef(sd) = item {
             table.insert(
                 sd.name.clone(),
-                StructLayout { fields: Vec::new(), size: 0, align: 1 },
+                StructLayout {
+                    fields: Vec::new(),
+                    size: 0,
+                    align: 1,
+                },
             );
         }
     }
@@ -278,7 +287,9 @@ pub(crate) fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
 }
 
 fn generic_inner<'a>(name: &'a str, ctor: &str) -> Option<&'a str> {
-    name.strip_prefix(ctor)?.strip_prefix('<')?.strip_suffix('>')
+    name.strip_prefix(ctor)?
+        .strip_prefix('<')?
+        .strip_suffix('>')
 }
 
 fn split_top_level_pair(s: &str) -> Option<(&str, &str)> {
@@ -412,6 +423,9 @@ mod tests {
         let layout = &layouts["mixed"];
         assert_eq!(layout.align, 8);
         assert_eq!(layout.size, 24);
-        assert_eq!(layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(), [0, 8, 16]);
+        assert_eq!(
+            layout.fields.iter().map(|f| f.offset).collect::<Vec<_>>(),
+            [0, 8, 16]
+        );
     }
 }

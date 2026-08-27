@@ -115,7 +115,11 @@ fn missing_ok_arm_rejected() {
 fn constructor_pattern_requires_result_subject() {
     let src = "func i32 main = () -> {\n    val i32 v = match 5 {\n        ok(x) -> x\n        _ -> 0\n    }\n    return v\n}\n";
     let e = fail(src);
-    assert!(e.msg.contains("构造器 Pattern 需要 result 主语, 实际 i32"), "实际: {}", e.msg);
+    assert!(
+        e.msg.contains("构造器 Pattern 需要 result 主语, 实际 i32"),
+        "实际: {}",
+        e.msg
+    );
 }
 
 #[test]
@@ -154,7 +158,8 @@ fn wrong_payload_type_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val result<i32, string> r = ok('x')\n    return 0\n}\n",
         "绑定 'r' 声明类型为 result<i32, string>: 需要 i32, 实际 string",
-        2, 35,
+        2,
+        35,
     );
 }
 
@@ -163,7 +168,8 @@ fn ok_ctor_arity_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val result<i32, string> r = ok()\n    return 0\n}\n",
         "ok 构造恰好接受 1 个参数",
-        2, 34,
+        2,
+        34,
     );
 }
 
@@ -172,7 +178,8 @@ fn result_one_param_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val result<i32> r = ok(1)\n    return 0\n}\n",
         "result 需要 2 个类型参数, 实际 1 个",
-        2, 4,
+        2,
+        4,
     );
 }
 
@@ -183,7 +190,8 @@ fn other_generic_still_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val sender<i32> a = ()\n    return 0\n}\n",
         "泛型类型 sender<i32> 尚未实现 (Phase 5+)",
-        2, 4,
+        2,
+        4,
     );
 }
 
@@ -196,7 +204,8 @@ fn propagate_on_non_result_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val i32 x = 5?\n    return x\n}\n",
         "? 只能作用于 result 值, 实际 i32",
-        2, 17,
+        2,
+        17,
     );
 }
 
@@ -236,6 +245,7 @@ fn bad_escape_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val string s = 'bad \\q esc'\n    return 0\n}\n",
         "未知转义 '\\q' — 支持 \\n \\t \\r \\\\ \\' \\\" \\0 \\$",
-        2, 26,
+        2,
+        26,
     );
 }

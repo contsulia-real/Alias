@@ -63,7 +63,10 @@ pub(crate) enum Ty {
     Bool,
     Str,
     Unit,
-    Func { params: Vec<Ty>, ret: Box<Ty> },
+    Func {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     FuncPoly,
     Struct(String),
     Result(Box<Ty>, Box<Ty>),
@@ -116,9 +119,7 @@ pub(crate) fn types_match(want: &Ty, got: &Ty) -> bool {
         return true;
     }
     match (want, got) {
-        (Ty::Result(t1, e1), Ty::Result(t2, e2)) => {
-            types_match(t1, t2) && types_match(e1, e2)
-        }
+        (Ty::Result(t1, e1), Ty::Result(t2, e2)) => types_match(t1, t2) && types_match(e1, e2),
         (Ty::Array(a), Ty::Array(b)) | (Ty::Iterator(a), Ty::Iterator(b)) => types_match(a, b),
         _ => matches!(want, Ty::FuncPoly) && matches!(got, Ty::Func { .. } | Ty::FuncPoly),
     }
@@ -161,7 +162,10 @@ pub(crate) fn check_type_slot(
             };
             if args.len() != want_arity {
                 return Err(AliasError {
-                    msg: format!("{name} 需要 {want_arity} 个类型参数, 实际 {} 个", args.len()),
+                    msg: format!(
+                        "{name} 需要 {want_arity} 个类型参数, 实际 {} 个",
+                        args.len()
+                    ),
                     span,
                 });
             }
@@ -170,10 +174,7 @@ pub(crate) fn check_type_slot(
                 ts.push(check_type_slot(a, span, structs)?);
             }
             match name.as_str() {
-                "result" => Ok(Ty::Result(
-                    Box::new(ts.remove(0)),
-                    Box::new(ts.remove(0)),
-                )),
+                "result" => Ok(Ty::Result(Box::new(ts.remove(0)), Box::new(ts.remove(0)))),
                 "array" => Ok(Ty::Array(Box::new(ts.remove(0)))),
                 "iterator" => Ok(Ty::Iterator(Box::new(ts.remove(0)))),
                 _ => unreachable!(),
@@ -198,7 +199,10 @@ pub(crate) fn check_type_slot(
                 if structs.contains_key(other) {
                     Ok(Ty::Struct(other.to_string()))
                 } else {
-                    Err(AliasError { msg: format!("未知类型名 '{other}'"), span })
+                    Err(AliasError {
+                        msg: format!("未知类型名 '{other}'"),
+                        span,
+                    })
                 }
             }
         },

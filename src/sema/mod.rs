@@ -51,11 +51,17 @@ type Env = Rc<Scope>;
 
 impl Scope {
     fn root() -> Env {
-        Rc::new(Scope { entries: RefCell::new(HashMap::new()), parent: None })
+        Rc::new(Scope {
+            entries: RefCell::new(HashMap::new()),
+            parent: None,
+        })
     }
 
     fn child(parent: &Env) -> Env {
-        Rc::new(Scope { entries: RefCell::new(HashMap::new()), parent: Some(parent.clone()) })
+        Rc::new(Scope {
+            entries: RefCell::new(HashMap::new()),
+            parent: Some(parent.clone()),
+        })
     }
 
     fn get(env: &Env, name: &str) -> Option<VarInfo> {
@@ -111,7 +117,10 @@ pub fn check(program: &Program) -> AliasResult<()> {
                                 &top,
                                 b.name.clone(),
                                 VarInfo {
-                                    ty: Ty::Func { params: ptys, ret: Box::new(ret) },
+                                    ty: Ty::Func {
+                                        params: ptys,
+                                        ret: Box::new(ret),
+                                    },
                                     mutable: false,
                                 },
                             );
@@ -139,7 +148,15 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     ];
     let mut strings = HashMap::new();
     for (name, params, ret) in string_seed {
-        strings.insert(name.to_string(), MethodInfo { params, ret, is_pub: true, builtin: true });
+        strings.insert(
+            name.to_string(),
+            MethodInfo {
+                params,
+                ret,
+                is_pub: true,
+                builtin: true,
+            },
+        );
     }
     methods.insert("string".to_string(), strings);
 
@@ -172,21 +189,36 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
 
     methods.entry("bool".into()).or_default().insert(
         "not".into(),
-        MethodInfo { params: vec![], ret: Ty::Bool, is_pub: true, builtin: true },
+        MethodInfo {
+            params: vec![],
+            ret: Ty::Bool,
+            is_pub: true,
+            builtin: true,
+        },
     );
     methods
 }
 
 fn op_mismatch(op: BinOp, l: &Ty, r: &Ty, span: Span) -> AliasError {
     AliasError {
-        msg: format!("运算符 {} 不适用于 {} 与 {}", op.display(), l.name(), r.name()),
+        msg: format!(
+            "运算符 {} 不适用于 {} 与 {}",
+            op.display(),
+            l.name(),
+            r.name()
+        ),
         span,
     }
 }
 
 fn decl_mismatch(b: &Binding, want: &Ty, got: &Ty) -> AliasError {
     AliasError {
-        msg: format!("绑定 '{}' 声明类型为 {}, 实际 {}", b.name, want.name(), got.name()),
+        msg: format!(
+            "绑定 '{}' 声明类型为 {}, 实际 {}",
+            b.name,
+            want.name(),
+            got.name()
+        ),
         span: b.span,
     }
 }

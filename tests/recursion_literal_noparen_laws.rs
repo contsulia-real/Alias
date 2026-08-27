@@ -25,7 +25,8 @@ fn rhs_integer_literal_adopts_established_left_integer_type() {
 
 #[test]
 fn rhs_integer_literal_is_range_checked_for_left_type() {
-    let src = "func i32 main = () -> {\n    val u8 x = 1\n    val u8 y = x + 256\n    return 0\n}\n";
+    let src =
+        "func i32 main = () -> {\n    val u8 x = 1\n    val u8 y = x + 256\n    return 0\n}\n";
     let msg = err(src);
     assert!(msg.contains("字面量 256 超出 u8 的表示范围"), "实际: {msg}");
 }

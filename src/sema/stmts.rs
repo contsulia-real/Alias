@@ -8,7 +8,10 @@ use crate::{AliasError, AliasResult, Span};
 impl Checker {
     pub(super) fn bind(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
         if b.receiver.is_some() {
-            return Err(AliasError { msg: "方法定义只能出现在顶层".into(), span: b.span });
+            return Err(AliasError {
+                msg: "方法定义只能出现在顶层".into(),
+                span: b.span,
+            });
         }
         if self.structs.contains_key(&b.name) {
             return Err(AliasError {
@@ -19,7 +22,10 @@ impl Checker {
         let declared = check_type_slot(&b.ty, b.span, &self.structs)?;
         if b.kind == BindKind::Func {
             let Expr::FuncLit { params, body, span } = &b.value else {
-                return Err(AliasError { msg: "func 绑定必须由函数字面量初始化".into(), span: b.value.span() });
+                return Err(AliasError {
+                    msg: "func 绑定必须由函数字面量初始化".into(),
+                    span: b.value.span(),
+                });
             };
             let init_ty = self.funclit(params, body, env, Some(&declared), *span)?;
             if let Ty::Func { ret, .. } = &init_ty {
@@ -30,18 +36,37 @@ impl Checker {
             if b.name == "main" && !init_ty.is_unknown() {
                 self.main = Some((init_ty.clone(), b.span));
             }
-            Scope::insert(env, b.name.clone(), VarInfo { ty: init_ty, mutable: false });
-        } else {
-            let init_ty = self.expr_expected(&b.value, env, &declared).map_err(|e| AliasError {
-                msg: if e.msg.starts_with("字面量") { e.msg } else {
-                    format!("绑定 '{}' 声明类型为 {}: {}", b.name, declared.name(), e.msg)
-                },
-                span: e.span,
-            })?;
             Scope::insert(
                 env,
                 b.name.clone(),
-                VarInfo { ty: init_ty, mutable: b.kind == BindKind::Var },
+                VarInfo {
+                    ty: init_ty,
+                    mutable: false,
+                },
+            );
+        } else {
+            let init_ty = self
+                .expr_expected(&b.value, env, &declared)
+                .map_err(|e| AliasError {
+                    msg: if e.msg.starts_with("字面量") {
+                        e.msg
+                    } else {
+                        format!(
+                            "绑定 '{}' 声明类型为 {}: {}",
+                            b.name,
+                            declared.name(),
+                            e.msg
+                        )
+                    },
+                    span: e.span,
+                })?;
+            Scope::insert(
+                env,
+                b.name.clone(),
+                VarInfo {
+                    ty: init_ty,
+                    mutable: b.kind == BindKind::Var,
+                },
             );
         }
         Ok(())
@@ -60,7 +85,14 @@ impl Checker {
         for p in params {
             let pt = check_type_slot(&p.ty, p.span, &self.structs)?;
             param_tys.push(pt.clone());
-            Scope::insert(&local, p.name.clone(), VarInfo { ty: pt, mutable: false });
+            Scope::insert(
+                &local,
+                p.name.clone(),
+                VarInfo {
+                    ty: pt,
+                    mutable: false,
+                },
+            );
         }
 
         let ret_ty = expected.cloned().unwrap_or(Ty::Unknown);
@@ -105,9 +137,16 @@ impl Checker {
         check_result?;
 
         let inferred_ret = expected.cloned().unwrap_or_else(|| {
-            if body_guarantees_return(body) { Ty::Unknown } else { Ty::Unit }
+            if body_guarantees_return(body) {
+                Ty::Unknown
+            } else {
+                Ty::Unit
+            }
         });
-        Ok(Ty::Func { params: param_tys, ret: Box::new(inferred_ret) })
+        Ok(Ty::Func {
+            params: param_tys,
+            ret: Box::new(inferred_ret),
+        })
     }
 
     pub(super) fn stmt(&mut self, s: &Stmt, env: &Env) -> AliasResult<Option<Ty>> {
@@ -116,50 +155,87 @@ impl Checker {
                 self.bind(b, env)?;
                 Ok(None)
             }
-            Stmt::Assign { target, value, span } => {
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => {
                 // 先求 RHS 再解析目标，保留既有求值/诊断顺序。
                 let _ = self.expr(value, env)?;
                 let Some(info) = Scope::get(env, target) else {
-                    return Err(AliasError { msg: format!("赋值目标 '{target}' 未定义"), span: *span });
+                    return Err(AliasError {
+                        msg: format!("赋值目标 '{target}' 未定义"),
+                        span: *span,
+                    });
                 };
                 if !info.mutable {
-                    return Err(AliasError { msg: format!("'{target}' 是 val 绑定, 不可重新赋值"), span: *span });
+                    return Err(AliasError {
+                        msg: format!("'{target}' 是 val 绑定, 不可重新赋值"),
+                        span: *span,
+                    });
                 }
-                self.expr_expected(value, env, &info.ty).map_err(|e| AliasError {
-                    msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), e.msg),
-                    span: e.span,
-                })?;
+                self.expr_expected(value, env, &info.ty)
+                    .map_err(|e| AliasError {
+                        msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), e.msg),
+                        span: e.span,
+                    })?;
                 Ok(None)
             }
-            Stmt::FieldAssign { recv, field, value, span } => {
+            Stmt::FieldAssign {
+                recv,
+                field,
+                value,
+                span,
+            } => {
                 let _ = self.expr(value, env)?;
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
                     return Ok(None);
                 }
                 let Ty::Struct(s) = rt else {
-                    return Err(AliasError { msg: format!("{} 没有字段 '{}'", rt.name(), field), span: *span });
+                    return Err(AliasError {
+                        msg: format!("{} 没有字段 '{}'", rt.name(), field),
+                        span: *span,
+                    });
                 };
                 let info = &self.structs[&s];
                 let Some(f) = info.fields.iter().find(|fi| fi.name == *field).cloned() else {
-                    return Err(AliasError { msg: format!("结构体 {s} 没有字段 '{field}'"), span: *span });
+                    return Err(AliasError {
+                        msg: format!("结构体 {s} 没有字段 '{field}'"),
+                        span: *span,
+                    });
                 };
                 if !f.mutable {
-                    return Err(AliasError { msg: format!("'{field}' 是 val 字段, 不可赋值"), span: *span });
+                    return Err(AliasError {
+                        msg: format!("'{field}' 是 val 字段, 不可赋值"),
+                        span: *span,
+                    });
                 }
-                self.expr_expected(value, env, &f.ty).map_err(|e| AliasError {
-                    msg: format!("字段 '{field}' 需要 {}: {}", f.ty.name(), e.msg),
-                    span: e.span,
-                })?;
+                self.expr_expected(value, env, &f.ty)
+                    .map_err(|e| AliasError {
+                        msg: format!("字段 '{field}' 需要 {}: {}", f.ty.name(), e.msg),
+                        span: e.span,
+                    })?;
                 Ok(None)
             }
             Stmt::ExprStmt { expr, .. } => {
+                if let Expr::Call { callee, args, span } = expr {
+                    if let Expr::Ident(name, _) = callee.as_ref() {
+                        if name == "increase" || name == "decrease" {
+                            self.incdec(name, args, *span, env)?;
+                            return Ok(None);
+                        }
+                    }
+                }
                 self.expr(expr, env)?;
                 Ok(None)
             }
             Stmt::Return { value, span } => {
                 let Some(ret) = self.fn_ret.last().cloned() else {
-                    return Err(AliasError { msg: "顶层不允许 return".into(), span: *span });
+                    return Err(AliasError {
+                        msg: "顶层不允许 return".into(),
+                        span: *span,
+                    });
                 };
                 match value {
                     Some(e) => {
@@ -178,7 +254,11 @@ impl Checker {
                 }
                 Ok(Some(ret))
             }
-            Stmt::If { branches, else_body, .. } => {
+            Stmt::If {
+                branches,
+                else_body,
+                ..
+            } => {
                 for (cond, body) in branches {
                     let ct = self.expr(cond, env)?;
                     if !ct.is_unknown() && ct != Ty::Bool {
@@ -211,7 +291,13 @@ impl Checker {
                 self.check_loop_body(body, env)?;
                 Ok(None)
             }
-            Stmt::For { ty, name, iterable, body, span } => {
+            Stmt::For {
+                ty,
+                name,
+                iterable,
+                body,
+                span,
+            } => {
                 let declared = check_type_slot(ty, *span, &self.structs)?;
                 let source = self.expr(iterable, env)?;
                 let elem = match source {
@@ -236,7 +322,14 @@ impl Checker {
                     });
                 }
                 let child = Scope::child(env);
-                Scope::insert(&child, name.clone(), VarInfo { ty: declared, mutable: false });
+                Scope::insert(
+                    &child,
+                    name.clone(),
+                    VarInfo {
+                        ty: declared,
+                        mutable: false,
+                    },
+                );
                 self.loop_depth += 1;
                 let result = (|| {
                     for s in body {
@@ -250,13 +343,19 @@ impl Checker {
             }
             Stmt::Break { span } => {
                 if self.loop_depth == 0 {
-                    return Err(AliasError { msg: "break 只能出现在 for/while 内".into(), span: *span });
+                    return Err(AliasError {
+                        msg: "break 只能出现在 for/while 内".into(),
+                        span: *span,
+                    });
                 }
                 Ok(None)
             }
             Stmt::Continue { span } => {
                 if self.loop_depth == 0 {
-                    return Err(AliasError { msg: "continue 只能出现在 for/while 内".into(), span: *span });
+                    return Err(AliasError {
+                        msg: "continue 只能出现在 for/while 内".into(),
+                        span: *span,
+                    });
                 }
                 Ok(None)
             }
@@ -298,8 +397,14 @@ pub(super) fn block_terminates_with_return(stmts: &[Stmt]) -> bool {
 fn stmt_guarantees_return(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return { .. } => true,
-        Stmt::If { branches, else_body: Some(else_body), .. } => {
-            branches.iter().all(|(_, b)| block_terminates_with_return(b))
+        Stmt::If {
+            branches,
+            else_body: Some(else_body),
+            ..
+        } => {
+            branches
+                .iter()
+                .all(|(_, b)| block_terminates_with_return(b))
                 && block_terminates_with_return(else_body)
         }
         Stmt::ExprStmt { expr, .. } => expr_all_arms_never(expr),

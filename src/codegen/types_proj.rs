@@ -28,15 +28,26 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
             v @ (VTy::I(_) | VTy::U(_)) => v,
             _ => VTy::Other,
         },
-        Expr::Ternary { then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
             let a = static_vty(c, frame, then_expr);
-            if a != VTy::Other { a } else { static_vty(c, frame, else_expr) }
+            if a != VTy::Other {
+                a
+            } else {
+                static_vty(c, frame, else_expr)
+            }
         }
         Expr::Bool(..) => VTy::Bool,
         Expr::Unit(_) => VTy::Unit,
         Expr::Str(..) => VTy::Str,
         Expr::FuncLit { params, body, .. } => VTy::Func(
-            params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)).collect(),
+            params
+                .iter()
+                .map(|p| decl_vty(&p.ty, &c.struct_layouts))
+                .collect(),
             Box::new(infer_ret_vty(c, frame, params, body)),
         ),
         Expr::Binary { op, lhs, rhs, .. } => match op {
@@ -55,14 +66,21 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     lt
                 } else {
                     let rt = static_vty(c, frame, rhs);
-                    if rt.is_numeric() { rt } else { VTy::Other }
+                    if rt.is_numeric() {
+                        rt
+                    } else {
+                        VTy::Other
+                    }
                 }
             }
             _ => VTy::Bool,
         },
         Expr::Ident(name, _) => vty_of_name(c, frame, name),
         Expr::ArrayLit { elems, .. } => VTy::Array(Box::new(
-            elems.first().map(|e| static_vty(c, frame, e)).unwrap_or(VTy::Other),
+            elems
+                .first()
+                .map(|e| static_vty(c, frame, e))
+                .unwrap_or(VTy::Other),
         )),
         Expr::Index { recv, .. } => match static_vty(c, frame, recv) {
             VTy::Array(inner) => *inner,
@@ -90,7 +108,11 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                     VTy::Func(_, ret) => Some(*ret),
                     _ => None,
                 }
-                .or_else(|| c.struct_layouts.contains_key(name).then(|| VTy::Struct(name.clone())))
+                .or_else(|| {
+                    c.struct_layouts
+                        .contains_key(name)
+                        .then(|| VTy::Struct(name.clone()))
+                })
                 .unwrap_or(VTy::Other)
             }
             Expr::FuncLit { params, body, .. } => infer_ret_vty(c, frame, params, body),
@@ -129,7 +151,11 @@ pub(crate) fn static_vty<M: Module>(c: &Compiler<M>, frame: &Frame, e: &Expr) ->
                         Pattern::Binding { name, .. } => {
                             types.insert(name.clone(), subject_vty.clone());
                         }
-                        Pattern::Constructor { ctor, binding: Some(name), .. } => {
+                        Pattern::Constructor {
+                            ctor,
+                            binding: Some(name),
+                            ..
+                        } => {
                             if let Some((ok, err)) = &payloads {
                                 types.insert(
                                     name.clone(),
@@ -223,7 +249,11 @@ fn ret_from_stmt<M: Module>(c: &Compiler<M>, frame: &Frame, stmt: &Stmt) -> Opti
     match stmt {
         Stmt::Return { value: Some(e), .. } => Some(static_vty(c, frame, e)),
         Stmt::Return { value: None, .. } => Some(VTy::Unit),
-        Stmt::If { branches, else_body, .. } => branches
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => branches
             .iter()
             .flat_map(|(_, body)| body.iter())
             .chain(else_body.iter().flat_map(|body| body.iter()))

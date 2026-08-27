@@ -121,7 +121,8 @@ fn element_type_mismatch_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val array<i32> a = [1, true]\n    return 0\n}\n",
         "数组元素类型不一致: i32 与 bool",
-        2, 27,
+        2,
+        27,
     );
 }
 
@@ -131,7 +132,8 @@ fn mixed_literal_rejected_at_first_offender() {
     assert_law(
         "func i32 main = () -> {\n    val array<i32> a = [1, 'x', 2]\n    return 0\n}\n",
         "数组元素类型不一致: i32 与 string",
-        2, 27,
+        2,
+        27,
     );
 }
 
@@ -141,7 +143,8 @@ fn index_on_non_array_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val i32 x = 5\n    return x[0]\n}\n",
         "下标访问需要 array 类型, 实际 i32",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -151,7 +154,8 @@ fn non_i32_index_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val array<i32> a = [1]\n    return a[true]\n}\n",
         "下标需要 i32, 实际 bool",
-        3, 13,
+        3,
+        13,
     );
 }
 
@@ -161,7 +165,8 @@ fn push_wrong_element_type_rejected() {
     assert_law(
         "func i32 main = () -> {\n    var array<i32> a = [1]\n    a.push(true)\n    return 0\n}\n",
         "第 1 个实参需要 i32, 实际 bool",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -171,7 +176,8 @@ fn index_assignment_rejected() {
     assert_law(
         "func i32 main = () -> {\n    var array<i32> a = [1]\n    a[0] = 2\n    return 0\n}\n",
         "下标赋值尚未支持",
-        3, 9,
+        3,
+        9,
     );
 }
 
@@ -181,7 +187,8 @@ fn unknown_method_on_array_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val array<i32> a = [1]\n    return a.nope()\n}\n",
         "类型 array<i32> 上没有方法 'nope'",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -191,7 +198,8 @@ fn array_zero_params_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val array<> a = ()\n    return 0\n}\n",
         "期望类型名",
-        2, 14,
+        2,
+        14,
     );
 }
 
@@ -201,7 +209,8 @@ fn array_two_params_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val array<i32, string> a = ()\n    return 0\n}\n",
         "array 需要 1 个类型参数, 实际 2 个",
-        2, 4,
+        2,
+        4,
     );
 }
 

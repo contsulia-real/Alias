@@ -33,7 +33,11 @@ fn create_temp_object(bytes: &[u8]) -> AliasResult<TempObject> {
             "alias_link_{}_{tick:032x}_{seq:016x}.obj",
             std::process::id()
         ));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(bytes).map_err(|e| AliasError {
                     msg: format!("无法写出临时目标文件 {}: {e}", path.display()),
@@ -89,9 +93,9 @@ fn sdk_um_x64() -> Option<std::path::PathBuf> {
         let _ = pf;
     }
     candidates.sort_by(|a, b| b.cmp(a));
-    candidates.into_iter().find(|p| {
-        p.join("kernel32.Lib").exists() || p.join("kernel32.lib").exists()
-    })
+    candidates
+        .into_iter()
+        .find(|p| p.join("kernel32.Lib").exists() || p.join("kernel32.lib").exists())
 }
 
 fn locate_rust_lld() -> AliasResult<std::path::PathBuf> {
@@ -116,7 +120,10 @@ fn locate_rust_lld() -> AliasResult<std::path::PathBuf> {
         Ok(lld)
     } else {
         Err(AliasError {
-            msg: format!("未找到 rust-lld.exe (期望于 {}); 可用 ALIAS_RUST_LLD 指定", lld.display()),
+            msg: format!(
+                "未找到 rust-lld.exe (期望于 {}); 可用 ALIAS_RUST_LLD 指定",
+                lld.display()
+            ),
             span: Span::default(),
         })
     }
@@ -129,9 +136,7 @@ pub fn link_exe(obj_bytes: &[u8], out_exe: &std::path::Path) -> AliasResult<()> 
     let tmp = create_temp_object(obj_bytes)?;
 
     let lld = locate_rust_lld()?;
-    let libpath = sdk_um_x64().map(|p| {
-        format!("/LIBPATH:{}", p.display())
-    });
+    let libpath = sdk_um_x64().map(|p| format!("/LIBPATH:{}", p.display()));
 
     // 临时目录可能含空格 → 命令行参数由 Command 自动加引号
     let mut args: Vec<String> = vec![

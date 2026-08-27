@@ -187,3 +187,12 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 - `public` 关键字物理退役；唯一公开可见性关键字为顶层 `pub`。不保留兼容 token、别名或迁移诊断；历史记录中旧 `public` 文法描述保留为当时事实。
 - 原 result-only 的两条 match 法律更新为一般 Pattern 法律；demos/tests 当前语料迁移到 `pub`。
 - 扩展 `tests/pattern_laws.rs`，新增 `tests/operator_pub_laws.rs`。本批验证仍需显式手动运行 `cargo test --all-targets`，不使用 CI。
+
+## 泛型右尖括号 / 目标类型诊断 / 自增减收口（2026-08-27）
+
+| # | 变更 | 依据 | 安全性 |
+|---|---|---|---|
+| M54 | 类型解析上下文把 lexer 的 `Shr` 拆为两个 `Gt` 消费，恢复无空格嵌套泛型 `array<array<i32>>`；表达式 `a >> b` 仍保留右移语义 | 新增 `>>` 后 lexer 最长匹配破坏既有递归泛型文法 | `array_laws::nested_arrays`、arrays demo 黄金基线及 run/build 全语料一致性共同锁定 |
+| M55 | 数值目标类型只向字面量传播，不把已有变量改型；同型但不支持的运算符走“不适用于”诊断，异型数值才报“禁止隐式混算” | 目标槽传播不得抢先覆盖二元运算自身的语言诊断 | 原有四条运算符法律恢复精确消息；窄整数/无符号字面量采用声明类型的正向法律保持 |
+| M56 | `increase/decrease` 从 i32-only unit 表达式收紧为独立语句，支持全部整数与浮点数值绑定；整数按声明宽度 wrapping ±1，浮点同型 ±1.0，任何值位置拒绝 | 用户裁决：语义是对可变数值绑定自增/自减 1，不能赋值给其它 ident | 新增全数值 ABI/边界正向用例与 statement-only 负向用例；既有 i32 程序行为不变 |
+| M57 | `recursion.as` 黄金基线重探：字面量 Pattern 已落地后，语料前进至未实现的 `this` 当前函数自引用，stderr 更新为「错误 @ 15:13 — return 需要 i32: 未定义的绑定 'this'」 | M54 恢复 arrays demo 后，全语料机械枚举首次继续执行到该历史陈旧基线 | forward-spec demo 仍确定性拒绝、exit 1；只修正当前事实记录，不实现或发明 `this` 语义 |

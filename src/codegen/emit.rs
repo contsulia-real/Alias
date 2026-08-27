@@ -253,7 +253,8 @@ fn emit_iterator_abort<M: Module>(
         Some(types::I32),
     )?;
     let write_ref = c.module.declare_func_in_func(write, &mut bcx.func);
-    bcx.ins().call(write_ref, &[stderr, ptr, len, written_addr, null]);
+    bcx.ins()
+        .call(write_ref, &[stderr, ptr, len, written_addr, null]);
 
     let exit = c.import_external("ExitProcess", &[types::I32], None)?;
     let exit_ref = c.module.declare_func_in_func(exit, &mut bcx.func);
@@ -320,7 +321,9 @@ pub(crate) fn emit_stmt<M: Module>(
             }
             Ok(())
         }
-        Stmt::FieldAssign { recv, field, value, .. } => {
+        Stmt::FieldAssign {
+            recv, field, value, ..
+        } => {
             let fvty = field_vty(c, frame, recv, field)?;
             let v = emit_expr_expected(c, bcx, frame, value, &fvty)?;
             let p = emit_expr(c, bcx, frame, recv)?;
@@ -362,13 +365,23 @@ pub(crate) fn emit_stmt<M: Module>(
             frame.terminated = true;
             Ok(())
         }
-        Stmt::If { branches, else_body, .. } => {
-            emit_if(c, bcx, frame, branches, else_body.as_deref(), ret_block)
-        }
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => emit_if(c, bcx, frame, branches, else_body.as_deref(), ret_block),
         Stmt::While { cond, body, .. } => emit_while(c, bcx, frame, cond, body, ret_block),
-        Stmt::For { ty, iterable, name, body, span } => {
+        Stmt::For {
+            ty,
+            iterable,
+            name,
+            body,
+            span,
+        } => {
             let elem_vty = decl_vty(ty, &c.struct_layouts);
-            emit_for(c, bcx, frame, iterable, name, body, &elem_vty, *span, ret_block)
+            emit_for(
+                c, bcx, frame, iterable, name, body, &elem_vty, *span, ret_block,
+            )
         }
         Stmt::Break { .. } => {
             let Some((break_b, _)) = frame.loop_targets.last().copied() else {
@@ -421,7 +434,11 @@ fn emit_if<M: Module>(
         let then_b = bcx.create_block();
         let last = idx + 1 == branches.len();
         let false_b = if last {
-            if else_body.is_some() { bcx.create_block() } else { end_b }
+            if else_body.is_some() {
+                bcx.create_block()
+            } else {
+                end_b
+            }
         } else {
             bcx.create_block()
         };
@@ -569,7 +586,9 @@ fn emit_for<M: Module>(
     let data = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 0);
     let off = bcx.ins().imul_imm_s(cursor, 8);
     let addr = bcx.ins().iadd(data, off);
-    let raw_elem = bcx.ins().load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
+    let raw_elem = bcx
+        .ins()
+        .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
     let elem = norm_load(bcx, raw_elem, elem_vty);
     let next = bcx.ins().iadd_imm_s(cursor, 1);
     bcx.ins().store(MemFlagsData::new(), next, iter, 8);
@@ -641,25 +660,39 @@ pub(crate) fn emit_expr<M: Module>(
             let v = emit_expr(c, bcx, frame, expr)?;
             emit_bit_not_typed(bcx, v, &vty)
         }
-        Expr::Binary { op: BinOp::And, lhs, rhs, .. } => {
-            emit_short_circuit(c, bcx, frame, false, lhs, rhs)
-        }
-        Expr::Binary { op: BinOp::Or, lhs, rhs, .. } => {
-            emit_short_circuit(c, bcx, frame, true, lhs, rhs)
-        }
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => emit_short_circuit(c, bcx, frame, false, lhs, rhs),
+        Expr::Binary {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+            ..
+        } => emit_short_circuit(c, bcx, frame, true, lhs, rhs),
         Expr::Binary { op, lhs, rhs, span } => {
             let l = emit_expr(c, bcx, frame, lhs)?;
             let r = emit_expr(c, bcx, frame, rhs)?;
             emit_binary(c, bcx, frame, *op, lhs, l, r, *span)
         }
-        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
             let expected = static_vty(c, frame, e);
             emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, &expected)
         }
         Expr::Call { callee, args, span } => emit_call(c, bcx, frame, callee, args, *span),
-        Expr::MethodCall { recv, name, args, span } => {
-            emit_method_call(c, bcx, frame, recv, name, args, *span)
-        }
+        Expr::MethodCall {
+            recv,
+            name,
+            args,
+            span,
+        } => emit_method_call(c, bcx, frame, recv, name, args, *span),
         Expr::Field { recv, name, .. } => {
             let p = emit_expr(c, bcx, frame, recv)?;
             let fvty = field_vty(c, frame, recv, name)?;
@@ -676,14 +709,20 @@ pub(crate) fn emit_expr<M: Module>(
             };
             let raw_array = array_raw(bcx, array);
             let idx32 = bcx.ins().ireduce(types::I32, idxw);
-            let len64 = bcx.ins().load(types::I64, MemFlagsData::new(), raw_array, 8);
+            let len64 = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), raw_array, 8);
             let len32 = bcx.ins().ireduce(types::I32, len64);
             emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
-            let dp = bcx.ins().load(types::I64, MemFlagsData::new(), raw_array, 0);
+            let dp = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), raw_array, 0);
             let idx64 = bcx.ins().sextend(types::I64, idx32);
             let off = bcx.ins().imul_imm_s(idx64, 8);
             let addr = bcx.ins().iadd(dp, off);
-            let raw = bcx.ins().load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
+            let raw = bcx
+                .ins()
+                .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
             Ok(norm_load(bcx, raw, &elem_vty))
         }
         Expr::ArrayLit { elems, .. } => {
@@ -732,11 +771,7 @@ fn emit_bool_not(bcx: &mut FunctionBuilder, v: Value) -> Value {
     bcx.ins().uextend(types::I64, b)
 }
 
-fn emit_bit_not_typed(
-    bcx: &mut FunctionBuilder,
-    v: Value,
-    vty: &VTy,
-) -> AliasResult<Value> {
+fn emit_bit_not_typed(bcx: &mut FunctionBuilder, v: Value, vty: &VTy) -> AliasResult<Value> {
     match vty {
         VTy::I(w) => {
             let wt = cl_type(vty);
@@ -768,9 +803,11 @@ fn emit_short_circuit<M: Module>(
     let out = bcx.append_block_param(join_b, types::I64);
     let short = bcx.ins().iconst(types::I64, if is_or { 1 } else { 0 });
     if is_or {
-        bcx.ins().brif(l, join_b, &[BlockArg::Value(short)], rhs_b, &[]);
+        bcx.ins()
+            .brif(l, join_b, &[BlockArg::Value(short)], rhs_b, &[]);
     } else {
-        bcx.ins().brif(l, rhs_b, &[], join_b, &[BlockArg::Value(short)]);
+        bcx.ins()
+            .brif(l, rhs_b, &[], join_b, &[BlockArg::Value(short)]);
     }
     bcx.seal_block(rhs_b);
     bcx.switch_to_block(rhs_b);
@@ -856,16 +893,7 @@ fn emit_match_typed<M: Module>(
 
         bcx.switch_to_block(arm_b);
         frame.terminated = false;
-        any_join |= emit_match_arm(
-            c,
-            bcx,
-            frame,
-            arm,
-            &subject_vty,
-            result_vty,
-            subj,
-            join_b,
-        )?;
+        any_join |= emit_match_arm(c, bcx, frame, arm, &subject_vty, result_vty, subj, join_b)?;
 
         if let Some(next_b) = next_b {
             bcx.switch_to_block(next_b);
@@ -891,16 +919,12 @@ fn emit_pattern_test<M: Module>(
     subj: Value,
 ) -> AliasResult<Value> {
     Ok(match pattern {
-        Pattern::Wildcard { .. } | Pattern::Binding { .. } => {
-            bcx.ins().iconst(types::I64, 1)
-        }
+        Pattern::Wildcard { .. } | Pattern::Binding { .. } => bcx.ins().iconst(types::I64, 1),
         Pattern::Int { value, .. } => {
             let rhs = bcx.ins().iconst(types::I64, *value);
             bcx.ins().icmp(IntCC::Equal, subj, rhs)
         }
-        Pattern::Bool { value, .. } => {
-            bcx.ins().icmp_imm_s(IntCC::Equal, subj, *value as i64)
-        }
+        Pattern::Bool { value, .. } => bcx.ins().icmp_imm_s(IntCC::Equal, subj, *value as i64),
         Pattern::Str { value, .. } => {
             let rhs = str_literal_handle(c, bcx, value)?;
             let ord = call_str_cmp(c, bcx, subj, rhs)?;
@@ -925,15 +949,19 @@ pub(crate) fn emit_expr_expected<M: Module>(
     expected: &VTy,
 ) -> AliasResult<Value> {
     match (e, expected) {
-        (Expr::Ternary { cond, then_expr, else_expr, .. }, _) => {
-            emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, expected)
-        }
+        (
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            },
+            _,
+        ) => emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, expected),
         (Expr::Match { subject, arms, .. }, _) => {
             emit_match_typed(c, bcx, frame, subject, arms, expected)
         }
-        (Expr::Binary { op, lhs, rhs, span }, _)
-            if binary_vty_flows_expected(*op, expected) =>
-        {
+        (Expr::Binary { op, lhs, rhs, span }, _) if binary_vty_flows_expected(*op, expected) => {
             let l = emit_expr_expected(c, bcx, frame, lhs, expected)?;
             let r = emit_expr_expected(c, bcx, frame, rhs, expected)?;
             emit_binary_values(c, bcx, frame, *op, expected, l, r, *span)
@@ -1169,15 +1197,27 @@ fn int_cc(op: BinOp, signed: bool) -> IntCC {
 
 fn narrow(bcx: &mut FunctionBuilder, v: Value, bits: u32) -> Value {
     let ty = ir_type_bits(bits);
-    if ty == types::I64 { v } else { bcx.ins().ireduce(ty, v) }
+    if ty == types::I64 {
+        v
+    } else {
+        bcx.ins().ireduce(ty, v)
+    }
 }
 
 fn widen_signed(bcx: &mut FunctionBuilder, v: Value, to: cranelift_codegen::ir::Type) -> Value {
-    if to == types::I64 { v } else { bcx.ins().sextend(types::I64, v) }
+    if to == types::I64 {
+        v
+    } else {
+        bcx.ins().sextend(types::I64, v)
+    }
 }
 
 fn widen_unsigned(bcx: &mut FunctionBuilder, v: Value, to: cranelift_codegen::ir::Type) -> Value {
-    if to == types::I64 { v } else { bcx.ins().uextend(types::I64, v) }
+    if to == types::I64 {
+        v
+    } else {
+        bcx.ins().uextend(types::I64, v)
+    }
 }
 
 pub(crate) fn emit_match_arm<M: Module>(
@@ -1197,7 +1237,11 @@ pub(crate) fn emit_match_arm<M: Module>(
             emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), name)?;
         }
         (
-            Pattern::Constructor { ctor, binding: Some(name), .. },
+            Pattern::Constructor {
+                ctor,
+                binding: Some(name),
+                ..
+            },
             VTy::Result(ok, err),
         ) => {
             let bind_vty = match ctor {
@@ -1643,7 +1687,10 @@ pub(crate) fn emit_result_ctor<M: Module>(
     args: &[CallArg],
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(Span::default(), format!("{name} 构造恰好接受 1 个参数")));
+        return Err(native_err(
+            Span::default(),
+            format!("{name} 构造恰好接受 1 个参数"),
+        ));
     };
     let pvty = static_vty(c, frame, &arg.value);
     emit_result_ctor_typed(c, bcx, frame, name, args, &pvty)
@@ -1658,7 +1705,10 @@ fn emit_result_ctor_typed<M: Module>(
     pvty: &VTy,
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(Span::default(), format!("{name} 构造恰好接受 1 个参数")));
+        return Err(native_err(
+            Span::default(),
+            format!("{name} 构造恰好接受 1 个参数"),
+        ));
     };
     let payload = emit_expr_expected(c, bcx, frame, &arg.value, pvty)?;
     let pw = storage_word(bcx, payload, pvty);
@@ -1785,7 +1835,10 @@ pub(crate) fn emit_method_call<M: Module>(
             _ => {}
         }
     }
-    Err(native_err(span, format!("类型 {tname} 上没有方法 '{name}'")))
+    Err(native_err(
+        span,
+        format!("类型 {tname} 上没有方法 '{name}'"),
+    ))
 }
 
 pub(crate) fn field_offset<M: Module>(
@@ -1839,12 +1892,23 @@ pub(crate) fn emit_incdec<M: Module>(
     let Some(addr) = cell_addr(c, frame, target) else {
         return Err(native_err(*tspan, format!("'{target}' 未定义")));
     };
-    let cur = read_cell(bcx, frame, &addr, &VTy::I(IntW::W32));
-    let delta = if name == "increase" { 1i64 } else { -1i64 };
-    let cur32 = bcx.ins().ireduce(types::I32, cur);
-    let next = bcx.ins().iadd_imm_s(cur32, delta);
-    let nextw = bcx.ins().sextend(types::I64, next);
-    write_cell(bcx, frame, &addr, nextw, &VTy::I(IntW::W32));
+    let vty = vty_of_name(c, frame, target);
+    if !vty.is_numeric() {
+        invariant_violation("increase/decrease 目标为数值绑定 (sema 已校验)");
+    }
+    let cur = read_cell(bcx, frame, &addr, &vty);
+    let one = match &vty {
+        VTy::F(FloatW::F32) => bcx.ins().f32const(1.0),
+        VTy::F(FloatW::F64) => bcx.ins().f64const(1.0),
+        _ => bcx.ins().iconst(types::I64, 1),
+    };
+    let op = if name == "increase" {
+        BinOp::Add
+    } else {
+        BinOp::Sub
+    };
+    let next = emit_binary_values(c, bcx, frame, op, &vty, cur, one, span)?;
+    write_cell(bcx, frame, &addr, next, &vty);
     Ok(bcx.ins().iconst(types::I64, 0))
 }
 
@@ -1863,12 +1927,20 @@ pub(crate) fn emit_print<M: Module>(
     match static_vty(c, frame, &arg.value) {
         VTy::I(IntW::W32) | VTy::U(UIntW::U8) | VTy::U(UIntW::U16) => {
             let t = bcx.ins().ireduce(types::I32, v);
-            let h = if name == "println" { "alias.println.i32" } else { "alias.print.i32" };
+            let h = if name == "println" {
+                "alias.println.i32"
+            } else {
+                "alias.print.i32"
+            };
             c.call_rt(bcx, h, &[t])?;
         }
         _ => {
             let s = display_word(c, bcx, frame, &arg.value, v)?;
-            let h = if name == "println" { "alias.println.str" } else { "alias.print.str" };
+            let h = if name == "println" {
+                "alias.println.str"
+            } else {
+                "alias.print.str"
+            };
             c.call_rt(bcx, h, &[s])?;
         }
     }
@@ -1945,7 +2017,9 @@ fn emit_index_guard<M: Module>(
     let span_id = new_span_id(c, span);
     let zero = bcx.ins().iconst(types::I32, 0);
     let neg = bcx.ins().icmp(IntCC::SignedLessThan, idx32, zero);
-    let oob_hi = bcx.ins().icmp(IntCC::SignedGreaterThanOrEqual, idx32, len32);
+    let oob_hi = bcx
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, idx32, len32);
     let trap = bcx.ins().bor(neg, oob_hi);
 
     let abort_b = bcx.create_block();

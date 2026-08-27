@@ -130,7 +130,8 @@ fn field_access_on_non_struct_rejected() {
     assert_law(
         "func i32 main = () -> {\n    val i32 x = 1\n    return x.foo\n}\n",
         "i32 没有字段 'foo'",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -152,7 +153,8 @@ fn struct_clashes_with_binding() {
     assert_law(
         "val i32 n = 1\nstruct n {\n    val i32 x = 1\n}\nfunc i32 main = () -> return 0\n",
         "'n' 已定义为绑定, 不能再定义为结构体",
-        2, 1,
+        2,
+        1,
     );
 }
 
@@ -170,7 +172,8 @@ fn default_type_mismatch_rejected() {
     assert_law(
         "struct bad {\n    val i32 x = 'no'\n}\nfunc i32 main = () -> return 0\n",
         "字段 'x' 声明类型为 i32, 实际 string",
-        2, 16,
+        2,
+        16,
     );
 }
 
@@ -180,7 +183,8 @@ fn unknown_struct_in_type_slot() {
     assert_law(
         "func i32 main = () -> {\n    val nosuch s = ()\n    return 0\n}\n",
         "未知类型名 'nosuch'",
-        2, 4,
+        2,
+        4,
     );
 }
 

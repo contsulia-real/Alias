@@ -203,8 +203,7 @@ struct TempCase {
 
 impl TempCase {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .join(format!("alias-golden-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alias-golden-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir); // 清理上次崩溃残留
         std::fs::create_dir_all(&dir).expect("创建临时目录失败");
         TempCase { dir }
@@ -224,7 +223,10 @@ impl Drop for TempCase {
 }
 
 fn run_binary(args: &[&std::ffi::OsStr]) -> (Vec<u8>, Vec<u8>, Option<i32>) {
-    let out = Command::new(BIN).args(args).output().expect("启动 alias 二进制失败");
+    let out = Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("启动 alias 二进制失败");
     (out.stdout, out.stderr, out.status.code())
 }
 
@@ -282,8 +284,10 @@ fn missing_file_exit_2() {
     let tmp = TempCase::new("missing_file");
     let path = tmp.dir.join("no_such_file.as"); // 从未写入 → 必然不存在
     let triplet = run_binary(&[path.as_os_str()]);
-    let want_stderr =
-        format!("无法读取 {}: 系统找不到指定的文件。 (os error 2)\n", path.display());
+    let want_stderr = format!(
+        "无法读取 {}: 系统找不到指定的文件。 (os error 2)\n",
+        path.display()
+    );
     assert_triplet(
         "missing_file_exit_2",
         &triplet,

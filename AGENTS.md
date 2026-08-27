@@ -13,7 +13,7 @@ Alias——用 Rust 实现的自研**编译型语言**（`.as` 源程序）。�
 D:\Project\Alias\
 ├── src/
 │   ├── main.rs      # CLI 壳：run|build 子命令（裸单参 = run）→ 退出码 clamp 到 0–255
-│   ├── lib.rs       # 编排器 run()/build() + 统一错误类型 AliasError/Span(file:line:col)
+│   ├── lib.rs       # 编排器 run()/build() + 统一错误类型 AliasError/Span(line:col,len)
 │   ├── lexer.rs     # lex(src) -> Vec<Token>；含字符串插值 StrPart 切分
 │   ├── parser/      # parse(tokens) -> Program；含递归/表达式链深度守卫
 │   ├── ast.rs       # AST 纯数据定义（Expr/Stmt/BindKind/BinOp/Pattern…）
@@ -66,7 +66,7 @@ D:\Project\Alias\
 | `emit_expr` / `emit_stmt` | fn | codegen/emit.rs | 表达式/语句发射核心（单元格值模型 + 闭包创建） |
 | `methods` / `method_rets` | field | codegen/mod.rs | 方法表：(接收者,方法名)→FuncId 静态分派 + 返回类型投影 |
 | `define_span_data` | fn | codegen/native_runtime.rs | 把运行时诊断 span 表固化进原生产物只读数据段 |
-| `AliasError`/`Span` | struct | lib.rs | 错误统一携带 file:line:col |
+| `AliasError`/`Span` | struct | lib.rs | 错误携带 line:col,len；当前不保存源文件路径 |
 
 ## CONVENTIONS
 
@@ -77,7 +77,8 @@ D:\Project\Alias\
 - **方法语义**：`pub? func <Ret> <RecvType>.<name>` 定义扩展方法；`pub` 只允许顶层；`public` 不再是关键字或兼容别名。self 是隐式 val 绑定；方法名按接收者类型划分命名空间；内建 len/upper/lower/trim 不可覆盖。
 - **Pattern 语义**：第一批 Pattern 为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`。普通标识符与 `_` 都是 catch-all，前者绑定整个主语；guard/struct Pattern 暂未加入。
 - **运算符语义**：`%` 仅整数；`& | ^ ~ << >>` 仅整数；同型同宽度运算，不允许隐式数值混算；不提供复合赋值。
-- **数组语义**：实例 = 泄漏头块 {data_ptr,len,cap}，引用语义（别名共享）；下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop 不可定义。
+- **数组语义**：语言值 = 共享 wrapper {raw_header,version}；raw header 为 {data_ptr,len,cap}，元素使用 8 字节载荷槽。别名共享 wrapper；push/pop 推进 version 并使旧 iterator fail-fast。下标只读（arr[i]=x 拒绝），越界/pop 空 → span-ID 中止存根；内建 len/push/pop/iterator 不可定义。
+- **自增减语义**：`increase name` / `decrease name` 只允许作为独立语句，目标必须是可变数值绑定；整数按声明宽度 wrapping ±1，f32/f64 按同型 ±1.0。它们不产生可赋值、可返回或可传参的值。
 - **混型 ABI**：函数类型携带完整参数/返回投影；整数规范在途形为 I64，f32/f64 保持原生浮点寄存器类型，进入 result/array 的 8 字节字槽时才按位装箱。
 - **ABI/布局单源**：每种 `VTy` 的规范寄存器类型、实际存储类型/宽度/对齐、参数/返回类型及载荷字编码只在 `codegen/abi.rs` 定义。
 - **runtime 契约单源**：所有 `alias.*` 与内部 `rt.*` 符号必须进入 `RUNTIME_CONTRACTS`；缺失、重复、多余或调用参数类型漂移均为编译器错误。

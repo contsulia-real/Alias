@@ -46,7 +46,11 @@ fn result_constructors_are_real_pattern_nodes() {
     ));
     assert!(matches!(
         &arms[1].pattern,
-        Pattern::Constructor { ctor: CtorKind::Err, binding: None, .. }
+        Pattern::Constructor {
+            ctor: CtorKind::Err,
+            binding: None,
+            ..
+        }
     ));
 }
 

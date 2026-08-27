@@ -133,7 +133,8 @@ fn unknown_method_rejected() {
     assert_law(
         "func i32 main = () -> {\n    return 'x'.nope()\n}\n",
         "类型 string 上没有方法 'nope'",
-        2, 14,
+        2,
+        14,
     );
 }
 
@@ -153,7 +154,8 @@ fn method_on_unknown_type_rejected() {
     assert_law(
         "func i32 ghost.m = () -> return 0\nfunc i32 main = () -> return 0\n",
         "未知类型名 'ghost'",
-        1, 1,
+        1,
+        1,
     );
 }
 
@@ -163,7 +165,8 @@ fn unit_receiver_rejected() {
     assert_law(
         "func i32 unit.m = () -> return 0\nfunc i32 main = () -> return 0\n",
         "类型 unit 不能作为方法接收者",
-        1, 1,
+        1,
+        1,
     );
 }
 
@@ -213,7 +216,8 @@ fn builtin_override_rejected() {
     assert_law(
         "func i32 string.len = () -> return 0\nfunc i32 main = () -> return 0\n",
         "内建方法不可覆盖: string.len",
-        1, 1,
+        1,
+        1,
     );
 }
 
@@ -246,7 +250,8 @@ fn self_outside_method_rejected() {
     assert_law(
         "func i32 main = () -> {\n    return self\n}\n",
         "未定义的绑定 'self'",
-        2, 11,
+        2,
+        11,
     );
 }
 
@@ -266,7 +271,8 @@ fn nested_method_def_rejected() {
     assert_law(
         "func i32 main = () -> {\n    func string string.f = () -> return ''\n    return 0\n}\n",
         "方法定义只能出现在顶层",
-        2, 4,
+        2,
+        4,
     );
 }
 
@@ -276,6 +282,7 @@ fn method_body_must_be_funclit() {
     assert_law(
         "func string string.f = 42\nfunc i32 main = () -> return 0\n",
         "方法 string.f 的体必须是函数字面量",
-        1, 1,
+        1,
+        1,
     );
 }

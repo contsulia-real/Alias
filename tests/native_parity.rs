@@ -96,13 +96,12 @@ fn corpus_baselines() -> Vec<Baseline> {
             stderr: "错误 @ 22:43 — 无法开始一个表达式: Some(Gt)\n".as_bytes(),
             exit: 1,
         },
-        // forward-spec 文档: P7 字面量模式 match 未实现 (Phase 2b 仅
-        // result ok/err 模式) → 解析期拒绝; 顶层裸绑定语句仍未实现但
-        // 语料先在 match 臂处失败
+        // forward-spec 文档: 字面量 Pattern 已实现，语料继续前进至尚未
+        // 落地的 `this` 当前函数自引用语义，由 sema 在递归分支拒绝。
         Baseline {
             file: "recursion.as",
             stdout: b"",
-            stderr: "错误 @ 14:4 — match 臂构造器必须是 ok 或 err, 实际 Some(Int(0))\n".as_bytes(),
+            stderr: "错误 @ 15:13 — return 需要 i32: 未定义的绑定 'this'\n".as_bytes(),
             exit: 1,
         },
     ]
@@ -209,8 +208,7 @@ struct TempCase {
 
 impl TempCase {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .join(format!("alias-p4-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alias-p4-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建临时目录失败");
         TempCase { dir }

@@ -96,7 +96,11 @@ impl Parser {
                     if callee_is_bare_builtin {
                         let arg = self.parse_unary()?;
                         let a_span = arg.span();
-                        let args = vec![CallArg { label: None, value: arg, span: a_span }];
+                        let args = vec![CallArg {
+                            label: None,
+                            value: arg,
+                            span: a_span,
+                        }];
                         let c_span = lhs.span();
                         lhs = Expr::Call {
                             callee: Box::new(lhs),
@@ -116,17 +120,31 @@ impl Parser {
                     let args = if has_arg {
                         let a = self.parse_unary()?;
                         let a_span = a.span();
-                        vec![CallArg { label: None, value: a, span: a_span }]
+                        vec![CallArg {
+                            label: None,
+                            value: a,
+                            span: a_span,
+                        }]
                     } else {
                         Vec::new()
                     };
                     let span = lhs.span();
-                    lhs = Expr::MethodCall { recv: Box::new(lhs), name: m, args, span };
+                    lhs = Expr::MethodCall {
+                        recv: Box::new(lhs),
+                        name: m,
+                        args,
+                        span,
+                    };
                 }
                 Some(t)
                     if matches!(
                         t,
-                        Tok::Int(_) | Tok::Float(_) | Tok::Bool(_) | Tok::Str(_) | Tok::LParen | Tok::LBracket
+                        Tok::Int(_)
+                            | Tok::Float(_)
+                            | Tok::Bool(_)
+                            | Tok::Str(_)
+                            | Tok::LParen
+                            | Tok::LBracket
                     ) =>
                 {
                     chain += 1;
@@ -147,7 +165,11 @@ impl Parser {
                     let c_span = callee.span();
                     lhs = Expr::Call {
                         callee: Box::new(callee),
-                        args: vec![CallArg { label: None, value: a, span: a_span }],
+                        args: vec![CallArg {
+                            label: None,
+                            value: a,
+                            span: a_span,
+                        }],
                         span: c_span,
                     };
                 }
@@ -186,7 +208,12 @@ impl Parser {
             }
             let rhs = self.parse_bit_xor()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op: BinOp::BitOr, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op: BinOp::BitOr,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -202,7 +229,12 @@ impl Parser {
             }
             let rhs = self.parse_bit_and()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op: BinOp::BitXor, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op: BinOp::BitXor,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -218,7 +250,12 @@ impl Parser {
             }
             let rhs = self.parse_equality()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op: BinOp::BitAnd, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op: BinOp::BitAnd,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -239,7 +276,12 @@ impl Parser {
             }
             let rhs = self.parse_comparison()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -256,7 +298,12 @@ impl Parser {
         self.bump();
         let rhs = self.parse_shift()?;
         let span = lhs.span();
-        Ok(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span })
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span,
+        })
     }
 
     fn parse_shift(&mut self) -> AliasResult<Expr> {
@@ -275,7 +322,12 @@ impl Parser {
             }
             let rhs = self.parse_additive()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -296,7 +348,12 @@ impl Parser {
             }
             let rhs = self.parse_multiplicative()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -318,7 +375,12 @@ impl Parser {
             }
             let rhs = self.parse_unary()?;
             let span = lhs.span();
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -344,7 +406,11 @@ impl Parser {
                             span,
                         };
                     } else {
-                        expr = Expr::Field { recv: Box::new(expr), name, span };
+                        expr = Expr::Field {
+                            recv: Box::new(expr),
+                            name,
+                            span,
+                        };
                     }
                 }
                 Some(Tok::LBracket) => {
@@ -352,12 +418,20 @@ impl Parser {
                     self.bump();
                     let idx = self.parse_expr()?;
                     self.expect(&Tok::RBracket)?;
-                    expr = Expr::Index { recv: Box::new(expr), idx: Box::new(idx), span };
+                    expr = Expr::Index {
+                        recv: Box::new(expr),
+                        idx: Box::new(idx),
+                        span,
+                    };
                 }
                 Some(Tok::LParen) => {
                     chain += 1;
                     let args = self.parse_args()?;
-                    expr = Expr::Call { callee: Box::new(expr), args, span };
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        args,
+                        span,
+                    };
                 }
                 Some(Tok::Question) => {
                     // 后一 token 能启动表达式 => 三元，不能在这里吞掉。
@@ -366,7 +440,10 @@ impl Parser {
                     }
                     chain += 1;
                     self.bump();
-                    expr = Expr::Propagate { expr: Box::new(expr), span };
+                    expr = Expr::Propagate {
+                        expr: Box::new(expr),
+                        span,
+                    };
                 }
                 _ => break,
             }
@@ -395,9 +472,18 @@ impl Parser {
         let mut expr = self.parse_postfix()?;
         for (tok, span) in prefixes.into_iter().rev() {
             expr = match tok {
-                Tok::Minus => Expr::Neg { expr: Box::new(expr), span },
-                Tok::Bang => Expr::Not { expr: Box::new(expr), span },
-                Tok::Tilde => Expr::BitNot { expr: Box::new(expr), span },
+                Tok::Minus => Expr::Neg {
+                    expr: Box::new(expr),
+                    span,
+                },
+                Tok::Bang => Expr::Not {
+                    expr: Box::new(expr),
+                    span,
+                },
+                Tok::Tilde => Expr::BitNot {
+                    expr: Box::new(expr),
+                    span,
+                },
                 _ => unreachable!(),
             };
         }
@@ -441,12 +527,20 @@ impl Parser {
                 self.bump();
                 self.bump();
                 let value = self.parse_expr()?;
-                return Ok(CallArg { label: Some(label), value, span });
+                return Ok(CallArg {
+                    label: Some(label),
+                    value,
+                    span,
+                });
             }
         }
         let value = self.parse_expr()?;
         let vspan = value.span();
-        Ok(CallArg { label: None, value, span: vspan })
+        Ok(CallArg {
+            label: None,
+            value,
+            span: vspan,
+        })
     }
 
     fn parse_primary(&mut self) -> AliasResult<Expr> {
@@ -476,7 +570,10 @@ impl Parser {
                                 .map(|(tok, sp)| Token { tok, span: sp })
                                 .collect();
                             validate_nesting(&sub_toks)?;
-                            let mut sub = Parser { toks: sub_toks, pos: 0 };
+                            let mut sub = Parser {
+                                toks: sub_toks,
+                                pos: 0,
+                            };
                             let e = sub.parse_expr().map_err(|e| AliasError {
                                 msg: format!("插值内表达式错误: {}", e.msg),
                                 span: e.span,
@@ -557,7 +654,11 @@ impl Parser {
         }
         self.skip_newlines();
         self.expect(&Tok::RBrace)?;
-        Ok(Expr::Match { subject: Box::new(subject), arms, span })
+        Ok(Expr::Match {
+            subject: Box::new(subject),
+            arms,
+            span,
+        })
     }
 
     fn parse_match_arm(&mut self) -> AliasResult<MatchArm> {
@@ -571,7 +672,11 @@ impl Parser {
         } else {
             ArmBody::Value(Box::new(self.parse_expr()?))
         };
-        Ok(MatchArm { pattern, body, span })
+        Ok(MatchArm {
+            pattern,
+            body,
+            span,
+        })
     }
 
     fn parse_pattern(&mut self) -> AliasResult<Pattern> {
@@ -582,12 +687,20 @@ impl Parser {
                     && self.peek_at(1) == Some(&Tok::LParen) =>
             {
                 self.bump();
-                let ctor = if name == "ok" { CtorKind::Ok } else { CtorKind::Err };
+                let ctor = if name == "ok" {
+                    CtorKind::Ok
+                } else {
+                    CtorKind::Err
+                };
                 self.expect(&Tok::LParen)?;
                 let binding = match self.peek().cloned() {
                     Some(Tok::Ident(n)) => {
                         self.bump();
-                        if n == "_" { None } else { Some(n) }
+                        if n == "_" {
+                            None
+                        } else {
+                            Some(n)
+                        }
                     }
                     other => {
                         return Err(self.err_here(format!(
@@ -597,7 +710,11 @@ impl Parser {
                     }
                 };
                 self.expect(&Tok::RParen)?;
-                Ok(Pattern::Constructor { ctor, binding, span })
+                Ok(Pattern::Constructor {
+                    ctor,
+                    binding,
+                    span,
+                })
             }
             Some(Tok::Ident(name)) => {
                 self.bump();
@@ -609,7 +726,9 @@ impl Parser {
             }
             Some(Tok::Minus) if matches!(self.peek_at(1), Some(Tok::Int(_))) => {
                 self.bump();
-                let Some(Tok::Int(v)) = self.peek().cloned() else { unreachable!() };
+                let Some(Tok::Int(v)) = self.peek().cloned() else {
+                    unreachable!()
+                };
                 self.bump();
                 let value = v.checked_neg().ok_or_else(|| AliasError {
                     msg: "负整数字面量超出 i64 表示范围".into(),
@@ -675,7 +794,11 @@ impl Parser {
                 let p_span = self.span();
                 let ty = self.parse_type()?;
                 let name = self.expect_ident()?;
-                params.push(Param { ty, name, span: p_span });
+                params.push(Param {
+                    ty,
+                    name,
+                    span: p_span,
+                });
                 self.skip_newlines();
                 if self.eat(&Tok::Comma) {
                     continue;
@@ -687,7 +810,11 @@ impl Parser {
         }
         self.expect(&Tok::Arrow)?;
         let body = self.parse_func_body()?;
-        Ok(Expr::FuncLit { params, body: Box::new(body), span })
+        Ok(Expr::FuncLit {
+            params,
+            body: Box::new(body),
+            span,
+        })
     }
 
     /// 无花括号体 = 恰好一条真正的语句。绝不把裸表达式改写成 return。

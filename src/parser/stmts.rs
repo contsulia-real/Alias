@@ -42,7 +42,13 @@ impl Parser {
                 self.expect(&Tok::In)?;
                 let iterable = self.parse_expr()?;
                 let body = self.parse_block()?;
-                Ok(Stmt::For { ty, name, iterable, body, span })
+                Ok(Stmt::For {
+                    ty,
+                    name,
+                    iterable,
+                    body,
+                    span,
+                })
             }
             Some(Tok::While) => {
                 self.bump();
@@ -71,13 +77,21 @@ impl Parser {
                 let target = self.expect_ident()?;
                 self.bump();
                 let value = self.parse_expr()?;
-                Ok(Stmt::Assign { target, value, span })
+                Ok(Stmt::Assign {
+                    target,
+                    value,
+                    span,
+                })
             }
             Some(Tok::SelfKw) if self.peek_at(1) == Some(&Tok::Assign) => {
                 self.bump();
                 self.bump();
                 let value = self.parse_expr()?;
-                Ok(Stmt::Assign { target: "self".into(), value, span })
+                Ok(Stmt::Assign {
+                    target: "self".into(),
+                    value,
+                    span,
+                })
             }
             // `println f 0` / `print f 'x'`：外层输出内建的唯一实参可以是
             // 一个完整的普通无括号单参调用。只在第二个标识符后确实存在
@@ -102,7 +116,11 @@ impl Parser {
                 Ok(Stmt::ExprStmt {
                     expr: Expr::Call {
                         callee: Box::new(Expr::Ident(outer_name, span)),
-                        args: vec![CallArg { label: None, value: inner, span: inner_span }],
+                        args: vec![CallArg {
+                            label: None,
+                            value: inner,
+                            span: inner_span,
+                        }],
                         span,
                     },
                     span,
@@ -128,7 +146,11 @@ impl Parser {
                         return Ok(Stmt::ExprStmt {
                             expr: Expr::Call {
                                 callee: Box::new(Expr::Ident(name, id_span)),
-                                args: vec![CallArg { label: None, value: arg, span: arg_span }],
+                                args: vec![CallArg {
+                                    label: None,
+                                    value: arg,
+                                    span: arg_span,
+                                }],
                                 span,
                             },
                             span,
@@ -164,7 +186,11 @@ impl Parser {
             break;
         }
 
-        Ok(Stmt::If { branches, else_body, span })
+        Ok(Stmt::If {
+            branches,
+            else_body,
+            span,
+        })
     }
 
     fn require_boundary(&self, kw: &str) -> AliasResult<()> {
@@ -183,13 +209,15 @@ impl Parser {
             Expr::Field { recv, name, .. } => {
                 self.bump();
                 let value = self.parse_expr()?;
-                Ok(Stmt::FieldAssign { recv, field: name, value, span })
+                Ok(Stmt::FieldAssign {
+                    recv,
+                    field: name,
+                    value,
+                    span,
+                })
             }
             Expr::Index { .. } => Err(self.err_here("下标赋值尚未支持")),
-            _ => Err(self.err_here(format!(
-                "无法开始一个表达式: {:?}",
-                self.peek().cloned()
-            ))),
+            _ => Err(self.err_here(format!("无法开始一个表达式: {:?}", self.peek().cloned()))),
         }
     }
 
@@ -214,8 +242,7 @@ impl Parser {
             _ => return Err(self.err_here("绑定声明必须以 val/var/func 开头")),
         };
 
-        if matches!(self.peek(), Some(Tok::Ident(_))) && self.peek_at(1) == Some(&Tok::Assign)
-        {
+        if matches!(self.peek(), Some(Tok::Ident(_))) && self.peek_at(1) == Some(&Tok::Assign) {
             return Err(self.err_here(format!(
                 "{:?} 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注",
                 kind
@@ -255,10 +282,25 @@ impl Parser {
                 Some(recv) => format!("方法 {}.{} 的体必须是函数字面量", recv.display(), name),
                 None => "func 绑定必须由函数字面量初始化".into(),
             };
-            let err_span = if receiver.is_some() { span } else { value.span() };
-            return Err(AliasError { msg, span: err_span });
+            let err_span = if receiver.is_some() {
+                span
+            } else {
+                value.span()
+            };
+            return Err(AliasError {
+                msg,
+                span: err_span,
+            });
         }
 
-        Ok(Binding { is_pub, kind, ty, name, receiver, value, span })
+        Ok(Binding {
+            is_pub,
+            kind,
+            ty,
+            name,
+            receiver,
+            value,
+            span,
+        })
     }
 }

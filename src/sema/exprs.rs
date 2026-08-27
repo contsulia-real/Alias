@@ -2,25 +2,25 @@
 
 use super::types::{types_match, FloatW, IntW, Ty, UIntW};
 use super::{literal_slot_unify, op_mismatch, Checker, Env, Scope, VarInfo};
-use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, StrPartAst, Stmt};
+use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, Stmt, StrPartAst};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashSet;
 
 impl Checker {
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
     /// match 都走这一入口，使窄数值字面量的范围规则完全一致。
-    pub(super) fn expr_expected(
-        &mut self,
-        e: &Expr,
-        env: &Env,
-        expected: &Ty,
-    ) -> AliasResult<Ty> {
+    pub(super) fn expr_expected(&mut self, e: &Expr, env: &Env, expected: &Ty) -> AliasResult<Ty> {
         if let Some(r) = literal_slot_unify(expected, e) {
             return r;
         }
         match (e, expected) {
             (
-                Expr::Ternary { cond, then_expr, else_expr, span: _ },
+                Expr::Ternary {
+                    cond,
+                    then_expr,
+                    else_expr,
+                    span: _,
+                },
                 expected,
             ) => {
                 self.require_bool(cond, env, "?: 条件")?;
@@ -28,16 +28,24 @@ impl Checker {
                 self.expr_expected(else_expr, env, expected)?;
                 Ok(expected.clone())
             }
-            (Expr::Match { subject, arms, span }, expected) => {
-                self.match_expr(subject, arms, *span, env, Some(expected))
-            }
-            (Expr::Binary { op, lhs, rhs, span }, expected)
-                if binary_flows_expected(*op, expected) =>
-            {
-                self.expr_expected(lhs, env, expected)?;
-                self.expr_expected(rhs, env, expected)?;
-                self.binary(*op, expected.clone(), expected.clone(), *span)?;
-                Ok(expected.clone())
+            (
+                Expr::Match {
+                    subject,
+                    arms,
+                    span,
+                },
+                expected,
+            ) => self.match_expr(subject, arms, *span, env, Some(expected)),
+            (Expr::Binary { op, .. }, expected) if binary_flows_expected(*op, expected) => {
+                let got = self.expr_with_numeric_literal_context(e, env, expected)?;
+                if types_match(expected, &got) {
+                    Ok(expected.clone())
+                } else {
+                    Err(AliasError {
+                        msg: format!("需要 {}, 实际 {}", expected.name(), got.name()),
+                        span: e.span(),
+                    })
+                }
             }
             (Expr::BitNot { expr, .. }, Ty::Int(_) | Ty::UInt(_)) => {
                 self.expr_expected(expr, env, expected)?;
@@ -50,7 +58,11 @@ impl Checker {
                         Err(e) if e.msg.starts_with("需要 ") => {
                             let got = self.expr(item, env)?;
                             return Err(AliasError {
-                                msg: format!("数组元素类型不一致: {} 与 {}", elem.name(), got.name()),
+                                msg: format!(
+                                    "数组元素类型不一致: {} 与 {}",
+                                    elem.name(),
+                                    got.name()
+                                ),
                                 span: item.span(),
                             });
                         }
@@ -74,7 +86,11 @@ impl Checker {
                                 span: arg.span,
                             });
                         }
-                        let payload = if name == "ok" { ok.as_ref() } else { err.as_ref() };
+                        let payload = if name == "ok" {
+                            ok.as_ref()
+                        } else {
+                            err.as_ref()
+                        };
                         self.expr_expected(&arg.value, env, payload)?;
                         return Ok(expected.clone());
                     }
@@ -97,6 +113,35 @@ impl Checker {
         }
     }
 
+    /// 数值目标类型只负责给字面量提供声明宽度，不能把已有变量强行改型。
+    /// 这样 `u8 x = 1 + 2` 仍按 u8 检查，而 `u32 + i32` 会进入统一
+    /// 二元诊断并报告禁止隐式混算，而不是提前退化为“需要 u32”。
+    fn expr_with_numeric_literal_context(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+        expected: &Ty,
+    ) -> AliasResult<Ty> {
+        if let Some(result) = literal_slot_unify(expected, e) {
+            return result;
+        }
+        let Expr::Binary { op, lhs, rhs, span } = e else {
+            return self.expr(e, env);
+        };
+        if !binary_flows_expected(*op, expected) {
+            return self.expr(e, env);
+        }
+
+        let lhs_ty = self.expr_with_numeric_literal_context(lhs, env, expected)?;
+        let rhs_expected = if lhs_ty.is_numeric() {
+            &lhs_ty
+        } else {
+            expected
+        };
+        let rhs_ty = self.expr_with_numeric_literal_context(rhs, env, rhs_expected)?;
+        self.binary(*op, lhs_ty, rhs_ty, *span)
+    }
+
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
         match e {
             Expr::Int(..) => Ok(Ty::Int(IntW::W32)),
@@ -111,12 +156,14 @@ impl Checker {
                 }
                 Ok(Ty::Str)
             }
-            Expr::Ident(name, span) => Scope::get(env, name)
-                .map(|info| info.ty)
-                .ok_or_else(|| AliasError {
-                    msg: format!("未定义的绑定 '{name}'"),
-                    span: *span,
-                }),
+            Expr::Ident(name, span) => {
+                Scope::get(env, name)
+                    .map(|info| info.ty)
+                    .ok_or_else(|| AliasError {
+                        msg: format!("未定义的绑定 '{name}'"),
+                        span: *span,
+                    })
+            }
             Expr::Neg { expr, .. } => {
                 let t = self.expr(expr, env)?;
                 if t.is_unknown() {
@@ -163,7 +210,12 @@ impl Checker {
                 };
                 self.binary(*op, l, r, *span)
             }
-            Expr::Ternary { cond, then_expr, else_expr, span } => {
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+                span,
+            } => {
                 self.require_bool(cond, env, "?: 条件")?;
                 let a = self.expr(then_expr, env)?;
                 let b = self.expr(else_expr, env)?;
@@ -179,9 +231,12 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, span } => self.call(callee, args, *span, env),
-            Expr::MethodCall { recv, name, args, span } => {
-                self.method_call(recv, name, args, *span, env)
-            }
+            Expr::MethodCall {
+                recv,
+                name,
+                args,
+                span,
+            } => self.method_call(recv, name, args, *span, env),
             Expr::Index { recv, idx, .. } => {
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
@@ -210,7 +265,11 @@ impl Checker {
                         None => elem_ty = Some(t),
                         Some(first) if !types_match(first, &t) => {
                             return Err(AliasError {
-                                msg: format!("数组元素类型不一致: {} 与 {}", first.name(), t.name()),
+                                msg: format!(
+                                    "数组元素类型不一致: {} 与 {}",
+                                    first.name(),
+                                    t.name()
+                                ),
                                 span: item.span(),
                             });
                         }
@@ -243,9 +302,11 @@ impl Checker {
                 }
             }
             Expr::FuncLit { params, body, span } => self.funclit(params, body, env, None, *span),
-            Expr::Match { subject, arms, span } => {
-                self.match_expr(subject, arms, *span, env, None)
-            }
+            Expr::Match {
+                subject,
+                arms,
+                span,
+            } => self.match_expr(subject, arms, *span, env, None),
             Expr::Propagate { expr, span } => self.propagate(expr, *span, env),
         }
     }
@@ -318,7 +379,11 @@ impl Checker {
                     });
                 }
                 (Pattern::Bool { value, span: pspan }, Ty::Bool) => {
-                    let seen = if *value { &mut seen_true } else { &mut seen_false };
+                    let seen = if *value {
+                        &mut seen_true
+                    } else {
+                        &mut seen_false
+                    };
                     if *seen {
                         return Err(AliasError {
                             msg: format!("match 重复 Pattern: {value}"),
@@ -350,7 +415,11 @@ impl Checker {
                     });
                 }
                 (
-                    Pattern::Constructor { ctor, binding, span: pspan },
+                    Pattern::Constructor {
+                        ctor,
+                        binding,
+                        span: pspan,
+                    },
                     Ty::Result(ok_ty, err_ty),
                 ) => {
                     match ctor {
@@ -402,8 +471,10 @@ impl Checker {
                 }
             }
 
-            covered_all = matches!(&arm.pattern, Pattern::Wildcard { .. } | Pattern::Binding { .. })
-                || (matches!(&st, Ty::Result(_, _)) && seen_ok && seen_err)
+            covered_all = matches!(
+                &arm.pattern,
+                Pattern::Wildcard { .. } | Pattern::Binding { .. }
+            ) || (matches!(&st, Ty::Result(_, _)) && seen_ok && seen_err)
                 || (st == Ty::Bool && seen_true && seen_false);
         }
 
@@ -435,7 +506,10 @@ impl Checker {
             Scope::insert(
                 &local,
                 name.clone(),
-                VarInfo { ty: bind_ty.clone(), mutable: false },
+                VarInfo {
+                    ty: bind_ty.clone(),
+                    mutable: false,
+                },
             );
         }
         match &arm.body {
@@ -445,7 +519,10 @@ impl Checker {
             })),
             ArmBody::Ret(e) => {
                 let Some(ret) = self.fn_ret.last().cloned() else {
-                    return Err(AliasError { msg: "顶层不允许 return".into(), span: e.span() });
+                    return Err(AliasError {
+                        msg: "顶层不允许 return".into(),
+                        span: e.span(),
+                    });
                 };
                 self.expr_expected(e, &local, &ret)?;
                 Ok(None)
@@ -480,7 +557,10 @@ impl Checker {
             });
         };
         let Some(ret) = self.fn_ret.last().cloned() else {
-            return Err(AliasError { msg: "? 需要所在函数返回 result 类型".into(), span });
+            return Err(AliasError {
+                msg: "? 需要所在函数返回 result 类型".into(),
+                span,
+            });
         };
         let Ty::Result(_, fn_e) = &ret else {
             return Err(AliasError {
@@ -514,7 +594,7 @@ impl Checker {
             };
         }
         let mixed = |span| {
-            if l.is_numeric() && r.is_numeric() {
+            if l.is_numeric() && r.is_numeric() && l != r {
                 AliasError {
                     msg: format!("{} 与 {} 禁止隐式混算", l.name(), r.name()),
                     span,
@@ -552,13 +632,7 @@ impl Checker {
         }
     }
 
-    fn call(
-        &mut self,
-        callee: &Expr,
-        args: &[CallArg],
-        span: Span,
-        env: &Env,
-    ) -> AliasResult<Ty> {
+    fn call(&mut self, callee: &Expr, args: &[CallArg], span: Span, env: &Env) -> AliasResult<Ty> {
         if let Expr::Ident(name, _) = callee {
             if Scope::get(env, name).is_none() && self.structs.contains_key(name) {
                 return self.construct(name, args, span, env);
@@ -577,18 +651,27 @@ impl Checker {
         }
         if let Expr::Ident(name, _) = callee {
             if name == "increase" || name == "decrease" {
-                return self.incdec(name, args, span, env);
+                return Err(AliasError {
+                    msg: format!("{name} 只能作为独立语句使用"),
+                    span,
+                });
             }
             if name == "println" || name == "print" {
                 let [arg] = args else {
-                    return Err(AliasError { msg: format!("{name} 恰好接受 1 个参数"), span });
+                    return Err(AliasError {
+                        msg: format!("{name} 恰好接受 1 个参数"),
+                        span,
+                    });
                 };
                 self.expr(&arg.value, env)?;
                 return Ok(Ty::Unit);
             }
             if let Some(target) = conv_builtin_ty(name) {
                 let [arg] = args else {
-                    return Err(AliasError { msg: format!("{name} 恰好接受 1 个参数"), span });
+                    return Err(AliasError {
+                        msg: format!("{name} 恰好接受 1 个参数"),
+                        span,
+                    });
                 };
                 let t = self.expr(&arg.value, env)?;
                 if !t.is_unknown() && !t.is_numeric() {
@@ -601,11 +684,17 @@ impl Checker {
             }
             if name == "typeof" {
                 let [arg] = args else {
-                    return Err(AliasError { msg: "typeof 恰好接受 1 个参数".into(), span });
+                    return Err(AliasError {
+                        msg: "typeof 恰好接受 1 个参数".into(),
+                        span,
+                    });
                 };
                 let t = self.expr(&arg.value, env)?;
                 if t.is_unknown() {
-                    return Err(AliasError { msg: "typeof 无法确定实参的静态类型".into(), span: arg.value.span() });
+                    return Err(AliasError {
+                        msg: "typeof 无法确定实参的静态类型".into(),
+                        span: arg.value.span(),
+                    });
                 }
                 return Ok(Ty::Str);
             }
@@ -625,7 +714,12 @@ impl Checker {
                         Err(e) if e.msg.starts_with("需要 ") => {
                             let got = self.expr(&a.value, env)?;
                             return Err(AliasError {
-                                msg: format!("第 {} 个实参需要 {}, 实际 {}", i + 1, pt.name(), got.name()),
+                                msg: format!(
+                                    "第 {} 个实参需要 {}, 实际 {}",
+                                    i + 1,
+                                    pt.name(),
+                                    got.name()
+                                ),
                                 span: a.value.span(),
                             });
                         }
@@ -640,22 +734,40 @@ impl Checker {
                 }
                 Ok(Ty::Unknown)
             }
-            other => Err(AliasError { msg: format!("{} 不是可调用值", other.name()), span }),
+            other => Err(AliasError {
+                msg: format!("{} 不是可调用值", other.name()),
+                span,
+            }),
         }
     }
 
-    fn construct(&mut self, name: &str, args: &[CallArg], span: Span, env: &Env) -> AliasResult<Ty> {
+    fn construct(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<Ty> {
         let info = self.structs[name].clone();
         let mut covered = vec![false; info.fields.len()];
         for a in args {
             let Some(lbl) = &a.label else {
-                return Err(AliasError { msg: format!("结构体 {name} 构造必须使用命名实参"), span: a.span });
+                return Err(AliasError {
+                    msg: format!("结构体 {name} 构造必须使用命名实参"),
+                    span: a.span,
+                });
             };
             let Some(idx) = info.fields.iter().position(|f| &f.name == lbl) else {
-                return Err(AliasError { msg: format!("结构体 {name} 没有字段 '{lbl}'"), span: a.span });
+                return Err(AliasError {
+                    msg: format!("结构体 {name} 没有字段 '{lbl}'"),
+                    span: a.span,
+                });
             };
             if covered[idx] {
-                return Err(AliasError { msg: format!("结构体 {name} 构造重复指定字段 '{lbl}'"), span: a.span });
+                return Err(AliasError {
+                    msg: format!("结构体 {name} 构造重复指定字段 '{lbl}'"),
+                    span: a.span,
+                });
             }
             covered[idx] = true;
             let want = &info.fields[idx].ty;
@@ -673,18 +785,33 @@ impl Checker {
         }
         for (f, done) in info.fields.iter().zip(&covered) {
             if !done && !f.has_default {
-                return Err(AliasError { msg: format!("结构体 {name} 构造缺少字段 '{}'", f.name), span });
+                return Err(AliasError {
+                    msg: format!("结构体 {name} 构造缺少字段 '{}'", f.name),
+                    span,
+                });
             }
         }
         Ok(Ty::Struct(name.to_string()))
     }
 
-    fn result_ctor(&mut self, name: &str, args: &[CallArg], span: Span, env: &Env) -> AliasResult<Ty> {
+    fn result_ctor(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<Ty> {
         let [arg] = args else {
-            return Err(AliasError { msg: format!("{name} 构造恰好接受 1 个参数"), span });
+            return Err(AliasError {
+                msg: format!("{name} 构造恰好接受 1 个参数"),
+                span,
+            });
         };
         if arg.label.is_some() {
-            return Err(AliasError { msg: "result 构造不接受命名实参".into(), span: arg.span });
+            return Err(AliasError {
+                msg: "result 构造不接受命名实参".into(),
+                span: arg.span,
+            });
         }
         let t = self.expr(&arg.value, env)?;
         Ok(if name == "ok" {
@@ -694,24 +821,42 @@ impl Checker {
         })
     }
 
-    fn incdec(&mut self, name: &str, args: &[CallArg], span: Span, env: &Env) -> AliasResult<Ty> {
+    pub(super) fn incdec(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<Ty> {
         let [arg] = args else {
-            return Err(AliasError { msg: format!("{name} 恰好接受 1 个参数"), span });
+            return Err(AliasError {
+                msg: format!("{name} 恰好接受 1 个参数"),
+                span,
+            });
         };
         let Expr::Ident(target, tspan) = &arg.value else {
-            return Err(AliasError { msg: format!("{name} 的参数必须是可变绑定名"), span });
+            return Err(AliasError {
+                msg: format!("{name} 的参数必须是可变绑定名"),
+                span,
+            });
         };
         let Some(info) = Scope::get(env, target) else {
-            return Err(AliasError { msg: format!("'{target}' 未定义"), span: *tspan });
+            return Err(AliasError {
+                msg: format!("'{target}' 未定义"),
+                span: *tspan,
+            });
         };
         if !info.mutable {
-            return Err(AliasError { msg: format!("'{target}' 是 val 绑定, 不能 {name}"), span: *tspan });
+            return Err(AliasError {
+                msg: format!("'{target}' 是 val 绑定, 不能 {name}"),
+                span: *tspan,
+            });
         }
-        if info.ty.is_unknown() || info.ty == Ty::Int(IntW::W32) {
+        if info.ty.is_unknown() || info.ty.is_numeric() {
             Ok(Ty::Unit)
         } else {
             Err(AliasError {
-                msg: format!("{name} 需要 i32, 实际 {}", info.ty.name()),
+                msg: format!("{name} 需要数值类型, 实际 {}", info.ty.name()),
                 span: *tspan,
             })
         }
@@ -743,20 +888,30 @@ impl Checker {
             match name {
                 "len" => {
                     if !args.is_empty() {
-                        return Err(AliasError { msg: format!("期望 0 个参数, 实际 {} 个", args.len()), span });
+                        return Err(AliasError {
+                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
+                            span,
+                        });
                     }
                     return Ok(Ty::Int(IntW::W32));
                 }
                 "push" => {
                     if args.len() != 1 {
-                        return Err(AliasError { msg: format!("期望 1 个参数, 实际 {} 个", args.len()), span });
+                        return Err(AliasError {
+                            msg: format!("期望 1 个参数, 实际 {} 个", args.len()),
+                            span,
+                        });
                     }
                     match self.expr_expected(&args[0].value, env, elem) {
                         Ok(_) => {}
                         Err(e) if e.msg.starts_with("需要 ") => {
                             let got = self.expr(&args[0].value, env)?;
                             return Err(AliasError {
-                                msg: format!("第 1 个实参需要 {}, 实际 {}", elem.name(), got.name()),
+                                msg: format!(
+                                    "第 1 个实参需要 {}, 实际 {}",
+                                    elem.name(),
+                                    got.name()
+                                ),
                                 span: args[0].value.span(),
                             });
                         }
@@ -766,13 +921,19 @@ impl Checker {
                 }
                 "pop" => {
                     if !args.is_empty() {
-                        return Err(AliasError { msg: format!("期望 0 个参数, 实际 {} 个", args.len()), span });
+                        return Err(AliasError {
+                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
+                            span,
+                        });
                     }
                     return Ok((**elem).clone());
                 }
                 "iterator" => {
                     if !args.is_empty() {
-                        return Err(AliasError { msg: format!("期望 0 个参数, 实际 {} 个", args.len()), span });
+                        return Err(AliasError {
+                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
+                            span,
+                        });
                     }
                     return Ok(Ty::Iterator(elem.clone()));
                 }
@@ -782,7 +943,10 @@ impl Checker {
 
         let rname = rt.name();
         let Some(sig) = self.methods.get(&rname).and_then(|m| m.get(name)).cloned() else {
-            return Err(AliasError { msg: format!("类型 {rname} 上没有方法 '{name}'"), span });
+            return Err(AliasError {
+                msg: format!("类型 {rname} 上没有方法 '{name}'"),
+                span,
+            });
         };
         if args.len() != sig.params.len() {
             return Err(AliasError {
@@ -796,7 +960,12 @@ impl Checker {
                 Err(e) if e.msg.starts_with("需要 ") => {
                     let got = self.expr(&a.value, env)?;
                     return Err(AliasError {
-                        msg: format!("第 {} 个实参需要 {}, 实际 {}", i + 1, want.name(), got.name()),
+                        msg: format!(
+                            "第 {} 个实参需要 {}, 实际 {}",
+                            i + 1,
+                            want.name(),
+                            got.name()
+                        ),
                         span: a.value.span(),
                     });
                 }

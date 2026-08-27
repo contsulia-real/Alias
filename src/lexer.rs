@@ -35,39 +35,39 @@ pub enum Tok {
     Ident(String),
 
     // 符号
-    Assign,       // =
-    Arrow,        // ->
-    Plus,         // +
-    Minus,        // -
-    Star,         // *
-    Slash,        // /
-    Percent,      // %
-    Bang,         // !
-    Tilde,        // ~
-    Amp,          // &
-    Pipe,         // |
-    Caret,        // ^
-    AndAnd,       // &&
-    OrOr,         // ||
-    Shl,          // <<
-    Shr,          // >>
-    Lt,           // <
-    Le,           // <=
-    Gt,           // >
-    Ge,           // >=
-    EqEq,         // ==
-    NotEq,        // !=
-    LParen,       // (
-    RParen,       // )
-    LBrace,       // {
-    RBrace,       // }
-    LBracket,     // [
-    RBracket,     // ]
-    Comma,        // ,
-    Semi,         // ;
-    Dot,          // .
-    Question,     // ?
-    Colon,        // :
+    Assign,   // =
+    Arrow,    // ->
+    Plus,     // +
+    Minus,    // -
+    Star,     // *
+    Slash,    // /
+    Percent,  // %
+    Bang,     // !
+    Tilde,    // ~
+    Amp,      // &
+    Pipe,     // |
+    Caret,    // ^
+    AndAnd,   // &&
+    OrOr,     // ||
+    Shl,      // <<
+    Shr,      // >>
+    Lt,       // <
+    Le,       // <=
+    Gt,       // >
+    Ge,       // >=
+    EqEq,     // ==
+    NotEq,    // !=
+    LParen,   // (
+    RParen,   // )
+    LBrace,   // {
+    RBrace,   // }
+    LBracket, // [
+    RBracket, // ]
+    Comma,    // ,
+    Semi,     // ;
+    Dot,      // .
+    Question, // ?
+    Colon,    // :
     Newline,
 }
 
@@ -99,7 +99,11 @@ pub fn lex(src: &str) -> AliasResult<Vec<Token>> {
     if src.len() > MAX_SOURCE_BYTES {
         return Err(AliasError {
             msg: format!("源文件超过 {} MiB 上限", MAX_SOURCE_BYTES / 1024 / 1024),
-            span: Span { line: 1, col: 1, len: 1 },
+            span: Span {
+                line: 1,
+                col: 1,
+                len: 1,
+            },
         });
     }
     let mut lx = Lexer {
@@ -145,11 +149,18 @@ impl<'a> Lexer<'a> {
     }
 
     fn span_here(&self, len: u32) -> Span {
-        Span { line: self.line, col: self.col.saturating_sub(len).max(1), len }
+        Span {
+            line: self.line,
+            col: self.col.saturating_sub(len).max(1),
+            len,
+        }
     }
 
     fn err<T>(&self, msg: impl Into<String>) -> AliasResult<T> {
-        Err(AliasError { msg: msg.into(), span: self.span_here(1) })
+        Err(AliasError {
+            msg: msg.into(),
+            span: self.span_here(1),
+        })
     }
 
     fn skip_trivia(&mut self) {
@@ -186,14 +197,19 @@ impl<'a> Lexer<'a> {
     fn next_token(&mut self) -> AliasResult<Option<Token>> {
         loop {
             self.skip_trivia();
-            let Some(c) = self.peek() else { return Ok(None) };
+            let Some(c) = self.peek() else {
+                return Ok(None);
+            };
             let start_span = self.span_here(1);
             if c != b'\n' {
                 break;
             }
             self.bump();
             if self.paren_depth == 0 && !self.newline_is_continuation() {
-                return Ok(Some(Token { tok: Tok::Newline, span: start_span }));
+                return Ok(Some(Token {
+                    tok: Tok::Newline,
+                    span: start_span,
+                }));
             }
         }
 
@@ -230,9 +246,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let mut is_float = false;
-        if self.peek() == Some(b'.')
-            && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false)
-        {
+        if self.peek() == Some(b'.') && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             is_float = true;
             self.bump();
             while let Some(c) = self.peek() {
@@ -257,8 +271,10 @@ impl<'a> Lexer<'a> {
                 return self.err("浮点指数缺少数字 — 例如 1e5");
             }
         }
-        let text = std::str::from_utf8(&self.src[start..self.pos])
-            .map_err(|_| AliasError { msg: "数值字面量编码无效".into(), span: self.span_here(1) })?;
+        let text = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| AliasError {
+            msg: "数值字面量编码无效".into(),
+            span: self.span_here(1),
+        })?;
         if is_float {
             let v: f64 = text.parse().map_err(|_| AliasError {
                 msg: "浮点字面量格式无效".into(),
@@ -448,11 +464,11 @@ impl<'a> Lexer<'a> {
                                 }
                             }
                             if self.peek() == Some(b'.') {
-                                return self.err(
-                                    "$name 仅支持单个标识符 — 复杂表达式请使用 ${...}",
-                                );
+                                return self
+                                    .err("$name 仅支持单个标识符 — 复杂表达式请使用 ${...}");
                             }
-                            let name = String::from_utf8_lossy(&self.src[name_start..self.pos]).into_owned();
+                            let name = String::from_utf8_lossy(&self.src[name_start..self.pos])
+                                .into_owned();
                             let sub = lex(&name).map_err(|mut e| {
                                 e.msg = format!("插值片段 '{name}' 解析失败: {}", e.msg);
                                 e

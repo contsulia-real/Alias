@@ -88,7 +88,13 @@ impl Parser {
         } else {
             None
         };
-        Ok(StructField { name, mutable, ty, default, span })
+        Ok(StructField {
+            name,
+            mutable,
+            ty,
+            default,
+            span,
+        })
     }
 
     fn parse_import(&mut self) -> AliasResult<Import> {
@@ -129,6 +135,10 @@ impl Parser {
             }
             other => return Err(self.err_here(format!("期望模块路径字符串, 实际 {:?}", other))),
         };
-        Ok(Import { names, from: path, span })
+        Ok(Import {
+            names,
+            from: path,
+            span,
+        })
     }
 }

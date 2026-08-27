@@ -10,7 +10,10 @@ use crate::{AliasError, AliasResult, Span};
 
 pub fn parse(tokens: Vec<Token>) -> AliasResult<Program> {
     validate_nesting(&tokens)?;
-    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+    };
     p.parse_program()
 }
 
@@ -77,7 +80,10 @@ impl Parser {
     }
 
     fn err_here(&self, msg: impl Into<String>) -> AliasError {
-        AliasError { msg: msg.into(), span: self.span() }
+        AliasError {
+            msg: msg.into(),
+            span: self.span(),
+        }
     }
 
     fn end_stmt(&mut self) {
@@ -130,10 +136,33 @@ impl Parser {
                 }
                 break;
             }
-            self.expect(&Tok::Gt)?;
+            self.expect_type_gt()?;
             Ok(TypeExpr::Generic(name, args))
         } else {
             Ok(TypeExpr::Named(name))
+        }
+    }
+
+    /// 类型上下文把 lexer 合并出的 `>>` 按两个泛型右尖括号消费。
+    /// 表达式上下文仍保留单个 `Shr`，不会改变右移运算符的词法结果。
+    fn expect_type_gt(&mut self) -> AliasResult<()> {
+        match self.peek() {
+            Some(Tok::Gt) => {
+                self.bump();
+                Ok(())
+            }
+            Some(Tok::Shr) => {
+                let token = &mut self.toks[self.pos];
+                token.tok = Tok::Gt;
+                token.span.col = token.span.col.saturating_add(1);
+                token.span.len = 1;
+                Ok(())
+            }
+            _ => Err(self.err_here(format!(
+                "期望 {:?}, 实际 {:?}",
+                Tok::Gt,
+                self.peek().cloned()
+            ))),
         }
     }
 }

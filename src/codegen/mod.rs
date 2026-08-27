@@ -163,11 +163,8 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             .chain(params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)))
             .collect();
         let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
-        let fid = c.declare_user_func_typed(
-            &param_vtys,
-            &ret_vty,
-            format!("m<{recv_name}>{mname}"),
-        )?;
+        let fid =
+            c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv_name}>{mname}"))?;
         let key = (recv_name, mname);
         c.methods.insert(key.clone(), fid);
         c.method_rets.insert(key.clone(), ret_vty.clone());
@@ -264,7 +261,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
 }
 
 pub(crate) fn native_err(span: Span, msg: impl Into<String>) -> AliasError {
-    AliasError { msg: msg.into(), span }
+    AliasError {
+        msg: msg.into(),
+        span,
+    }
 }
 
 pub(crate) fn invariant_violation(what: &'static str) -> ! {

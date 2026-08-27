@@ -54,6 +54,101 @@ func i32 main = () -> {
 }
 
 #[test]
+fn incdec_supports_every_numeric_type_with_declared_width_semantics() {
+    let src = r#"
+func i32 main = () -> {
+    var i8 s8 = 127
+    increase s8
+    if s8 != -128 { return 1 }
+    decrease s8
+    if s8 != 127 { return 2 }
+
+    var i16 s16 = 16
+    increase s16
+    decrease s16
+    if s16 != 16 { return 3 }
+
+    var i32 s32 = 32
+    increase s32
+    decrease s32
+    if s32 != 32 { return 4 }
+
+    var i64 s64 = 64
+    increase s64
+    decrease s64
+    if s64 != 64 { return 5 }
+
+    var u8 u8v = 255
+    increase u8v
+    if u8v != 0 { return 6 }
+    decrease u8v
+    if u8v != 255 { return 7 }
+
+    var u16 u16v = 16
+    increase u16v
+    decrease u16v
+    if u16v != 16 { return 8 }
+
+    var u32 u32v = 32
+    increase u32v
+    decrease u32v
+    if u32v != 32 { return 9 }
+
+    var u64 u64v = to_u64(-1)
+    increase u64v
+    if u64v != 0 { return 10 }
+    decrease u64v
+    if u64v != to_u64(-1) { return 11 }
+
+    var f32 f32v = 1.5
+    increase f32v
+    if f32v != to_f32(2.5) { return 12 }
+    decrease f32v
+    if f32v != to_f32(1.5) { return 13 }
+
+    var f64 f64v = 3.25
+    increase f64v
+    if f64v != 4.25 { return 14 }
+    decrease f64v
+    if f64v != 3.25 { return 15 }
+    return 0
+}
+"#;
+    assert_eq!(run("incdec-numeric.as", src).unwrap(), 0);
+}
+
+#[test]
+fn incdec_is_statement_only_and_never_produces_a_value() {
+    let assigned = r#"
+func i32 main = () -> {
+    var i32 i = 0
+    val i32 a = increase i
+    return a
+}
+"#;
+    let error = fail(assigned);
+    assert!(
+        error.msg.contains("increase 只能作为独立语句使用"),
+        "{}",
+        error.msg
+    );
+
+    let unit_slot = r#"
+func i32 main = () -> {
+    var f64 n = 1.0
+    val unit ignored = decrease(n)
+    return 0
+}
+"#;
+    let error = fail(unit_slot);
+    assert!(
+        error.msg.contains("decrease 只能作为独立语句使用"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
 fn non_numeric_type_can_define_its_own_plus_method() {
     let src = r#"
 struct box {
@@ -86,7 +181,11 @@ func i32 b = a
 func i32 main = () -> return 0
 "#;
     let e = fail(non_literal_rhs);
-    assert!(e.msg.contains("func 绑定必须由函数字面量初始化"), "{}", e.msg);
+    assert!(
+        e.msg.contains("func 绑定必须由函数字面量初始化"),
+        "{}",
+        e.msg
+    );
 }
 
 #[test]

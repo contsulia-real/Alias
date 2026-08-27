@@ -192,7 +192,10 @@ impl<'m, M: Module> Compiler<'m, M> {
         main_ret: VTy,
     ) -> AliasResult<FuncId> {
         if main_ret != VTy::I(IntW::W32) {
-            return Err(native_err(Span::default(), "内部: sema 未将 main 收紧为 i32"));
+            return Err(native_err(
+                Span::default(),
+                "内部: sema 未将 main 收紧为 i32",
+            ));
         }
         let entry_sig = Signature::new(self.cc);
         let fid = self
@@ -257,7 +260,10 @@ impl<'m, M: Module> Compiler<'m, M> {
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
             } else {
                 let vty = decl_vty(&b.ty, &self.struct_layouts);
-                (emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?, vty)
+                (
+                    emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?,
+                    vty,
+                )
             };
             let off = self.top_slots[binding_index];
             let sv = norm_store(&mut bcx, v, &svty);
@@ -269,7 +275,8 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         let clo = {
             let base = bcx.use_var(frame.globals);
-            bcx.ins().load(types::I64, MemFlagsData::new(), base, main_slot as i32)
+            bcx.ins()
+                .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
         let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
         let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
@@ -360,7 +367,12 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     for (i, name) in caps.iter().enumerate() {
         let cellw = if let Some(idx) = frame.caps.get(name) {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            bcx.ins().load(types::I64, MemFlagsData::new(), base, ((*idx as i64) * 8) as i32)
+            bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                base,
+                ((*idx as i64) * 8) as i32,
+            )
         } else {
             let mut found: Option<Value> = None;
             for scope in frame.scopes.iter().rev() {
@@ -371,7 +383,12 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
             }
             found.unwrap_or_else(|| invariant_violation("捕获项解析"))
         };
-        bcx.ins().store(MemFlagsData::new(), cellw, env_word, ((i as i64) * 8) as i32);
+        bcx.ins().store(
+            MemFlagsData::new(),
+            cellw,
+            env_word,
+            ((i as i64) * 8) as i32,
+        );
     }
 
     let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
@@ -460,7 +477,11 @@ pub(crate) fn scan_stmt<M: Module>(
                 scan_expr(c, e, locals, caps, seen, frame);
             }
         }
-        Stmt::If { branches, else_body, .. } => {
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
             for (cond, body) in branches {
                 scan_expr(c, cond, locals, caps, seen, frame);
                 scan_scoped_stmts(c, body, locals, caps, seen, frame);
@@ -473,7 +494,12 @@ pub(crate) fn scan_stmt<M: Module>(
             scan_expr(c, cond, locals, caps, seen, frame);
             scan_scoped_stmts(c, body, locals, caps, seen, frame);
         }
-        Stmt::For { name, iterable, body, .. } => {
+        Stmt::For {
+            name,
+            iterable,
+            body,
+            ..
+        } => {
             scan_expr(c, iterable, locals, caps, seen, frame);
             let mut child_locals = locals.clone();
             child_locals.insert(name.clone());
@@ -523,7 +549,12 @@ pub(crate) fn scan_expr<M: Module>(
             scan_expr(c, lhs, locals, caps, seen, frame);
             scan_expr(c, rhs, locals, caps, seen, frame);
         }
-        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
             scan_expr(c, cond, locals, caps, seen, frame);
             scan_expr(c, then_expr, locals, caps, seen, frame);
             scan_expr(c, else_expr, locals, caps, seen, frame);
@@ -564,7 +595,10 @@ pub(crate) fn scan_expr<M: Module>(
                 let mut arm_locals = locals.clone();
                 match &arm.pattern {
                     Pattern::Binding { name, .. }
-                    | Pattern::Constructor { binding: Some(name), .. } => {
+                    | Pattern::Constructor {
+                        binding: Some(name),
+                        ..
+                    } => {
                         arm_locals.insert(name.clone());
                     }
                     _ => {}
@@ -588,9 +622,6 @@ pub(crate) fn scan_expr<M: Module>(
             }
             scan_body(c, body, &mut nested_locals, caps, seen, frame);
         }
-        Expr::Int(..)
-        | Expr::Float(..)
-        | Expr::Bool(..)
-        | Expr::Unit(_) => {}
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Unit(_) => {}
     }
 }

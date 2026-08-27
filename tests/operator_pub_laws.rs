@@ -20,7 +20,10 @@ fn public_has_no_keyword_or_compatibility_diagnostic() {
     let src = "public func i32 nope = () -> return 1\nfunc i32 main = () -> return 0\n";
     let msg = err(src);
     assert!(!msg.contains("废弃"), "不应存在 public 迁移兼容诊断: {msg}");
-    assert!(!msg.contains("请使用 pub"), "不应存在 public 迁移兼容诊断: {msg}");
+    assert!(
+        !msg.contains("请使用 pub"),
+        "不应存在 public 迁移兼容诊断: {msg}"
+    );
 }
 
 #[test]

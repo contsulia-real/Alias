@@ -47,7 +47,9 @@ fn explicit_parens_allow_binop_after() {
 
 #[test]
 fn method_infix_two_arg() {
-    let src = format!("{COMBINE}func i32 main = () -> {{\n    val i32 b = 3 combine 4\n    return b\n}}\n");
+    let src = format!(
+        "{COMBINE}func i32 main = () -> {{\n    val i32 b = 3 combine 4\n    return b\n}}\n"
+    );
     assert_eq!(ok(&src), 7);
 }
 
@@ -77,7 +79,10 @@ fn dangling_binop_after_swallow_rejected() {
     // 铁律: 吞参后二元运算符悬空 → 编译错误
     let src = "func i32 dup = (i32 x) -> return x * 2\nfunc i32 main = () -> {\n    val i32 a = dup 5 + 1\n    return a\n}\n";
     let msg = err(src);
-    assert!(msg.contains("无法开始一个表达式") || msg.contains("意外的表达式"), "实际: {msg}");
+    assert!(
+        msg.contains("无法开始一个表达式") || msg.contains("意外的表达式"),
+        "实际: {msg}"
+    );
 }
 
 #[test]

@@ -84,7 +84,12 @@ impl Checker {
         let recv = recv_ty.name();
         let mname = b.name.clone();
         let declared = check_type_slot(&b.ty, b.span, &self.structs)?;
-        let Expr::FuncLit { params, body, span: fspan } = &b.value else {
+        let Expr::FuncLit {
+            params,
+            body,
+            span: fspan,
+        } = &b.value
+        else {
             return Err(AliasError {
                 msg: format!("方法 {recv}.{mname} 的体必须是函数字面量"),
                 span: b.span,
@@ -110,7 +115,12 @@ impl Checker {
             }
             table.insert(
                 mname.clone(),
-                MethodInfo { params: ptys, ret: declared.clone(), is_pub: b.is_pub, builtin: false },
+                MethodInfo {
+                    params: ptys,
+                    ret: declared.clone(),
+                    is_pub: b.is_pub,
+                    builtin: false,
+                },
             );
         }
 
@@ -146,19 +156,13 @@ impl Checker {
                     Ok(())
                 } else {
                     Err(AliasError {
-                        msg: format!(
-                            "顶层 func main 返回类型必须是 i32, 实际 {}",
-                            ret.name()
-                        ),
+                        msg: format!("顶层 func main 返回类型必须是 i32, 实际 {}", ret.name()),
                         span: bspan,
                     })
                 }
             }
             _ => Err(AliasError {
-                msg: format!(
-                    "顶层 func main 返回类型必须是 i32, 实际 {}",
-                    sig.name()
-                ),
+                msg: format!("顶层 func main 返回类型必须是 i32, 实际 {}", sig.name()),
                 span: bspan,
             }),
         }

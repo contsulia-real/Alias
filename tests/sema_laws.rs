@@ -19,13 +19,16 @@ fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
     let e = fail(src);
     assert!(
         e.msg.contains(want_sub),
-        "消息应含「{want_sub}」, 实际: {}", e.msg
+        "消息应含「{want_sub}」, 实际: {}",
+        e.msg
     );
     assert_eq!(
         (e.span.line, e.span.col),
         (line, col),
         "span 不符: 实际 {}:{} — {}",
-        e.span.line, e.span.col, e.msg
+        e.span.line,
+        e.span.col,
+        e.msg
     );
 }
 
@@ -38,7 +41,8 @@ fn undefined_binding_read() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return y\n}\n",
         "未定义的绑定 'y'",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -47,7 +51,8 @@ fn val_reassignment_moved_to_sema() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val i32 a = 1;\n    a = 2;\n    return 0\n}\n",
         "'a' 是 val 绑定, 不可重新赋值",
-        4, 4,
+        4,
+        4,
     );
 }
 
@@ -56,7 +61,8 @@ fn assign_target_undefined() {
     assert_law(
         "\nfunc i32 main = () -> {\n    q = 1;\n    return 0\n}\n",
         "赋值目标 'q' 未定义",
-        3, 4,
+        3,
+        4,
     );
 }
 
@@ -65,7 +71,8 @@ fn incdec_non_ident_target() {
     assert_law(
         "\nfunc i32 main = () -> {\n    increase(1)\n    return 0\n}\n",
         "increase 的参数必须是可变绑定名",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -74,16 +81,18 @@ fn incdec_val_target() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val i32 a = 1;\n    increase a\n    return 0\n}\n",
         "'a' 是 val 绑定, 不能 increase",
-        4, 13,
+        4,
+        13,
     );
 }
 
 #[test]
-fn incdec_non_i32_target() {
+fn incdec_non_numeric_target() {
     assert_law(
         "\nfunc i32 main = () -> {\n    var bool b = true;\n    increase b\n    return 0\n}\n",
-        "increase 需要 i32, 实际 bool",
-        4, 13,
+        "increase 需要数值类型, 实际 bool",
+        4,
+        13,
     );
 }
 
@@ -92,7 +101,8 @@ fn incdec_undefined_target() {
     assert_law(
         "\nfunc i32 main = () -> {\n    increase z\n    return 0\n}\n",
         "'z' 未定义",
-        3, 13,
+        3,
+        13,
     );
 }
 
@@ -101,7 +111,8 @@ fn incdec_arity_not_one() {
     assert_law(
         "\nfunc i32 main = () -> {\n    increase()\n    return 0\n}\n",
         "increase 恰好接受 1 个参数",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -110,7 +121,8 @@ fn println_arity_not_one() {
     assert_law(
         "\nfunc i32 main = () -> {\n    println()\n    return 0\n}\n",
         "println 恰好接受 1 个参数",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -119,7 +131,8 @@ fn binary_operand_type_mismatch() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return 1 + true\n}\n",
         "运算符 + 不适用于 i32 与 bool",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -128,7 +141,8 @@ fn neg_requires_i32() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return -true\n}\n",
         "取负需要有符号整数或浮点",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -137,7 +151,8 @@ fn loop_condition_requires_bool() {
     assert_law(
         "\nfunc i32 main = () -> {\n    while 1 {\n        return 7\n    }\n    return 3\n}\n",
         "while 条件需要 bool, 实际 i32",
-        3, 4,
+        3,
+        4,
     );
 }
 
@@ -155,7 +170,8 @@ fn calling_non_function_value() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return 5()\n}\n",
         "i32 不是可调用值",
-        3, 12,
+        3,
+        12,
     );
 }
 
@@ -168,7 +184,8 @@ fn declared_type_vs_initializer_mismatch() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val string s = 1\n    return 0\n}\n",
         "绑定 's' 声明类型为 string: 需要 string, 实际 i32",
-        3, 19,
+        3,
+        19,
     );
 }
 
@@ -186,7 +203,8 @@ fn return_expr_vs_declared_mismatch() {
     assert_law(
         "\nfunc i32 f = () -> return true\nfunc i32 main = () -> {\n    return 0\n}\n",
         "return 需要 i32: 需要 i32, 实际 bool",
-        2, 26,
+        2,
+        26,
     );
 }
 
@@ -196,7 +214,8 @@ fn generic_type_shape_rejected() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val sender<string> a = ()\n    return 0\n}\n",
         "泛型类型 sender<string> 尚未实现 (Phase 5+)",
-        3, 4,
+        3,
+        4,
     );
 }
 
@@ -205,7 +224,8 @@ fn unknown_type_name_rejected() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val foo x = 1\n    return 0\n}\n",
         "未知类型名 'foo'",
-        3, 4,
+        3,
+        4,
     );
 }
 
@@ -219,7 +239,8 @@ fn tightened_q1_ordered_comparison_on_bool() {
     assert_law(
         "\nfunc bool main = () -> {\n    return true < false\n}\n",
         "运算符 < 不适用于 bool 与 bool",
-        3, 11,
+        3,
+        11,
     );
 }
 
@@ -245,7 +266,8 @@ fn tightened_q3_block_fall_off_rejected() {
     assert_law(
         "\nfunc i32 f = () -> {\n    val i32 a = 1\n}\nfunc i32 main = () -> {\n    return 0\n}\n",
         "返回类型为 i32 的函数所有可达路径都必须显式 return",
-        2, 13,
+        2,
+        13,
     );
 }
 
@@ -265,7 +287,8 @@ fn tightened_q4_main_no_params() {
     assert_law(
         "\nfunc i32 main = (i32 a) -> return a\n",
         "顶层 func main 不能声明参数",
-        2, 1,
+        2,
+        1,
     );
 }
 
@@ -294,7 +317,8 @@ fn tightened_q5_missing_main_has_no_location_prefix() {
     assert_eq!(e.msg, "找不到顶层 func main");
     assert!(
         !e.to_string().contains("错误 @"),
-        "Q⑤: default Span 不得带位置前缀, 实际: {}", e
+        "Q⑤: default Span 不得带位置前缀, 实际: {}",
+        e
     );
 }
 

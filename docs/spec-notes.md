@@ -41,7 +41,8 @@
 以下事实来自对当前构建的实际探测, 属于可观察契约的一部分:
 
 1. **错误 Display 格式**: `错误 @ {line}:{col} — {msg}` (`src/lib.rs:26-30`)。
-   全部运行时/编译期错误经此单一路径。
+   `Span` 当前只保存 `line/col/len`，不保存源文件路径；`run(path,src)` / `build(path,src,out)`
+   的 path 尚不进入语言诊断。`Span::default()` 省略位置前缀。
 2. **列号 0 起始**: lexer 产出的 col 从 0 计数 (实测 `return 1 / 0` 中 `1` 报
    `2:11`; 行首缩进四格的 `a` 报 `3:4`)。行号 1 起始。
 3. **进程边界 clamp**: main 返回值经 `code.clamp(0, 255)` 输出
@@ -147,7 +148,7 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 | alias.str.concat | (i64,i64)→i64 | 拼接新块 |
 | alias.str.cmp | (i64,i64)→i32 | 字典序字节比较 -1/0/1 |
 | alias.str.len / upper / lower / trim | (i64)→i32 / i64 / i64 / i64 | 字节长度、ASCII 大小写映射与四字符集 trim |
-| alias.arr.new / len / push / pop | (i32,i32)→i64 / (i64)→i32 / (i64,i64) / (i64)→i64? | 数组头、元素尺寸感知分配、增长和弹出；pop 字可承载 null 引用 |
+| alias.arr.new / len / push / pop | (i32,i32)→i64 / (i64)→i32 / (i64,i64) / (i64)→i64? | raw 数组头的分配、增长和弹出；当前调用端固定传 8 字节载荷槽，pop 字可承载 null 引用 |
 | alias.display.int/i64/u64/f32/f64/bool/unit/func/str | 各型→i64 | Value::display 规则 (§display 表) |
 | alias.display.struct/array/result | ()→i64 / ()→i64 / (i32)→i64 | 复合值固定显示或按 result tag 显示 |
 | alias.println.str / print.str | (i64) | 写块 + 可选换行 |
@@ -167,7 +168,7 @@ sema 不下钻 MethodCall/Field/Index 子树 — 运行时在求值 recv 前即�
 f32/f64 始终使用对应浮点寄存器，进入载荷字时才按位装箱。
 
 结构体布局由同层两阶段计算：先登记全部结构体名字，再按声明序对齐字段，
-最后按最大字段对齐补尾随填充。单元格、全局槽、字段和紧凑元素不得在调用点
+最后按最大字段对齐补尾随填充。单元格、全局槽和字段不得在调用点
 另写宽度或偏移表；用户函数和间接闭包调用统一由 `user_signature` 加入
 `globals/env` 两个隐藏 I64 参数并生成显式参数/返回 ABI。
 
@@ -331,8 +332,8 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 
 | 主题 | 裁决 |
 |------|------|
-| 值模型 | 实例 = 泄漏 24 字节头块 {data_ptr: I64, len: I64, cap: I64} + cap×8 元素缓冲; 空数组 data_ptr 恒 null; 变量持头块指针 |
-| 引用语义 | 赋值/传参/闭包捕获共享同一实例 — 经任一别名 push/pop, 其余别名立即可见 |
+| 值模型 | 语言值 = 泄漏 16 字节 wrapper {raw_header: I64, version: I64}；raw_header 指向 24 字节 {data_ptr,len,cap} + cap×8 元素载荷缓冲。空数组 data_ptr 恒 null；变量持 wrapper 指针 |
+| 引用语义 | 赋值/传参/闭包捕获共享同一 wrapper — 经任一别名 push/pop，raw header 变化立即可见且共享 version 加一 |
 | 字面量 | 元素按书写序求值逐个入缓冲; 元素类型须一致 |
 | 下标读 | 主语与下标按序求值 → I32 域越界守卫 → data_ptr 偏移加载 |
 | 下标赋值 | 本阶段拒绝 — 解析层「下标赋值尚未支持」 |
@@ -341,12 +342,16 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 
 ## §十七 运行时表示与符号契约 (冻结)
 
-- **中止机制**: 越界读与 pop 空数组走 span-ID 中止存根。
+- **iterator 表示**: `iterator<T>` 是泄漏 24 字节对象
+  `{array_wrapper: I64, cursor: I64, expected_version: I64}`。每次取元素前比较
+  wrapper.version；任一别名 push/pop 后旧 iterator 以
+  「遍历期间集合结构已修改」中止。
+- **中止机制**: 越界读与 pop 空数组走 span-ID 中止存根；iterator 失效由产物直接写 stderr 后退出 1。
 - **统一 runtime 符号** (§五 契约扩充):
 
 | 符号 | 签名 | 语义 |
 |------|------|------|
-| alias.arr.new | (cap:i32, elem_size:i32)→i64 | 泄漏头块 + cap×elem_size 缓冲 |
+| alias.arr.new | (cap:i32, elem_size:i32)→i64 | 泄漏 raw 头块 + cap×elem_size 缓冲；当前数组调用端固定 elem_size=8 |
 | alias.arr.len | (i64)→i32 | 头块 len 字段 |
 | alias.arr.push | (i64,i64) | 增长并尾插 |
 | alias.arr.pop | (i64)→i64 | len-=1 返回 data[len] |
@@ -373,11 +378,13 @@ lvalue      := ... (不含下标)                            arr[i] = x 拒绝
 - `while <bool> { ... }` 是条件循环；`for <Type> <name> in <Expr> { ... }` 是迭代循环。旧 `for condition { ... }` 与 C 风格 `for(init; cond; step)` 均非法。
 - `for` 当前消费 `array<T>` 或 `iterator<T>`；循环变量为隐式不可重新绑定的 `val`。`break` / `continue` 作用于最近一层循环。
 - `array<T>.iterator()` 返回真实 `iterator<T>`。数组及其别名的结构性 `push/pop` 会推进共享版本号；旧 iterator 后续消费时 fail-fast 报“遍历期间集合结构已修改”。
+- 泛型类型上下文会把 lexer 合并的 `>>` 拆成两个右尖括号，因此 `array<array<i32>>` 无需插入空格；表达式上下文的 `>>` 仍是右移运算符。
 - `&&` / `||` 为运行时短路；`?:` 只求值被选中的值分支。
 - 当前运算符优先级（高→低）：后缀/调用/方法 > 一元 `- ! ~` > `* / %` > `+ -` > `<< >>` > 有序比较 > `== !=` > `&` > `^` > `|` > 无括号方法/调用边界 > `&&` > `||` > `?:`。
 - `%` 仅适用于同型整数；`& | ^ ~ << >>` 仅适用于整数。整数宽度与有/无符号身份必须一致，不做隐式混算。`>>` 对有符号整数为算术右移，对无符号整数为逻辑右移。
 - 不提供 `+= -= *= /= %= &= |= ^= <<= >>=` 等复合赋值。
 - 数值类型提供内建 `plus/minus/times/div`，分别与 `+/-/*//` 共享静态规则和原生 lowering；`bool.not()` 与 `!` 共享取反语义。非数值类型仍可定义自己的同名扩展方法。
+- `increase name` / `decrease name` 是独立语句，不是返回 unit 的表达式。目标必须是可变数值绑定；整数按声明宽度 wrapping 加减 1，f32/f64 按同型加减 1.0。任何赋值、return、实参、插值等值位置均编译期拒绝。
 - 普通赋值与结构体字段赋值均执行静态目标类型一致性检查。
 - `pub` 是唯一公开可见性关键字，只允许顶层绑定；旧 `public` 不再是关键字或兼容语法。
 - `match` 使用统一 Pattern AST；第一批为 `_`、普通标识符绑定、整数/bool/纯字符串字面量、`ok(name|_)` / `err(name|_)`。guard 与 struct Pattern 暂不加入。
