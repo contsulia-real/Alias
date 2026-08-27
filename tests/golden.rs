@@ -1,14 +1,8 @@
-//! Phase 0 规范冻结 — 黄金记录测试。
+//! Alias 当前可观察行为黄金记录。
 //!
-//! 本文件是语言可观察行为的**规范预言机**: 每条用例断言编译产物二进制的
-//! 精确三元组 (stdout 字节, stderr 字节, 退出码)。全部期望值来自对
-//! `target/debug/alias.exe` 的实际运行探测, 逐字节硬编码 — 禁止凭记忆猜测,
-//! 禁止"包含子串"式的弱断言 (能知道精确字节就必须断言精确字节)。
-//!
-//! 冻结范围见 .omo/plans/compiler-migration.md Phase 0:
-//! 观察到的边界 (如 default Span 省略位置、0 起始列号、count_to_ten 打印 1..10)
-//! 一律按现状捕获, 不修复、不解释性偏离。后续任何阶段若改变这些字节,
-//! 必须先更新黄金记录并在 MIGRATION 记录中说明。
+//! 本文件断言编译产物/CLI 的精确三元组 (stdout 字节, stderr 字节, 退出码)。
+//! 当前语言规范见 `docs/spec-notes.md`；历史变更见 `MIGRATION.md`。
+//! 精确字节发生有意变化时，必须在同一批修改中同步规范、黄金记录与迁移说明。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,7 +10,7 @@ use std::process::Command;
 /// 编译产物二进制路径 (cargo 测试基础设施注入)。
 const BIN: &str = env!("CARGO_BIN_EXE_alias");
 
-/// 用例输入形态: 内联源码 / 仓库内 demo / 无参数调用 / 不存在的文件。
+/// 用例输入形态: 内联源码 / 仓库内 demo / 无参数调用。
 enum Input {
     /// 源码文本, 运行前写入临时目录
     Inline(&'static str),
@@ -36,15 +30,15 @@ struct Golden {
 }
 
 // ---------------------------------------------------------------------------
-// 黄金记录表 — 每行的期望值均为 2026-08-24 对当前构建的实际探测结果。
+// 黄金记录表 — 与当前 1-based line/col Span 契约保持一致。
 // ---------------------------------------------------------------------------
 
 #[rustfmt::skip]
 fn golden_table() -> Vec<Golden> {
     vec![
         // ---- demos/count_to_ten.as: 已知良好的 demo 夹具 ----
-        // 实测: 循环体先 increase i 再 println i, 故打印 1..10 (非 0..9);
-        // import 触发 stderr 通知 (interp.rs:89-94), 文本逐字节冻结。
+        // 循环体先 increase i 再 println i, 故打印 1..10 (非 0..9);
+        // import 触发标准库尚未接入通知，文本逐字节冻结。
         Golden {
             name: "count_to_ten_demo",
             input: Input::Demo("demos/count_to_ten.as"),
@@ -62,7 +56,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 48,
         },
-        // ---- Q④: main 只接受 i32，其余返回类型在 sema 阶段拒绝 ----
+        // ---- main 只接受 i32，其余返回类型在 sema 阶段拒绝 ----
         Golden {
             name: "bool_main_rejected",
             input: Input::Inline("func bool main = () -> { return true }\n"),
@@ -84,7 +78,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: "错误 @ 1:1 — 顶层 func main 返回类型必须是 i32, 实际 unit\n".as_bytes(),
             exit: 1,
         },
-        // ---- 字符串插值 'n=$i' 相等比较仍合法 ----
+        // ---- 字符串插值 'n=$i' 相等比较 ----
         Golden {
             name: "string_interpolation_equality",
             input: Input::Inline(
@@ -94,12 +88,12 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 0,
         },
-        // ---- 除零: 运行时错误, span 为除号左侧操作数 `1` (0 起始列 11) ----
+        // ---- 除零: 运行时错误, span 为除号左侧操作数 `1` (1-based 列 12) ----
         Golden {
             name: "division_by_zero_error",
             input: Input::Inline("func i32 main = () -> {\n    return 1 / 0\n}\n"),
             stdout: b"",
-            stderr: "错误 @ 2:11 — 除以零\n".as_bytes(),
+            stderr: "错误 @ 2:12 — 除以零\n".as_bytes(),
             exit: 1,
         },
         // ---- display 渲染: func→<func>; unit 是无返回值标记，不在 display 域 ----
@@ -112,7 +106,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 0,
         },
-        // ---- Q⑥ 顶层副作用顺序: 顶层绑定初始化先于 main 体执行 ----
+        // ---- 顶层副作用顺序: 顶层绑定初始化先于 main 体执行 ----
         Golden {
             name: "top_level_side_effect_ordering",
             input: Input::Inline(
@@ -122,7 +116,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 0,
         },
-        // ---- 闭包引用捕获: cond 闭包读到外层 n 的最新值 (interp.rs:56-57) ----
+        // ---- 闭包引用捕获: cond 闭包读到外层 n 的最新值 ----
         Golden {
             name: "closure_reference_capture_latest_value",
             input: Input::Inline(
@@ -142,28 +136,27 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 3,
         },
-        // ---- val 重赋值报错: 消息含「val」, span 为赋值目标 `a` (0 起始列 4) ----
+        // ---- val 重赋值: span 为赋值目标 `a` (1-based 列 5) ----
         Golden {
             name: "val_reassignment_error",
             input: Input::Inline(
                 "func i32 main = () -> {\n    val i32 a = 1;\n    a = 2;\n    return 0\n}\n",
             ),
             stdout: b"",
-            stderr: "错误 @ 3:4 — 'a' 是 val 绑定, 不可重新赋值\n".as_bytes(),
+            stderr: "错误 @ 3:5 — 'a' 是 val 绑定, 不可重新赋值\n".as_bytes(),
             exit: 1,
         },
-        // ---- 类型槽强制非空: 消息含「类型槽」, span 为名字 `x` (0 起始列 8) ----
+        // ---- 类型槽强制非空: span 为名字 `x` (1-based 列 9) ----
         Golden {
             name: "missing_type_slot_error",
             input: Input::Inline(
                 "func i32 main = () -> {\n    var x = 1;\n    return 0\n}\n",
             ),
             stdout: b"",
-            stderr: "错误 @ 2:8 — Var 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注\n".as_bytes(),
+            stderr: "错误 @ 2:9 — Var 绑定的类型槽不能为空 — 本语言没有类型推断, 必须显式标注\n".as_bytes(),
             exit: 1,
         },
-        // ---- 缺 main: Q⑤ 裁决落地 — default Span 时 Display 省略 `@ 0:0`
-        // 前缀, 只报消息本体 (Phase 1 起; 见 MIGRATION.md Q⑤ 条目) ----
+        // ---- 缺 main: Span::default() 时省略位置前缀 ----
         Golden {
             name: "missing_main_error",
             input: Input::Inline("val i32 x = 1\n"),
@@ -171,7 +164,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: "找不到顶层 func main\n".as_bytes(),
             exit: 1,
         },
-        // ---- 进程边界 clamp: main 返 300 → 255 (main.rs:22) ----
+        // ---- 进程边界 clamp: main 返 300 → 255 ----
         Golden {
             name: "exit_code_clamped_to_255",
             input: Input::Inline("func i32 main = () -> {\n    return 300\n}\n"),
@@ -179,7 +172,7 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 255,
         },
-        // ---- CLI 层: 无参数 → 用法提示, 退出码 2 (main.rs:5-11) ----
+        // ---- CLI 层: 无参数 → 用法提示, 退出码 2 ----
         Golden {
             name: "no_args_usage_exit_2",
             input: Input::NoArgs,
@@ -203,7 +196,7 @@ struct TempCase {
 impl TempCase {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("alias-golden-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir); // 清理上次崩溃残留
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建临时目录失败");
         TempCase { dir }
     }
@@ -281,7 +274,7 @@ fn golden_triplets() {
 #[test]
 fn missing_file_exit_2() {
     let tmp = TempCase::new("missing_file");
-    let path = tmp.dir.join("no_such_file.as"); // 从未写入 → 必然不存在
+    let path = tmp.dir.join("no_such_file.as");
     let triplet = run_binary(&[path.as_os_str()]);
     let want_stderr = format!(
         "无法读取 {}: 系统找不到指定的文件。 (os error 2)\n",
