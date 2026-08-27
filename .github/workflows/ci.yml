@@ -3,7 +3,7 @@ name: Alias CI
 on:
   push:
     branches:
-      - lang/control-flow-operator-methods
+      - main
   pull_request:
 
 jobs:
