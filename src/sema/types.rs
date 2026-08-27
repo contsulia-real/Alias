@@ -5,7 +5,7 @@ use crate::ast::TypeExpr;
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum UIntW {
     U8,
     U16,
@@ -23,7 +23,7 @@ impl UIntW {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum IntW {
     W8,
     W16,
@@ -41,7 +41,7 @@ impl IntW {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FloatW {
     F32,
     F64,
@@ -55,7 +55,7 @@ impl FloatW {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Ty {
     Int(IntW),
     UInt(UIntW),

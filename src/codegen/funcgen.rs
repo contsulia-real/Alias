@@ -112,10 +112,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         caps: Vec<(String, VTy)>,
         ret_vty: VTy,
     ) -> AliasResult<()> {
-        let param_vtys: Vec<VTy> = params
-            .iter()
-            .map(|p| decl_vty(&p.ty, &self.struct_layouts))
-            .collect();
+        let param_vtys: Vec<VTy> = params.iter().map(|p| self.vty(&p.ty)).collect();
         let sig = self.user_sig_typed(&param_vtys, &ret_vty);
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, fid.as_u32()), sig);
@@ -145,7 +142,6 @@ impl<'m, M: Module> Compiler<'m, M> {
             caps: caps_map,
             caps_vty,
             this_fid: Some(fid),
-            this_vty: Some(VTy::Func(param_vtys.clone(), Box::new(ret_vty.clone()))),
             terminated: false,
             loop_targets: Vec::new(),
             init_ctx: false,
@@ -155,7 +151,7 @@ impl<'m, M: Module> Compiler<'m, M> {
 
         for (i, p) in params.iter().enumerate() {
             let raw = bcx.block_params(entry)[i + 2];
-            let vty = decl_vty(&p.ty, &self.struct_layouts);
+            let vty = self.vty(&p.ty);
             let word = norm_load(&mut bcx, raw, &vty);
             emit_local_cell(self, &mut bcx, &mut frame, word, vty, &p.name)?;
         }
@@ -239,7 +235,6 @@ impl<'m, M: Module> Compiler<'m, M> {
             caps: HashMap::new(),
             caps_vty: HashMap::new(),
             this_fid: None,
-            this_vty: None,
             terminated: false,
             loop_targets: Vec::new(),
             init_ctx: false,
@@ -260,11 +255,10 @@ impl<'m, M: Module> Compiler<'m, M> {
                 let Expr::FuncLit { params, body, .. } = &b.value else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
-                let ret_vty = decl_vty(&b.ty, &self.struct_layouts);
-                let param_vtys = params
-                    .iter()
-                    .map(|p| decl_vty(&p.ty, &self.struct_layouts))
-                    .collect::<Vec<_>>();
+                let VTy::Func(param_vtys, ret_vty) = self.vty(&b.ty) else {
+                    invariant_violation("局部 func 绑定携带完整函数类型")
+                };
+                let ret_vty = *ret_vty;
                 let v = emit_funclit_value_typed(
                     self,
                     &mut bcx,
@@ -275,7 +269,7 @@ impl<'m, M: Module> Compiler<'m, M> {
                 )?;
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
             } else {
-                let vty = decl_vty(&b.ty, &self.struct_layouts);
+                let vty = self.vty(&b.ty);
                 (
                     emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?,
                     vty,
@@ -336,8 +330,12 @@ pub(crate) fn emit_funclit_value<M: Module>(
     frame: &mut Frame,
     params: &[Param],
     body: &Body,
+    funclit_type: &Ty,
 ) -> AliasResult<Value> {
-    let ret_vty = infer_ret_vty(c, frame, params, body);
+    let VTy::Func(_, ret_vty) = c.vty(funclit_type) else {
+        invariant_violation("函数字面量携带完整函数类型")
+    };
+    let ret_vty = *ret_vty;
     emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty)
 }
 
@@ -350,10 +348,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     ret_vty: VTy,
 ) -> AliasResult<Value> {
     let caps = scan_captures(c, params, body, frame);
-    let param_vtys: Vec<VTy> = params
-        .iter()
-        .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-        .collect();
+    let param_vtys: Vec<VTy> = params.iter().map(|p| c.vty(&p.ty)).collect();
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
@@ -361,7 +356,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     c.fn_rets.push(ret_vty.clone());
     let cap_vtys: Vec<(String, VTy)> = caps
         .iter()
-        .map(|n| (n.clone(), vty_of_name(c, frame, n)))
+        .map(|n| (n.clone(), bound_vty(c, frame, n)))
         .collect();
     c.pending.push_back(PendingFn {
         fid,
@@ -557,8 +552,8 @@ pub(crate) fn scan_expr<M: Module>(
     frame: &Frame,
 ) {
     match e {
-        Expr::Ident(name, _) => ensure_scanned_name(name, locals, caps, seen, frame),
-        Expr::This(_) => {}
+        Expr::Ident(name, ..) => ensure_scanned_name(name, locals, caps, seen, frame),
+        Expr::This(..) => {}
         Expr::Neg { expr, .. }
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
@@ -577,9 +572,9 @@ pub(crate) fn scan_expr<M: Module>(
             scan_expr(c, then_expr, locals, caps, seen, frame);
             scan_expr(c, else_expr, locals, caps, seen, frame);
         }
-        Expr::Str(parts, _) => {
+        Expr::Str(parts, ..) => {
             for p in parts {
-                if let StrPartAst::Hole(h) = p {
+                if let StrPart::Hole(h) = p {
                     scan_expr(c, h, locals, caps, seen, frame);
                 }
             }

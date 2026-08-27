@@ -2,10 +2,12 @@
 
 mod decls;
 mod exprs;
+pub(crate) mod hir;
 mod stmts;
 pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
+use crate::sema::hir::ExprInfo;
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -86,15 +88,27 @@ struct Checker {
     main: Option<(Ty, Span)>,
     structs: HashMap<String, StructInfo>,
     methods: HashMap<String, HashMap<String, MethodInfo>>,
+    expr_facts: HashMap<usize, ExprInfo>,
+    binding_types: HashMap<usize, Ty>,
+    receiver_types: HashMap<usize, Ty>,
+    field_types: HashMap<usize, Ty>,
+    param_types: HashMap<usize, Ty>,
+    for_types: HashMap<usize, Ty>,
 }
 
-pub fn check(program: &Program) -> AliasResult<()> {
+pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
     let mut ck = Checker {
         fn_ret: Vec::new(),
         loop_depth: 0,
         main: None,
         structs: HashMap::new(),
         methods: builtin_methods(),
+        expr_facts: HashMap::new(),
+        binding_types: HashMap::new(),
+        receiver_types: HashMap::new(),
+        field_types: HashMap::new(),
+        param_types: HashMap::new(),
+        for_types: HashMap::new(),
     };
     let top = Scope::root();
     for item in &program.items {
@@ -135,7 +149,18 @@ pub fn check(program: &Program) -> AliasResult<()> {
             Item::StructDef(sd) => ck.struct_def(sd, &top)?,
         }
     }
-    ck.validate_main()
+    ck.validate_main()?;
+    hir::lower(
+        program,
+        hir::LowerFacts {
+            exprs: ck.expr_facts,
+            bindings: ck.binding_types,
+            receivers: ck.receiver_types,
+            fields: ck.field_types,
+            params: ck.param_types,
+            fors: ck.for_types,
+        },
+    )
 }
 
 /// 编译器内建扩展函数。运算名字和符号运算共享同一静态类型规则；

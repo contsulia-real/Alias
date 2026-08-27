@@ -117,7 +117,7 @@ pub fn run(path: &str, src: &str) -> AliasResult<i32> {
 pub fn build(_path: &str, src: &str, out_exe: &Path) -> AliasResult<()> {
     let tokens = lexer::lex(src)?;
     let program = parser::parse(tokens)?;
-    sema::check(&program)?;
-    let obj = codegen::compile_to_object(program)?;
+    let checked = sema::check(program)?;
+    let obj = codegen::compile_to_object(checked)?;
     linker::link_exe(&obj, out_exe)
 }

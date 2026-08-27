@@ -1,7 +1,7 @@
 //! Alias 值 ABI 与内存布局的唯一真相源。
 
-use crate::ast::{Expr, Item, TypeExpr};
-use crate::sema::types::{FloatW, IntW, UIntW};
+use crate::sema::hir::{CheckedProgram, Expr, Item};
+use crate::sema::types::{FloatW, IntW, Ty, UIntW};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -16,11 +16,12 @@ pub(crate) enum VTy {
     Str,
     Unit,
     Func(Vec<VTy>, Box<VTy>),
+    FuncPoly,
     Struct(String),
-    Result(String, String),
+    Result(Box<VTy>, Box<VTy>),
     Array(Box<VTy>),
     Iterator(Box<VTy>),
-    Other,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,14 +68,15 @@ impl VTy {
                 word: WordRepr::F64Bits,
             },
             VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
+            VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
             VTy::Bool
             | VTy::Str
             | VTy::Func(..)
+            | VTy::FuncPoly
             | VTy::Struct(_)
             | VTy::Result(..)
             | VTy::Array(_)
-            | VTy::Iterator(_)
-            | VTy::Other => ValueAbi {
+            | VTy::Iterator(_) => ValueAbi {
                 register: types::I64,
                 storage: types::I64,
                 storage_bytes: 8,
@@ -107,12 +109,14 @@ impl VTy {
             VTy::Bool => "bool".into(),
             VTy::Str => "string".into(),
             VTy::Unit => "unit".into(),
-            VTy::Func(..) => "func".into(),
+            VTy::Func(..) | VTy::FuncPoly => "func".into(),
             VTy::Struct(s) => s.clone(),
-            VTy::Result(t, e) => format!("result<{t}, {e}>"),
+            VTy::Result(t, e) => {
+                format!("result<{}, {}>", t.display_name(), e.display_name())
+            }
             VTy::Array(t) => format!("array<{}>", t.display_name()),
             VTy::Iterator(t) => format!("iterator<{}>", t.display_name()),
-            VTy::Other => "未知".into(),
+            VTy::Unknown => "未知".into(),
         }
     }
 
@@ -193,8 +197,66 @@ pub(crate) struct StructLayout {
 }
 
 pub(crate) type StructTable = HashMap<String, StructLayout>;
+pub(crate) type ProjectionTable = HashMap<Ty, VTy>;
 
-pub(crate) fn build_struct_layouts(items: &[Item]) -> StructTable {
+pub(crate) fn project_ty(program: &CheckedProgram) -> ProjectionTable {
+    let mut table = ProjectionTable::new();
+    program.for_each_ty(&mut |ty| insert_projection(ty, &mut table));
+    table
+}
+
+fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
+    if table.contains_key(ty) {
+        return;
+    }
+    let projected = match ty {
+        Ty::Int(width) => VTy::I(*width),
+        Ty::UInt(width) => VTy::U(*width),
+        Ty::Float(width) => VTy::F(*width),
+        Ty::Bool => VTy::Bool,
+        Ty::Str => VTy::Str,
+        Ty::Unit => VTy::Unit,
+        Ty::Func { params, ret } => {
+            for param in params {
+                insert_projection(param, table);
+            }
+            insert_projection(ret, table);
+            VTy::Func(
+                params.iter().map(|param| table[param].clone()).collect(),
+                Box::new(table[ret.as_ref()].clone()),
+            )
+        }
+        Ty::FuncPoly => VTy::FuncPoly,
+        Ty::Struct(name) => VTy::Struct(name.clone()),
+        Ty::Result(ok, err) => {
+            insert_projection(ok, table);
+            insert_projection(err, table);
+            VTy::Result(
+                Box::new(table[ok.as_ref()].clone()),
+                Box::new(table[err.as_ref()].clone()),
+            )
+        }
+        Ty::Array(element) => {
+            insert_projection(element, table);
+            VTy::Array(Box::new(table[element.as_ref()].clone()))
+        }
+        Ty::Iterator(element) => {
+            insert_projection(element, table);
+            VTy::Iterator(Box::new(table[element.as_ref()].clone()))
+        }
+        Ty::Unknown => VTy::Unknown,
+    };
+    table.insert(ty.clone(), projected);
+}
+
+pub(crate) fn projected_ty(table: &ProjectionTable, ty: &Ty) -> VTy {
+    table
+        .get(ty)
+        .cloned()
+        .unwrap_or_else(|| panic!("内部类型投影不变式被破坏: 缺少 {}", ty.name()))
+}
+
+pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable) -> StructTable {
     let mut table = StructTable::new();
     for item in items {
         if let Item::StructDef(sd) = item {
@@ -214,7 +276,7 @@ pub(crate) fn build_struct_layouts(items: &[Item]) -> StructTable {
         let mut off = 0usize;
         let mut max_align = 1usize;
         for field in &sd.fields {
-            let vty = decl_vty(&field.ty, &table);
+            let vty = projected_ty(projections, &field.ty);
             let abi = vty.abi();
             off = align_to(off, abi.align_bytes);
             max_align = max_align.max(abi.align_bytes);
@@ -236,75 +298,6 @@ pub(crate) fn build_struct_layouts(items: &[Item]) -> StructTable {
         );
     }
     table
-}
-
-pub(crate) fn decl_vty(te: &TypeExpr, structs: &StructTable) -> VTy {
-    match te {
-        TypeExpr::Named(n) => vty_of_type_name(structs, n),
-        TypeExpr::Generic(n, args) if n == "result" && args.len() == 2 => {
-            VTy::Result(args[0].display(), args[1].display())
-        }
-        TypeExpr::Generic(n, args) if n == "array" && args.len() == 1 => {
-            VTy::Array(Box::new(decl_vty(&args[0], structs)))
-        }
-        TypeExpr::Generic(n, args) if n == "iterator" && args.len() == 1 => {
-            VTy::Iterator(Box::new(decl_vty(&args[0], structs)))
-        }
-        TypeExpr::Generic(..) => VTy::Other,
-    }
-}
-
-pub(crate) fn vty_of_type_name(structs: &StructTable, name: &str) -> VTy {
-    let name = name.trim();
-    if let Some(inner) = generic_inner(name, "array") {
-        return VTy::Array(Box::new(vty_of_type_name(structs, inner)));
-    }
-    if let Some(inner) = generic_inner(name, "iterator") {
-        return VTy::Iterator(Box::new(vty_of_type_name(structs, inner)));
-    }
-    if let Some(inner) = generic_inner(name, "result") {
-        if let Some((a, b)) = split_top_level_pair(inner) {
-            return VTy::Result(a.trim().to_string(), b.trim().to_string());
-        }
-    }
-    match name {
-        "i8" => VTy::I(IntW::W8),
-        "i16" => VTy::I(IntW::W16),
-        "i32" => VTy::I(IntW::W32),
-        "i64" => VTy::I(IntW::W64),
-        "u8" => VTy::U(UIntW::U8),
-        "u16" => VTy::U(UIntW::U16),
-        "u32" => VTy::U(UIntW::U32),
-        "u64" => VTy::U(UIntW::U64),
-        "f32" => VTy::F(FloatW::F32),
-        "f64" => VTy::F(FloatW::F64),
-        "bool" => VTy::Bool,
-        "string" => VTy::Str,
-        "unit" => VTy::Unit,
-        // 当前函数签名类型尚未最终定稿；物理上仍是闭包指针，显示/方法键为 func。
-        "func" => VTy::Func(Vec::new(), Box::new(VTy::Other)),
-        _ if structs.contains_key(name) => VTy::Struct(name.to_string()),
-        _ => VTy::Other,
-    }
-}
-
-fn generic_inner<'a>(name: &'a str, ctor: &str) -> Option<&'a str> {
-    name.strip_prefix(ctor)?
-        .strip_prefix('<')?
-        .strip_suffix('>')
-}
-
-fn split_top_level_pair(s: &str) -> Option<(&str, &str)> {
-    let mut depth = 0i32;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            ',' if depth == 0 => return Some((&s[..i], &s[i + 1..])),
-            _ => {}
-        }
-    }
-    None
 }
 
 pub(crate) fn norm_load(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
@@ -401,7 +394,7 @@ mod tests {
             VTy::Bool,
             VTy::Str,
             VTy::Struct("s".into()),
-            VTy::Result("i32".into(), "string".into()),
+            VTy::Result(Box::new(VTy::I(IntW::W32)), Box::new(VTy::Str)),
             VTy::Array(Box::new(VTy::I(IntW::W8))),
             VTy::Iterator(Box::new(VTy::I(IntW::W8))),
         ];
@@ -412,6 +405,52 @@ mod tests {
             assert_eq!(abi.storage_bytes, abi.storage.bytes() as usize);
             assert_eq!(abi.param, abi.storage);
             assert_eq!(abi.ret, abi.storage);
+        }
+    }
+
+    #[test]
+    fn semantic_type_projection_is_total_and_exact() {
+        let cases = vec![
+            (Ty::Int(IntW::W8), VTy::I(IntW::W8)),
+            (Ty::Int(IntW::W16), VTy::I(IntW::W16)),
+            (Ty::Int(IntW::W32), VTy::I(IntW::W32)),
+            (Ty::Int(IntW::W64), VTy::I(IntW::W64)),
+            (Ty::UInt(UIntW::U8), VTy::U(UIntW::U8)),
+            (Ty::UInt(UIntW::U16), VTy::U(UIntW::U16)),
+            (Ty::UInt(UIntW::U32), VTy::U(UIntW::U32)),
+            (Ty::UInt(UIntW::U64), VTy::U(UIntW::U64)),
+            (Ty::Float(FloatW::F32), VTy::F(FloatW::F32)),
+            (Ty::Float(FloatW::F64), VTy::F(FloatW::F64)),
+            (Ty::Bool, VTy::Bool),
+            (Ty::Str, VTy::Str),
+            (Ty::Unit, VTy::Unit),
+            (
+                Ty::Func {
+                    params: vec![Ty::Int(IntW::W32), Ty::Str],
+                    ret: Box::new(Ty::Bool),
+                },
+                VTy::Func(vec![VTy::I(IntW::W32), VTy::Str], Box::new(VTy::Bool)),
+            ),
+            (Ty::FuncPoly, VTy::FuncPoly),
+            (Ty::Struct("point".into()), VTy::Struct("point".into())),
+            (
+                Ty::Result(Box::new(Ty::Int(IntW::W16)), Box::new(Ty::Str)),
+                VTy::Result(Box::new(VTy::I(IntW::W16)), Box::new(VTy::Str)),
+            ),
+            (
+                Ty::Array(Box::new(Ty::UInt(UIntW::U64))),
+                VTy::Array(Box::new(VTy::U(UIntW::U64))),
+            ),
+            (
+                Ty::Iterator(Box::new(Ty::Float(FloatW::F32))),
+                VTy::Iterator(Box::new(VTy::F(FloatW::F32))),
+            ),
+            (Ty::Unknown, VTy::Unknown),
+        ];
+        for (semantic, projected) in cases {
+            let mut table = ProjectionTable::new();
+            insert_projection(&semantic, &mut table);
+            assert_eq!(projected_ty(&table, &semantic), projected);
         }
     }
 
@@ -433,11 +472,19 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "未确定类型没有值 ABI")]
+    fn unknown_type_never_silently_falls_back_to_a_machine_word() {
+        let _ = VTy::Unknown.abi();
+    }
+
+    #[test]
     fn struct_layout_includes_internal_and_tail_padding() {
         let src = "struct mixed { val i8 a = 1 val f64 b = 2.0 val i16 c = 3 }\nfunc i32 main = () -> return 0\n";
         let tokens = crate::lexer::lex(src).unwrap();
         let program = crate::parser::parse(tokens).unwrap();
-        let layouts = build_struct_layouts(&program.items);
+        let checked = crate::sema::check(program).unwrap();
+        let projections = project_ty(&checked);
+        let layouts = build_struct_layouts(&checked.items, &projections);
         let layout = &layouts["mixed"];
         assert_eq!(layout.align, 8);
         assert_eq!(layout.size, 24);

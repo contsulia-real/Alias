@@ -7,10 +7,9 @@ mod emit;
 mod funcgen;
 mod native_runtime;
 mod runtime;
-mod types_proj;
 
-use crate::ast::*;
-use crate::sema::types::{FloatW, IntW, UIntW};
+use crate::sema::hir::*;
+use crate::sema::types::{FloatW, IntW, Ty, UIntW};
 use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{
@@ -29,7 +28,6 @@ pub(crate) use emit::*;
 pub(crate) use funcgen::*;
 use native_runtime::{define_span_data, emit_native_runtime};
 pub(crate) use runtime::*;
-pub(crate) use types_proj::*;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Slot {
@@ -46,7 +44,6 @@ pub(crate) struct Frame {
     pub(crate) caps: HashMap<String, usize>,
     pub(crate) caps_vty: HashMap<String, VTy>,
     pub(crate) this_fid: Option<FuncId>,
-    pub(crate) this_vty: Option<VTy>,
     pub(crate) terminated: bool,
     /// 当前函数内由内向外的循环目标：(break 目标, continue 目标)。
     /// 创建新函数帧时永远从空栈开始，禁止跨函数 break/continue。
@@ -69,6 +66,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
     pub(crate) span_table: Vec<(u32, u32)>,
+    type_projections: ProjectionTable,
     struct_layouts: StructTable,
     /// (完整接收者静态类型名, 方法名) → FuncId。
     methods: HashMap<(String, String), FuncId>,
@@ -85,7 +83,7 @@ pub(crate) struct PendingFn {
     ret_vty: VTy,
 }
 
-pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
+pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>> {
     if !program.imports.is_empty() {
         eprintln!(
             "[alias] 注意: {} 条 import 已解析但标准库尚未接入 (Phase 5 前)",
@@ -106,6 +104,7 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
     .map_err(|e| native_err(Span::default(), format!("object builder 构造失败: {e}")))?;
     let mut module = cranelift_object::ObjectModule::new(builder);
 
+    let type_projections = project_ty(&program);
     let mut c = Compiler {
         cc: module.isa().default_call_conv(),
         ptr_ty: module.isa().pointer_type(),
@@ -119,6 +118,7 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
         pending: VecDeque::new(),
         str_data: HashMap::new(),
         span_table: Vec::new(),
+        type_projections,
         struct_layouts: HashMap::new(),
         methods: HashMap::new(),
         method_rets: HashMap::new(),
@@ -141,7 +141,7 @@ pub fn compile_to_object(program: Program) -> AliasResult<Vec<u8>> {
 
 /// 原生编译编排: 结构布局 → 方法签名 → 顶层槽位 → 函数/方法体 → 入口。
 fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasResult<FuncId> {
-    c.struct_layouts = build_struct_layouts(items);
+    c.struct_layouts = build_struct_layouts(items, &c.type_projections);
     debug_assert!(c
         .struct_layouts
         .values()
@@ -155,16 +155,19 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let Some(recv) = &b.receiver else {
             invariant_violation("过滤保证 receiver 存在")
         };
-        let Expr::FuncLit { params, .. } = &b.value else {
+        let Expr::FuncLit { .. } = &b.value else {
             return Err(native_err(b.span, "方法体必须是函数字面量"));
         };
-        let self_vty = decl_vty(recv, &c.struct_layouts);
+        let self_vty = c.vty(recv);
         let recv_name = self_vty.display_name();
         let mname = b.name.clone();
-        let param_vtys: Vec<VTy> = std::iter::once(self_vty)
-            .chain(params.iter().map(|p| decl_vty(&p.ty, &c.struct_layouts)))
-            .collect();
-        let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
+        let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+            invariant_violation("方法绑定携带完整函数类型 (sema 已校验)")
+        };
+        if param_vtys.first() != Some(&self_vty) {
+            invariant_violation("方法函数类型首参数必须是接收者")
+        }
+        let ret_vty = *ret_vty;
         let fid =
             c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv_name}>{mname}"))?;
         let key = (recv_name, mname);
@@ -182,21 +185,7 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             Item::Binding(b) if b.receiver.is_none() => Some(b),
             _ => None,
         }) {
-            let vty = decl_vty(&b.ty, &c.struct_layouts);
-            let slot_vty = if b.kind == BindKind::Func {
-                let Expr::FuncLit { params, .. } = &b.value else {
-                    return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
-                };
-                VTy::Func(
-                    params
-                        .iter()
-                        .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-                        .collect(),
-                    Box::new(vty.clone()),
-                )
-            } else {
-                vty.clone()
-            };
+            let slot_vty = c.vty(&b.ty);
             let (sz, al) = size_align(&slot_vty);
             off = align_to(off, al);
             let slot = off;
@@ -204,21 +193,21 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             c.top_slots.push(slot);
             c.globals_final.insert(b.name.clone(), (slot, slot_vty));
             if b.kind == BindKind::Func {
-                let Expr::FuncLit { params, .. } = &b.value else {
+                let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
                 };
-                let param_vtys: Vec<VTy> = params
-                    .iter()
-                    .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-                    .collect();
+                let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+                    invariant_violation("func 绑定携带完整函数类型 (sema 已校验)")
+                };
+                let ret_vty = *ret_vty;
                 let name = format!("u{}", c.next_fid);
                 c.next_fid += 1;
-                let fid = c.declare_user_func_typed(&param_vtys, &vty, name)?;
+                let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
                 c.fn_ids.push(fid);
-                c.fn_rets.push(vty.clone());
+                c.fn_rets.push(ret_vty.clone());
                 top_funcs.push((fid, slot, b));
                 if b.name == "main" {
-                    main_slot_ret = Some((slot, vty));
+                    main_slot_ret = Some((slot, ret_vty));
                 }
             }
         }
@@ -229,8 +218,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let Expr::FuncLit { params, body, .. } = &b.value else {
             unreachable!("pass 1 已确保 func 绑定初始化为函数字面量");
         };
-        let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
-        c.define_user_func(fid, params, body, Vec::new(), ret_vty)?;
+        let VTy::Func(_, ret_vty) = c.vty(&b.ty) else {
+            invariant_violation("func 绑定携带完整函数类型")
+        };
+        c.define_user_func(fid, params, body, Vec::new(), *ret_vty)?;
     }
 
     for (fid, b) in pending_methods {
@@ -248,8 +239,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
-        let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
-        c.define_user_func(fid, &all_params, body, Vec::new(), ret_vty)?;
+        let VTy::Func(_, ret_vty) = c.vty(&b.ty) else {
+            invariant_violation("方法绑定携带完整函数类型")
+        };
+        c.define_user_func(fid, &all_params, body, Vec::new(), *ret_vty)?;
     }
 
     let (main_slot, main_ret) =
@@ -271,4 +264,25 @@ pub(crate) fn native_err(span: Span, msg: impl Into<String>) -> AliasError {
 
 pub(crate) fn invariant_violation(what: &'static str) -> ! {
     panic!("内部代码生成不变式被破坏: {what} (sema 校验缺口, 请报告)")
+}
+
+impl<M: Module> Compiler<'_, M> {
+    pub(crate) fn vty(&self, ty: &Ty) -> VTy {
+        projected_ty(&self.type_projections, ty)
+    }
+}
+
+pub(crate) fn bound_vty<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
+    for vtys in frame.locals_vty.iter().rev() {
+        if let Some(vty) = vtys.get(name) {
+            return vty.clone();
+        }
+    }
+    if let Some(vty) = frame.caps_vty.get(name) {
+        return vty.clone();
+    }
+    c.globals_final
+        .get(name)
+        .map(|(_, vty)| vty.clone())
+        .unwrap_or_else(|| invariant_violation("标识符必须在 sema 后解析到绑定"))
 }

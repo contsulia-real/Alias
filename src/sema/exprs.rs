@@ -1,5 +1,6 @@
 //! sema::exprs — 表达式静态语义。
 
+use super::hir::{BuiltinCall, CallTarget, ExprInfo, MethodTarget};
 use super::types::{
     check_value_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
     types_match, FloatW, IntW, Ty,
@@ -56,6 +57,72 @@ impl From<AliasError> for ExprCheckError {
 }
 
 impl Checker {
+    fn expr_key(e: &Expr) -> usize {
+        e as *const Expr as usize
+    }
+
+    pub(super) fn record_expr_type(&mut self, e: &Expr, ty: Ty) {
+        self.expr_facts
+            .entry(Self::expr_key(e))
+            .and_modify(|info| info.ty = ty.clone())
+            .or_insert(ExprInfo {
+                ty,
+                call_target: None,
+            });
+    }
+
+    fn record_literal_components(&mut self, e: &Expr, ty: &Ty) {
+        if let Expr::Neg { expr, .. } = e {
+            if matches!(expr.as_ref(), Expr::Int(..)) {
+                self.record_expr_type(expr, ty.clone());
+            }
+        }
+    }
+
+    pub(super) fn record_call_target(&mut self, e: &Expr, target: CallTarget) {
+        self.expr_facts
+            .entry(Self::expr_key(e))
+            .and_modify(|info| info.call_target = Some(target.clone()))
+            .or_insert(ExprInfo {
+                ty: Ty::Unknown,
+                call_target: Some(target),
+            });
+    }
+
+    pub(super) fn record_resolved_callee(&mut self, e: &Expr, result: &Ty) {
+        let Expr::Call { callee, args, .. } = e else {
+            return;
+        };
+        let Some(target) = self
+            .expr_facts
+            .get(&Self::expr_key(e))
+            .and_then(|info| info.call_target.as_ref())
+        else {
+            return;
+        };
+        if *target == CallTarget::FunctionValue {
+            return;
+        }
+        let params = args
+            .iter()
+            .map(|arg| self.expr_facts[&Self::expr_key(&arg.value)].ty.clone())
+            .collect();
+        self.record_expr_type(
+            callee,
+            Ty::Func {
+                params,
+                ret: Box::new(result.clone()),
+            },
+        );
+    }
+
+    pub(super) fn record_params(&mut self, params: &[crate::ast::Param], types: &[Ty]) {
+        for (param, ty) in params.iter().zip(types) {
+            self.param_types
+                .insert(param as *const crate::ast::Param as usize, ty.clone());
+        }
+    }
+
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
     /// match 都走这一入口，使窄数值字面量的范围规则完全一致。
     pub(super) fn expr_expected(
@@ -64,7 +131,23 @@ impl Checker {
         env: &Env,
         expected: &Ty,
     ) -> ExprCheckResult<Ty> {
+        let ty = self.expr_expected_inner(e, env, expected)?;
+        self.record_expr_type(e, ty.clone());
+        self.record_literal_components(e, &ty);
+        self.record_resolved_callee(e, &ty);
+        Ok(ty)
+    }
+
+    fn expr_expected_inner(&mut self, e: &Expr, env: &Env, expected: &Ty) -> ExprCheckResult<Ty> {
         if let Some((name, arg, span)) = contextual_conversion(e) {
+            self.record_call_target(
+                e,
+                CallTarget::Builtin(if name == "from" {
+                    BuiltinCall::From
+                } else {
+                    BuiltinCall::TryFrom
+                }),
+            );
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
                 return Ok(expected.clone());
@@ -143,6 +226,14 @@ impl Checker {
             (Expr::Call { callee, args, span }, Ty::Result(ok, err)) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
                     if Scope::get(env, name).is_none() && (name == "ok" || name == "err") {
+                        self.record_call_target(
+                            e,
+                            CallTarget::ResultConstructor(if name == "ok" {
+                                CtorKind::Ok
+                            } else {
+                                CtorKind::Err
+                            }),
+                        );
                         let [arg] = args.as_slice() else {
                             return Err(AliasError {
                                 msg: format!("{name} 构造恰好接受 1 个参数"),
@@ -199,10 +290,31 @@ impl Checker {
         env: &Env,
         expected: &Ty,
     ) -> ExprCheckResult<Ty> {
+        let ty = self.expr_with_numeric_literal_context_inner(e, env, expected)?;
+        self.record_expr_type(e, ty.clone());
+        self.record_literal_components(e, &ty);
+        self.record_resolved_callee(e, &ty);
+        Ok(ty)
+    }
+
+    fn expr_with_numeric_literal_context_inner(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+        expected: &Ty,
+    ) -> ExprCheckResult<Ty> {
         if let Some(result) = literal_slot_unify(expected, e) {
             return result;
         }
         if let Some((name, arg, span)) = contextual_conversion(e) {
+            self.record_call_target(
+                e,
+                CallTarget::Builtin(if name == "from" {
+                    BuiltinCall::From
+                } else {
+                    BuiltinCall::TryFrom
+                }),
+            );
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
                 return Ok(expected.clone());
@@ -236,6 +348,13 @@ impl Checker {
     }
 
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
+        let ty = self.expr_inner(e, env)?;
+        self.record_expr_type(e, ty.clone());
+        self.record_resolved_callee(e, &ty);
+        Ok(ty)
+    }
+
+    fn expr_inner(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
         match e {
             Expr::Int(value, ..) => Ok(default_positive_int_ty(*value)),
             Expr::Float(..) => Ok(Ty::Float(FloatW::F64)),
@@ -325,7 +444,12 @@ impl Checker {
                 // 仅字面量参与，不放宽变量/表达式之间的隐式混算。
                 let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
                     match literal_slot_unify(&l, rhs) {
-                        Some(r) => r.map_err(ExprCheckError::into_alias)?,
+                        Some(r) => {
+                            let ty = r.map_err(ExprCheckError::into_alias)?;
+                            self.record_expr_type(rhs, ty.clone());
+                            self.record_literal_components(rhs, &ty);
+                            ty
+                        }
                         None => self.expr(rhs, env)?,
                     }
                 } else {
@@ -353,13 +477,25 @@ impl Checker {
                     })
                 }
             }
-            Expr::Call { callee, args, span } => self.call(callee, args, *span, env),
+            Expr::Call { callee, args, span } => {
+                let ty = self.call(callee, args, *span, env)?;
+                self.record_call_target(e, self.resolve_call_target(callee, env));
+                Ok(ty)
+            }
             Expr::MethodCall {
                 recv,
                 name,
                 args,
                 span,
-            } => self.method_call(recv, name, args, *span, env),
+            } => {
+                let ty = self.method_call(recv, name, args, *span, env)?;
+                let recv_ty = self.expr_facts[&Self::expr_key(recv)].ty.clone();
+                self.record_call_target(
+                    e,
+                    CallTarget::Method(resolve_method_target(&recv_ty, name)),
+                );
+                Ok(ty)
+            }
             Expr::Index { recv, idx, .. } => {
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
@@ -424,7 +560,17 @@ impl Checker {
                     }),
                 }
             }
-            Expr::FuncLit { params, body, span } => self.funclit(params, body, env, None, *span),
+            Expr::FuncLit { params, body, span } => {
+                let ty = self.funclit(params, body, env, None, *span)?;
+                if let Ty::Func {
+                    params: param_types,
+                    ..
+                } = &ty
+                {
+                    self.record_params(params, param_types);
+                }
+                Ok(ty)
+            }
             Expr::Match {
                 subject,
                 arms,
@@ -656,14 +802,7 @@ impl Checker {
                 None => self.expr(e, &local)?,
             })),
             ArmBody::Ret(e) => {
-                let Some(ret) = self.fn_ret.last().cloned() else {
-                    return Err(AliasError {
-                        msg: "顶层不允许 return".into(),
-                        span: e.span(),
-                    }
-                    .into());
-                };
-                self.expr_expected(e, &local, &ret)?;
+                self.check_return_value(Some(e), e.span(), &local)?;
                 Ok(None)
             }
             ArmBody::Block(stmts) => {
@@ -876,6 +1015,37 @@ impl Checker {
         }
     }
 
+    fn resolve_call_target(&self, callee: &Expr, env: &Env) -> CallTarget {
+        let Expr::Ident(name, _) = callee else {
+            return CallTarget::FunctionValue;
+        };
+        if Scope::get(env, name).is_none() {
+            if self.structs.contains_key(name) {
+                return CallTarget::StructConstructor(name.clone());
+            }
+            if name == "ok" || name == "err" {
+                return CallTarget::ResultConstructor(if name == "ok" {
+                    CtorKind::Ok
+                } else {
+                    CtorKind::Err
+                });
+            }
+        }
+        let builtin = match name.as_str() {
+            "print" => Some(BuiltinCall::Print),
+            "println" => Some(BuiltinCall::Println),
+            "typeof" => Some(BuiltinCall::Typeof),
+            "from" => Some(BuiltinCall::From),
+            "try_from" => Some(BuiltinCall::TryFrom),
+            "increase" => Some(BuiltinCall::Increase),
+            "decrease" => Some(BuiltinCall::Decrease),
+            _ => None,
+        };
+        builtin
+            .map(CallTarget::Builtin)
+            .unwrap_or(CallTarget::FunctionValue)
+    }
+
     fn construct(
         &mut self,
         name: &str,
@@ -992,6 +1162,7 @@ impl Checker {
             });
         }
         if info.ty.is_unknown() || info.ty.is_numeric() {
+            self.record_expr_type(&arg.value, info.ty.clone());
             Ok(Ty::Unit)
         } else {
             Err(AliasError {
@@ -1113,6 +1284,46 @@ impl Checker {
     }
 }
 
+fn resolve_method_target(recv: &Ty, name: &str) -> MethodTarget {
+    if recv.is_numeric() {
+        let op = match name {
+            "plus" => Some(BinOp::Add),
+            "minus" => Some(BinOp::Sub),
+            "times" => Some(BinOp::Mul),
+            "div" => Some(BinOp::Div),
+            _ => None,
+        };
+        if let Some(op) = op {
+            return MethodTarget::Numeric(op);
+        }
+    }
+    if *recv == Ty::Bool && name == "not" {
+        return MethodTarget::BoolNot;
+    }
+    if *recv == Ty::Str {
+        match name {
+            "len" => return MethodTarget::StringLen,
+            "upper" => return MethodTarget::StringUpper,
+            "lower" => return MethodTarget::StringLower,
+            "trim" => return MethodTarget::StringTrim,
+            _ => {}
+        }
+    }
+    if matches!(recv, Ty::Array(_)) {
+        match name {
+            "len" => return MethodTarget::ArrayLen,
+            "push" => return MethodTarget::ArrayPush,
+            "pop" => return MethodTarget::ArrayPop,
+            "iterator" => return MethodTarget::ArrayIterator,
+            _ => {}
+        }
+    }
+    MethodTarget::User {
+        receiver: recv.clone(),
+        name: name.to_string(),
+    }
+}
+
 fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {
     use BinOp::*;
     match op {
@@ -1165,7 +1376,7 @@ fn conversion_exists(source: &Ty, target: &Ty) -> bool {
         || (matches!(target, Ty::Str) && !source.is_unknown() && *source != Ty::Unit)
 }
 
-fn require_value(ty: Ty, span: Span) -> AliasResult<Ty> {
+pub(super) fn require_value(ty: Ty, span: Span) -> AliasResult<Ty> {
     if ty == Ty::Unit {
         Err(AliasError {
             msg: "无返回值表达式不能用于值位置".into(),

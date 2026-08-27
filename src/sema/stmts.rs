@@ -1,6 +1,7 @@
 //! sema::stmts — 语句、函数体与控制流检查。
 
-use super::exprs::ExprCheckError;
+use super::exprs::{require_value, ExprCheckError};
+use super::hir::{BuiltinCall, CallTarget};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
@@ -33,6 +34,16 @@ impl Checker {
                 });
             };
             let init_ty = self.funclit(params, body, env, Some(&declared), *span)?;
+            if let Ty::Func {
+                params: param_types,
+                ..
+            } = &init_ty
+            {
+                self.record_params(params, param_types);
+            }
+            self.record_expr_type(&b.value, init_ty.clone());
+            self.binding_types
+                .insert(b as *const Binding as usize, init_ty.clone());
             if let Ty::Func { ret, .. } = &init_ty {
                 if !types_match(&declared, ret) {
                     return Err(decl_mismatch(b, &declared, ret));
@@ -67,6 +78,8 @@ impl Checker {
                             }
                         }
                     })?;
+            self.binding_types
+                .insert(b as *const Binding as usize, declared.clone());
             Scope::insert(
                 env,
                 b.name.clone(),
@@ -151,12 +164,15 @@ impl Checker {
             Ok(())
         })();
         self.loop_depth = outer_loop_depth;
-        self.fn_ret.pop();
+        let checked_ret = self
+            .fn_ret
+            .pop()
+            .unwrap_or_else(|| unreachable!("funclit 已压入返回类型"));
         check_result?;
 
         let inferred_ret = expected.cloned().unwrap_or_else(|| {
             if body_guarantees_return(body) {
-                Ty::Unknown
+                checked_ret
             } else {
                 Ty::Unit
             }
@@ -165,6 +181,52 @@ impl Checker {
             params: param_tys,
             ret: Box::new(inferred_ret),
         })
+    }
+
+    pub(super) fn check_return_value(
+        &mut self,
+        value: Option<&Expr>,
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<Ty> {
+        let Some(ret) = self.fn_ret.last().cloned() else {
+            return Err(AliasError {
+                msg: "顶层不允许 return".into(),
+                span,
+            });
+        };
+        if ret.is_unknown() {
+            let inferred = match value {
+                Some(expr) => require_value(self.expr(expr, env)?, expr.span())?,
+                None => Ty::Unit,
+            };
+            *self
+                .fn_ret
+                .last_mut()
+                .unwrap_or_else(|| unreachable!("上方已确认函数返回栈非空")) = inferred.clone();
+            return Ok(inferred);
+        }
+        match value {
+            Some(_) if ret == Ty::Unit => Err(AliasError {
+                msg: "unit 函数的 return 不能携带值".into(),
+                span,
+            }),
+            Some(expr) => {
+                self.expr_expected(expr, env, &ret).map_err(|error| {
+                    let error = error.into_alias();
+                    AliasError {
+                        msg: format!("return 需要 {}: {}", ret.name(), error.msg),
+                        span: error.span,
+                    }
+                })?;
+                Ok(ret)
+            }
+            None if ret != Ty::Unit => Err(AliasError {
+                msg: format!("return 需要 {}, 不能省略返回值", ret.name()),
+                span,
+            }),
+            None => Ok(ret),
+        }
     }
 
     pub(super) fn stmt(&mut self, s: &Stmt, env: &Env) -> AliasResult<Option<Ty>> {
@@ -246,6 +308,16 @@ impl Checker {
                     if let Expr::Ident(name, _) = callee.as_ref() {
                         if name == "increase" || name == "decrease" {
                             self.incdec(name, args, *span, env)?;
+                            self.record_expr_type(expr, Ty::Unit);
+                            self.record_call_target(
+                                expr,
+                                CallTarget::Builtin(if name == "increase" {
+                                    BuiltinCall::Increase
+                                } else {
+                                    BuiltinCall::Decrease
+                                }),
+                            );
+                            self.record_resolved_callee(expr, &Ty::Unit);
                             return Ok(None);
                         }
                     }
@@ -254,36 +326,7 @@ impl Checker {
                 Ok(None)
             }
             Stmt::Return { value, span } => {
-                let Some(ret) = self.fn_ret.last().cloned() else {
-                    return Err(AliasError {
-                        msg: "顶层不允许 return".into(),
-                        span: *span,
-                    });
-                };
-                match value {
-                    Some(_) if ret == Ty::Unit => {
-                        return Err(AliasError {
-                            msg: "unit 函数的 return 不能携带值".into(),
-                            span: *span,
-                        });
-                    }
-                    Some(e) => {
-                        self.expr_expected(e, env, &ret).map_err(|error| {
-                            let error = error.into_alias();
-                            AliasError {
-                                msg: format!("return 需要 {}: {}", ret.name(), error.msg),
-                                span: error.span,
-                            }
-                        })?;
-                    }
-                    None if ret != Ty::Unit && !ret.is_unknown() => {
-                        return Err(AliasError {
-                            msg: format!("return 需要 {}, 不能省略返回值", ret.name()),
-                            span: *span,
-                        });
-                    }
-                    None => {}
-                }
+                let ret = self.check_return_value(value.as_ref(), *span, env)?;
                 Ok(Some(ret))
             }
             Stmt::If {
@@ -331,6 +374,8 @@ impl Checker {
                 span,
             } => {
                 let declared = check_value_type_slot(ty, *span, &self.structs)?;
+                self.for_types
+                    .insert(s as *const Stmt as usize, declared.clone());
                 let source = self.expr(iterable, env)?;
                 let elem = match source {
                     Ty::Array(elem) | Ty::Iterator(elem) => *elem,

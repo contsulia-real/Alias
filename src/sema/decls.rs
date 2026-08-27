@@ -35,6 +35,8 @@ impl Checker {
                 });
             }
             let ty = check_value_type_slot(&f.ty, f.span, &self.structs)?;
+            self.field_types
+                .insert(f as *const crate::ast::StructField as usize, ty.clone());
             if let Some(d) = &f.default {
                 self.expr_expected(d, env, &ty)
                     .map_err(|error| match error {
@@ -74,6 +76,8 @@ impl Checker {
             });
         };
         let recv_ty = check_value_type_slot(&recv_expr, b.span, &self.structs)?;
+        self.receiver_types
+            .insert(b as *const Binding as usize, recv_ty.clone());
         let recv = recv_ty.name();
         let mname = b.name.clone();
         let declared = check_return_type_slot(&b.ty, b.span, &self.structs)?;
@@ -125,7 +129,18 @@ impl Checker {
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
-        self.funclit(&all_params, body, env, Some(&declared), *fspan)?;
+        let method_ty = self.funclit(&all_params, body, env, Some(&declared), *fspan)?;
+        let Ty::Func {
+            params: all_param_types,
+            ..
+        } = &method_ty
+        else {
+            unreachable!("funclit 必须产生函数类型")
+        };
+        self.record_params(params, &all_param_types[1..]);
+        self.record_expr_type(&b.value, method_ty.clone());
+        self.binding_types
+            .insert(b as *const Binding as usize, method_ty);
         Ok(())
     }
 

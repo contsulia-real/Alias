@@ -73,7 +73,7 @@
 | `while_false_dead_code` | 死代码落空 |
 | `val_reassignment_error` | 「val」消息 + span |
 | `missing_type_slot_error` | 「类型槽」消息 + span |
-| `missing_main_error` | Q⑤ 现状 `@ 0:0` (待 Phase 1 改写) |
+| `missing_main_error` | Q⑤：default Span 省略位置前缀 |
 | `exit_code_clamped_to_255` | clamp 行为 |
 | `no_args_usage_exit_2` / `missing_file_exit_2` | CLI 层退出码 2 |
 
@@ -89,15 +89,15 @@
 
 # 附录 — Phase 1 Sema 层规范 (2026-08-24 增补)
 
-当前管线为 lex → parse → **sema** → COFF → rust-lld → exe。sema 通过的
-程序只允许进入完整原生编译管线；运行时检查由生成代码与原生 runtime 承担。
+当前管线为 lex → parse → **sema → CheckedProgram（typed HIR）** → COFF →
+rust-lld → exe。sema 通过的程序只允许进入完整原生编译管线；运行时检查由
+生成代码与原生 runtime 承担。
 
 ## 一、Q③ 严格落空规则 (规范性, 2026-08-24 用户终裁)
 
-**规则**: 声明返回类型 ≠ unit 的块体函数, 其块的最后一条语句必须是
-`return` 语句; 否则编译错误:
-「返回类型为 {ty} 的函数体必须以 return 语句收尾」, span 为函数字面量
-(参数表 `(` 起)。箭头体永无落空; unit 函数任意收尾合法。
+**规则**: 声明返回类型 ≠ unit 的函数，其所有可达路径都必须由显式
+`return <value>` 终止；仅检查最后一条语句不足以证明该条件。循环永不用于
+证明必返回，即使条件字面量为 true。unit 函数允许自然落空或裸 `return`。
 
 **循环收尾不豁免** (用户终裁, 推翻早期驱动尾豁免): 循环语句收尾与其它非
 return 收尾同等拒绝。count_to_ten 语料已补 `return 0` (MIGRATION.md M3)。
@@ -110,8 +110,9 @@ codegen 的块尾落空回退仅对 unit 函数可达。
 - 初始化器为其它表达式 → 其须为函数值, 其返回类型须等于 T;
 - 类型槽写 `func` (多态) → 接受任意签名函数值, 经其调用点不做元数/实参检查。
 
-val/var 绑定的类型槽表示初始化值的类型 (D3: 声明↔初始化一致性)。
-赋值语句**不**做类型一致性检查 — D3 未列赋值, 不私自收紧。
+val/var 绑定的类型槽表示初始化值的类型 (D3: 声明↔初始化一致性)。普通赋值
+与字段赋值同样按已解析的目标槽类型检查 RHS；该目标类型会完整传播给
+`from/try_from`、字面量和复合表达式，不允许赋值绕过静态类型一致性。
 
 ## 三、sema 与运行时的分工 (规范性)
 
@@ -173,6 +174,22 @@ f32/f64 始终使用对应浮点寄存器，进入载荷字时才按位装箱。
 最后按最大字段对齐补尾随填充。单元格、全局槽和字段不得在调用点
 另写宽度或偏移表；用户函数和间接闭包调用统一由 `user_signature` 加入
 `globals/env` 两个隐藏 I64 参数并生成显式参数/返回 ABI。
+
+## §五.2 typed HIR 与类型投影边界
+
+parser AST 只保存语法。`sema::check` 成功后必须产出 `CheckedProgram`：每个
+HIR 表达式直接携带最终静态 `Ty`；`Call`/`MethodCall` 还必须携带已解析的
+`CallTarget`/`MethodTarget`（函数值、结构体/result 构造器、内建或具体用户
+方法）。codegen 不得再按表达式形态、名字或诊断文本推断类型和调用归属。
+
+`src/codegen/abi.rs::project_ty` 是唯一 `Ty → VTy` 投影路径：进入 codegen 时
+对整棵 `CheckedProgram` 恰执行一次并生成只读投影表，后续发射点只能查表；
+`VTy` 再经 `ValueAbi` 决定机器表示。投影必须穷尽保留函数签名及
+result/array/iterator 内层类型；`Unknown` 是显式不变式状态，没有 `Other` 或
+默认分支。任何需要值
+ABI 的 `Unknown`/`unit` 到达后端都属于 sema 缺口并立即失败，禁止静默退回
+I64、首元素类型、名字查表或函数体返回猜测。匿名函数字面量的返回类型也在
+sema 内由 `return` 合并完成，codegen 不再扫描函数体推断返回类型。
 
 ## §六 唯一原生编译形态
 

@@ -2,8 +2,7 @@
 // emit — 表达式/语句发射域: 单元格访问、控制流、迭代、调用与内建。
 // ---------------------------------------------------------------------------
 use super::*;
-use super::{decl_vty, Frame, VTy};
-use crate::ast::*;
+use super::{Frame, VTy};
 use crate::codegen::{invariant_violation, native_err, Compiler, Slot};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -300,11 +299,10 @@ pub(crate) fn emit_stmt<M: Module>(
                 let Expr::FuncLit { params, body, .. } = &b.value else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
-                let ret_vty = decl_vty(&b.ty, &c.struct_layouts);
-                let param_vtys = params
-                    .iter()
-                    .map(|p| decl_vty(&p.ty, &c.struct_layouts))
-                    .collect::<Vec<_>>();
+                let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+                    invariant_violation("局部 func 绑定携带完整函数类型")
+                };
+                let ret_vty = *ret_vty;
                 let v = emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty.clone())?;
                 emit_local_cell(
                     c,
@@ -315,7 +313,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     &b.name,
                 )?;
             } else {
-                let vty = decl_vty(&b.ty, &c.struct_layouts);
+                let vty = c.vty(&b.ty);
                 let v = emit_expr_expected(c, bcx, frame, &b.value, &vty)?;
                 emit_local_cell(c, bcx, frame, v, vty, &b.name)?;
             }
@@ -324,16 +322,16 @@ pub(crate) fn emit_stmt<M: Module>(
         Stmt::FieldAssign {
             recv, field, value, ..
         } => {
-            let fvty = field_vty(c, frame, recv, field)?;
+            let fvty = field_vty(c, recv, field)?;
             let v = emit_expr_expected(c, bcx, frame, value, &fvty)?;
             let p = emit_expr(c, bcx, frame, recv)?;
-            let off = field_offset(c, frame, recv, field)?;
+            let off = field_offset(c, recv, field)?;
             let sv = norm_store(bcx, v, &fvty);
             bcx.ins().store(MemFlagsData::new(), sv, p, off);
             Ok(())
         }
         Stmt::Assign { target, value, .. } => {
-            let tvty = vty_of_name(c, frame, target);
+            let tvty = bound_vty(c, frame, target);
             let v = emit_expr_expected(c, bcx, frame, value, &tvty)?;
             match cell_addr(c, frame, target) {
                 Some(addr) => {
@@ -351,7 +349,10 @@ pub(crate) fn emit_stmt<M: Module>(
             Ok(())
         }
         Stmt::Return { value, .. } => {
-            let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
+            let expected = frame
+                .ret_vty
+                .clone()
+                .unwrap_or_else(|| invariant_violation("return 位于函数帧内"));
             if expected == VTy::Unit {
                 bcx.ins().jump(ret_block, &[]);
                 frame.terminated = true;
@@ -383,7 +384,7 @@ pub(crate) fn emit_stmt<M: Module>(
             body,
             span,
         } => {
-            let elem_vty = decl_vty(ty, &c.struct_layouts);
+            let elem_vty = c.vty(ty);
             emit_for(
                 c, bcx, frame, iterable, name, body, &elem_vty, *span, ret_block,
             )
@@ -544,7 +545,7 @@ fn emit_for<M: Module>(
     ret_block: Block,
 ) -> AliasResult<()> {
     ensure_current(bcx, frame);
-    let source_vty = static_vty(c, frame, iterable);
+    let source_vty = c.vty(iterable.ty());
     let source = emit_expr(c, bcx, frame, iterable)?;
     let iter = match source_vty {
         VTy::Array(_) => make_iterator(c, bcx, source)?,
@@ -630,18 +631,18 @@ pub(crate) fn emit_expr<M: Module>(
     e: &Expr,
 ) -> AliasResult<Value> {
     match e {
-        Expr::Int(n, _) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
-        Expr::Float(v, _) => Ok(bcx.ins().f64const(*v)),
-        Expr::Bool(b, _) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
-        Expr::Str(parts, _) => emit_str(c, bcx, frame, parts),
-        Expr::Ident(name, span) => match cell_addr(c, frame, name) {
+        Expr::Int(n, ..) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
+        Expr::Float(v, ..) => Ok(bcx.ins().f64const(*v)),
+        Expr::Bool(b, ..) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
+        Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts),
+        Expr::Ident(name, span, _) => match cell_addr(c, frame, name) {
             Some(addr) => {
-                let vty = vty_of_name(c, frame, name);
+                let vty = bound_vty(c, frame, name);
                 Ok(read_cell(bcx, frame, &addr, &vty))
             }
             None => Err(native_err(*span, format!("未定义的绑定 '{name}'"))),
         },
-        Expr::This(span) => {
+        Expr::This(span, _) => {
             let fid = frame
                 .this_fid
                 .ok_or_else(|| native_err(*span, "this 只能出现在 func 体内"))?;
@@ -653,15 +654,15 @@ pub(crate) fn emit_expr<M: Module>(
                 .unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
             c.call_rt(bcx, "alias.closure.new", &[code, env])
         }
-        Expr::Cast { target, expr, span } => {
-            let dst = decl_vty(target, &c.struct_layouts);
-            let src = static_vty(c, frame, expr);
+        Expr::Cast { expr, span, .. } => {
+            let dst = c.vty(e.ty());
+            let src = c.vty(expr.ty());
             let value = emit_expr(c, bcx, frame, expr)?;
             emit_convert(c, bcx, frame, *span, value, &src, &dst)
         }
-        Expr::Neg { expr, span } => {
+        Expr::Neg { expr, span, .. } => {
             let v = emit_expr(c, bcx, frame, expr)?;
-            let t = static_vty(c, frame, expr);
+            let t = c.vty(expr.ty());
             match t {
                 VTy::I(w) => {
                     let wt = cl_type(&VTy::I(w));
@@ -689,7 +690,7 @@ pub(crate) fn emit_expr<M: Module>(
             Ok(emit_bool_not(bcx, v))
         }
         Expr::BitNot { expr, .. } => {
-            let vty = static_vty(c, frame, expr);
+            let vty = c.vty(expr.ty());
             let v = emit_expr(c, bcx, frame, expr)?;
             emit_bit_not_typed(bcx, v, &vty)
         }
@@ -705,7 +706,9 @@ pub(crate) fn emit_expr<M: Module>(
             rhs,
             ..
         } => emit_short_circuit(c, bcx, frame, true, lhs, rhs),
-        Expr::Binary { op, lhs, rhs, span } => {
+        Expr::Binary {
+            op, lhs, rhs, span, ..
+        } => {
             let l = emit_expr(c, bcx, frame, lhs)?;
             let r = emit_expr(c, bcx, frame, rhs)?;
             emit_binary(c, bcx, frame, *op, lhs, l, r, *span)
@@ -716,27 +719,42 @@ pub(crate) fn emit_expr<M: Module>(
             else_expr,
             ..
         } => {
-            let expected = static_vty(c, frame, e);
+            let expected = c.vty(e.ty());
             emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, &expected)
         }
-        Expr::Call { callee, args, span } => emit_call(c, bcx, frame, callee, args, *span),
-        Expr::MethodCall {
-            recv,
-            name,
+        Expr::Call {
+            callee, args, span, ..
+        } => emit_call(
+            c,
+            bcx,
+            frame,
+            callee,
             args,
-            span,
-        } => emit_method_call(c, bcx, frame, recv, name, args, *span),
+            e.call_target()
+                .unwrap_or_else(|| invariant_violation("调用表达式必须携带已解析目标")),
+            *span,
+        ),
+        Expr::MethodCall {
+            recv, args, span, ..
+        } => {
+            let Some(CallTarget::Method(target)) = e.call_target() else {
+                invariant_violation("方法调用必须携带已解析目标")
+            };
+            emit_method_call(c, bcx, frame, recv, args, target, *span)
+        }
         Expr::Field { recv, name, .. } => {
             let p = emit_expr(c, bcx, frame, recv)?;
-            let fvty = field_vty(c, frame, recv, name)?;
-            let off = field_offset(c, frame, recv, name)?;
+            let fvty = field_vty(c, recv, name)?;
+            let off = field_offset(c, recv, name)?;
             let raw = bcx.ins().load(cl_type(&fvty), MemFlagsData::new(), p, off);
             Ok(norm_load(bcx, raw, &fvty))
         }
-        Expr::Index { recv, idx, span } => {
+        Expr::Index {
+            recv, idx, span, ..
+        } => {
             let array = emit_expr(c, bcx, frame, recv)?;
             let idxw = emit_expr(c, bcx, frame, idx)?;
-            let elem_vty = match static_vty(c, frame, recv) {
+            let elem_vty = match c.vty(recv.ty()) {
                 VTy::Array(inner) => (*inner).clone(),
                 _ => invariant_violation("下标主语为 array (sema 已校验)"),
             };
@@ -759,15 +777,16 @@ pub(crate) fn emit_expr<M: Module>(
             Ok(norm_load(bcx, raw, &elem_vty))
         }
         Expr::ArrayLit { elems, .. } => {
-            let elem_vty = elems
-                .first()
-                .map(|el| static_vty(c, frame, el))
-                .unwrap_or(VTy::Other);
+            let VTy::Array(elem_vty) = c.vty(e.ty()) else {
+                invariant_violation("数组字面量携带 array 类型")
+            };
             emit_array_lit_typed(c, bcx, frame, elems, &elem_vty)
         }
-        Expr::FuncLit { params, body, .. } => emit_funclit_value(c, bcx, frame, params, body),
+        Expr::FuncLit { params, body, .. } => {
+            emit_funclit_value(c, bcx, frame, params, body, e.ty())
+        }
         Expr::Match { subject, arms, .. } => {
-            let result_vty = static_vty(c, frame, e);
+            let result_vty = c.vty(e.ty());
             emit_match_typed(c, bcx, frame, subject, arms, &result_vty)
         }
         Expr::Propagate { expr, .. } => {
@@ -789,9 +808,9 @@ pub(crate) fn emit_expr<M: Module>(
 
             bcx.switch_to_block(ok_b);
             frame.terminated = false;
-            let pvty = match static_vty(c, frame, expr) {
-                VTy::Result(t, _) => vty_of_type_name(&c.struct_layouts, &t),
-                _ => VTy::Other,
+            let pvty = match c.vty(expr.ty()) {
+                VTy::Result(t, _) => *t,
+                _ => invariant_violation("? 操作数携带 result 类型"),
             };
             let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
             Ok(restore_word(bcx, raw, &pvty))
@@ -900,10 +919,14 @@ fn emit_match_typed<M: Module>(
     arms: &[MatchArm],
     result_vty: &VTy,
 ) -> AliasResult<Value> {
-    let subject_vty = static_vty(c, frame, subject);
+    let subject_vty = c.vty(subject.ty());
     let subj = emit_expr(c, bcx, frame, subject)?;
     let join_b = bcx.create_block();
-    let jv = bcx.append_block_param(join_b, types::I64);
+    let jv = if *result_vty == VTy::Unit {
+        None
+    } else {
+        Some(bcx.append_block_param(join_b, types::I64))
+    };
     let mut any_join = false;
 
     for (idx, arm) in arms.iter().enumerate() {
@@ -938,7 +961,10 @@ fn emit_match_typed<M: Module>(
         bcx.seal_block(join_b);
         bcx.switch_to_block(join_b);
         frame.terminated = false;
-        Ok(restore_word(bcx, jv, result_vty))
+        Ok(match jv {
+            Some(value) => restore_word(bcx, value, result_vty),
+            None => bcx.ins().iconst(types::I64, 0),
+        })
     } else {
         ensure_current(bcx, frame);
         Ok(bcx.ins().iconst(types::I64, 0))
@@ -982,22 +1008,27 @@ pub(crate) fn emit_expr_expected<M: Module>(
     expected: &VTy,
 ) -> AliasResult<Value> {
     match (e, expected) {
-        (Expr::Int(value, _), VTy::I(_) | VTy::U(_)) => {
+        (Expr::Int(value, ..), VTy::I(_) | VTy::U(_)) => {
             Ok(bcx.ins().iconst(types::I64, *value as i64))
         }
         (Expr::Neg { expr, .. }, VTy::I(_)) if matches!(expr.as_ref(), Expr::Int(..)) => {
-            let Expr::Int(magnitude, _) = expr.as_ref() else {
+            let Expr::Int(magnitude, ..) = expr.as_ref() else {
                 unreachable!()
             };
             Ok(bcx
                 .ins()
                 .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64))
         }
-        (Expr::Call { callee, args, span }, _) if is_contextual_conversion(callee) => {
+        (
+            Expr::Call {
+                args, span, info, ..
+            },
+            _,
+        ) if is_contextual_conversion(info) => {
             let [arg] = args.as_slice() else {
                 invariant_violation("from/try_from 元数 (sema 已校验)")
             };
-            let source = static_vty(c, frame, &arg.value);
+            let source = c.vty(arg.value.ty());
             if conversion_exists_vty(&source, expected) {
                 let value = emit_expr(c, bcx, frame, &arg.value)?;
                 emit_convert(c, bcx, frame, *span, value, &source, expected)
@@ -1017,7 +1048,12 @@ pub(crate) fn emit_expr_expected<M: Module>(
         (Expr::Match { subject, arms, .. }, _) => {
             emit_match_typed(c, bcx, frame, subject, arms, expected)
         }
-        (Expr::Binary { op, lhs, rhs, span }, _) if binary_vty_flows_expected(*op, expected) => {
+        (
+            Expr::Binary {
+                op, lhs, rhs, span, ..
+            },
+            _,
+        ) if binary_vty_flows_expected(*op, expected) => {
             let l = emit_expr_expected(c, bcx, frame, lhs, expected)?;
             let r = emit_expr_expected(c, bcx, frame, rhs, expected)?;
             emit_binary_values(c, bcx, frame, *op, expected, l, r, *span)
@@ -1029,18 +1065,17 @@ pub(crate) fn emit_expr_expected<M: Module>(
         (Expr::ArrayLit { elems, .. }, VTy::Array(elem)) => {
             emit_array_lit_typed(c, bcx, frame, elems, elem)
         }
-        (Expr::Call { callee, args, .. }, VTy::Result(ok, err)) => {
-            if let Expr::Ident(name, _) = callee.as_ref() {
-                if (name == "ok" || name == "err") && cell_addr(c, frame, name).is_none() {
-                    let payload = if name == "ok" {
-                        vty_of_type_name(&c.struct_layouts, ok)
-                    } else {
-                        vty_of_type_name(&c.struct_layouts, err)
-                    };
-                    return emit_result_ctor_typed(c, bcx, frame, name, args, &payload);
-                }
-            }
-            emit_expr(c, bcx, frame, e)
+        (Expr::Call { args, info, .. }, VTy::Result(ok, err))
+            if matches!(info.call_target, Some(CallTarget::ResultConstructor(_))) =>
+        {
+            let Some(CallTarget::ResultConstructor(kind)) = info.call_target.as_ref() else {
+                unreachable!()
+            };
+            let payload = match kind {
+                CtorKind::Ok => (**ok).clone(),
+                CtorKind::Err => (**err).clone(),
+            };
+            emit_result_ctor_typed(c, bcx, frame, *kind, args, &payload)
         }
         (Expr::Float(..), VTy::F(FloatW::F32)) => {
             let v = emit_expr(c, bcx, frame, e)?;
@@ -1050,13 +1085,18 @@ pub(crate) fn emit_expr_expected<M: Module>(
     }
 }
 
-fn is_contextual_conversion(callee: &Expr) -> bool {
-    matches!(callee, Expr::Ident(name, _) if name == "from" || name == "try_from")
+fn is_contextual_conversion(info: &ExprInfo) -> bool {
+    matches!(
+        info.call_target,
+        Some(CallTarget::Builtin(
+            BuiltinCall::From | BuiltinCall::TryFrom
+        ))
+    )
 }
 
 fn conversion_exists_vty(source: &VTy, target: &VTy) -> bool {
     (source.is_numeric() && target.is_numeric())
-        || (matches!(target, VTy::Str) && !matches!(source, VTy::Other | VTy::Unit))
+        || (matches!(target, VTy::Str) && !matches!(source, VTy::Unknown | VTy::Unit))
 }
 
 fn binary_vty_flows_expected(op: BinOp, expected: &VTy) -> bool {
@@ -1101,7 +1141,7 @@ fn emit_binary<M: Module>(
     r: Value,
     span: Span,
 ) -> AliasResult<Value> {
-    let lt = static_vty(c, frame, lhs);
+    let lt = c.vty(lhs.ty());
     emit_binary_values(c, bcx, frame, op, &lt, l, r, span)
 }
 
@@ -1358,8 +1398,8 @@ pub(crate) fn emit_match_arm<M: Module>(
             VTy::Result(ok, err),
         ) => {
             let bind_vty = match ctor {
-                CtorKind::Ok => vty_of_type_name(&c.struct_layouts, ok),
-                CtorKind::Err => vty_of_type_name(&c.struct_layouts, err),
+                CtorKind::Ok => (**ok).clone(),
+                CtorKind::Err => (**err).clone(),
             };
             let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
             let payload = restore_word(bcx, raw, &bind_vty);
@@ -1371,13 +1411,20 @@ pub(crate) fn emit_match_arm<M: Module>(
     let joined = match &arm.body {
         ArmBody::Value(e) => {
             let v = emit_expr_expected(c, bcx, frame, e, result_vty)?;
-            let word = storage_word(bcx, v, result_vty);
-            bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+            if *result_vty == VTy::Unit {
+                bcx.ins().jump(join_b, &[]);
+            } else {
+                let word = storage_word(bcx, v, result_vty);
+                bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+            }
             frame.terminated = true;
             true
         }
         ArmBody::Ret(e) => {
-            let expected = frame.ret_vty.clone().unwrap_or(VTy::Other);
+            let expected = frame
+                .ret_vty
+                .clone()
+                .unwrap_or_else(|| invariant_violation("return match 臂位于函数帧内"));
             let v = emit_expr_expected(c, bcx, frame, e, &expected)?;
             let v = coerce_ret(bcx, frame, v);
             let rb = frame
@@ -1406,9 +1453,13 @@ pub(crate) fn emit_match_arm<M: Module>(
             if frame.terminated {
                 false
             } else {
-                let v = tail.unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
-                let word = storage_word(bcx, v, result_vty);
-                bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                if *result_vty == VTy::Unit {
+                    bcx.ins().jump(join_b, &[]);
+                } else {
+                    let v = tail.unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
+                    let word = storage_word(bcx, v, result_vty);
+                    bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                }
                 frame.terminated = true;
                 true
             }
@@ -1422,7 +1473,7 @@ pub(crate) fn emit_str<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    parts: &[StrPartAst],
+    parts: &[StrPart],
 ) -> AliasResult<Value> {
     let z8 = bcx.ins().iconst(types::I64, 0);
     let z4 = bcx.ins().iconst(types::I32, 0);
@@ -1430,14 +1481,13 @@ pub(crate) fn emit_str<M: Module>(
     let mut acc = empty;
     for p in parts {
         let piece = match p {
-            StrPartAst::Lit(s) => str_literal_handle(c, bcx, s)?,
-            StrPartAst::Hole(h) => {
-                if matches!(h.as_ref(), Expr::Call { callee, .. } if is_contextual_conversion(callee))
-                {
+            StrPart::Lit(s) => str_literal_handle(c, bcx, s)?,
+            StrPart::Hole(h) => {
+                if matches!(h.as_ref(), Expr::Call { info, .. } if is_contextual_conversion(info)) {
                     emit_expr_expected(c, bcx, frame, h, &VTy::Str)?
                 } else {
                     let w = emit_expr(c, bcx, frame, h)?;
-                    display_word(c, bcx, frame, h, w)?
+                    display_word(c, bcx, h, w)?
                 }
             }
         };
@@ -1477,11 +1527,10 @@ pub(crate) fn str_literal_handle<M: Module>(
 pub(crate) fn display_word<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     e: &Expr,
     w: Value,
 ) -> AliasResult<Value> {
-    let vty = static_vty(c, frame, e);
+    let vty = c.vty(e.ty());
     display_typed(c, bcx, &vty, w, e.span())
 }
 
@@ -1511,7 +1560,7 @@ fn display_typed<M: Module>(
         }
         VTy::Str => c.call_rt(bcx, "alias.display.str", &[w]),
         VTy::Unit => Err(native_err(span, "内部: unit 无返回值表达式进入 display")),
-        VTy::Func(..) => c.call_rt(bcx, "alias.display.func", &[]),
+        VTy::Func(..) | VTy::FuncPoly => c.call_rt(bcx, "alias.display.func", &[]),
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[]),
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),
         VTy::Iterator(_) => str_literal_handle(c, bcx, "<iterator>"),
@@ -1520,7 +1569,7 @@ fn display_typed<M: Module>(
             let t = bcx.ins().ireduce(types::I32, tag);
             c.call_rt(bcx, "alias.display.result", &[t])
         }
-        VTy::Other => Err(native_err(span, "原生后端无法推断该表达式的显示类型")),
+        VTy::Unknown => Err(native_err(span, "原生后端无法发射未确定类型的显示值")),
     }
 }
 
@@ -1543,38 +1592,42 @@ pub(crate) fn emit_call<M: Module>(
     frame: &mut Frame,
     callee: &Expr,
     args: &[CallArg],
+    target: &CallTarget,
     span: Span,
 ) -> AliasResult<Value> {
-    if let Expr::Ident(name, _) = callee {
-        if name == "increase" || name == "decrease" {
-            return emit_incdec(c, bcx, frame, name, args, span);
+    match target {
+        CallTarget::Builtin(BuiltinCall::Increase) => {
+            emit_incdec(c, bcx, frame, "increase", args, span)
         }
-        if name == "println" || name == "print" {
-            return emit_print(c, bcx, frame, name, args, span);
+        CallTarget::Builtin(BuiltinCall::Decrease) => {
+            emit_incdec(c, bcx, frame, "decrease", args, span)
         }
-        if name == "typeof" {
+        CallTarget::Builtin(BuiltinCall::Print) => emit_print(c, bcx, frame, "print", args, span),
+        CallTarget::Builtin(BuiltinCall::Println) => {
+            emit_print(c, bcx, frame, "println", args, span)
+        }
+        CallTarget::Builtin(BuiltinCall::Typeof) => {
             let [arg] = args else {
                 invariant_violation("typeof 元数 (sema 已校验)")
             };
-            let tn = static_vty(c, frame, &arg.value).display_name();
-            return str_literal_handle(c, bcx, &tn);
+            let tn = c.vty(arg.value.ty()).display_name();
+            str_literal_handle(c, bcx, &tn)
         }
+        CallTarget::Builtin(BuiltinCall::From | BuiltinCall::TryFrom) => {
+            invariant_violation("上下文转换必须由带目标类型的发射入口处理")
+        }
+        CallTarget::StructConstructor(name) => emit_construct(c, bcx, frame, name, args),
+        CallTarget::ResultConstructor(kind) => emit_result_ctor(c, bcx, frame, *kind, args),
+        CallTarget::FunctionValue => {
+            let callee_vty = c.vty(callee.ty());
+            let VTy::Func(param_vtys, ret_vty) = callee_vty else {
+                invariant_violation("函数值调用必须携带完整函数签名")
+            };
+            let clo = emit_expr(c, bcx, frame, callee)?;
+            call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
+        }
+        CallTarget::Method(_) => invariant_violation("普通调用不能携带方法目标"),
     }
-    if let Expr::Ident(name, _) = callee {
-        if c.struct_layouts.contains_key(name) && cell_addr(c, frame, name).is_none() {
-            return emit_construct(c, bcx, frame, name, args);
-        }
-        if (name == "ok" || name == "err") && cell_addr(c, frame, name).is_none() {
-            return emit_result_ctor(c, bcx, frame, name, args);
-        }
-    }
-
-    let callee_vty = static_vty(c, frame, callee);
-    let VTy::Func(param_vtys, ret_vty) = callee_vty else {
-        return Err(native_err(span, "被调方缺少可调用函数签名"));
-    };
-    let clo = emit_expr(c, bcx, frame, callee)?;
-    call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
 }
 
 fn call_closure<M: Module>(
@@ -1813,38 +1866,35 @@ pub(crate) fn emit_result_ctor<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    name: &str,
+    kind: CtorKind,
     args: &[CallArg],
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(
-            Span::default(),
-            format!("{name} 构造恰好接受 1 个参数"),
-        ));
+        invariant_violation("result 构造元数 (sema 已校验)")
     };
-    let pvty = static_vty(c, frame, &arg.value);
-    emit_result_ctor_typed(c, bcx, frame, name, args, &pvty)
+    let pvty = c.vty(arg.value.ty());
+    emit_result_ctor_typed(c, bcx, frame, kind, args, &pvty)
 }
 
 fn emit_result_ctor_typed<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    name: &str,
+    kind: CtorKind,
     args: &[CallArg],
     pvty: &VTy,
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(
-            Span::default(),
-            format!("{name} 构造恰好接受 1 个参数"),
-        ));
+        invariant_violation("result 构造元数 (sema 已校验)")
     };
     let payload = emit_expr_expected(c, bcx, frame, &arg.value, pvty)?;
     let pw = storage_word(bcx, payload, pvty);
     let n2 = bcx.ins().iconst(types::I32, 2);
     let blk = c.call_rt(bcx, "alias.env.new", &[n2])?;
-    let tag = if name == "ok" { 0i64 } else { 1i64 };
+    let tag = match kind {
+        CtorKind::Ok => 0i64,
+        CtorKind::Err => 1i64,
+    };
     let tagw = bcx.ins().iconst(types::I64, tag);
     bcx.ins().store(MemFlagsData::new(), tagw, blk, 0);
     bcx.ins().store(MemFlagsData::new(), pw, blk, 8);
@@ -1856,149 +1906,132 @@ pub(crate) fn emit_method_call<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     recv: &Expr,
-    name: &str,
     args: &[CallArg],
+    target: &MethodTarget,
     span: Span,
 ) -> AliasResult<Value> {
     let rv = emit_expr(c, bcx, frame, recv)?;
-    let svt = static_vty(c, frame, recv);
+    let svt = c.vty(recv.ty());
 
-    if svt.is_numeric() {
-        let op = match name {
-            "plus" => Some(BinOp::Add),
-            "minus" => Some(BinOp::Sub),
-            "times" => Some(BinOp::Mul),
-            "div" => Some(BinOp::Div),
-            _ => None,
-        };
-        if let Some(op) = op {
+    match target {
+        MethodTarget::Numeric(op) => {
             let [arg] = args else {
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
             };
             let r = emit_expr_expected(c, bcx, frame, &arg.value, &svt)?;
-            return emit_binary_values(c, bcx, frame, op, &svt, rv, r, span);
+            emit_binary_values(c, bcx, frame, *op, &svt, rv, r, span)
         }
-    }
-    if svt == VTy::Bool && name == "not" {
-        if !args.is_empty() {
-            invariant_violation("not 扩展函数元数 (sema 已校验)");
-        }
-        return Ok(emit_bool_not(bcx, rv));
-    }
-
-    if let VTy::Array(elem) = &svt {
-        match name {
-            "len" => {
-                let raw = array_raw(bcx, rv);
-                let t = c.call_rt(bcx, "alias.arr.len", &[raw])?;
-                return Ok(bcx.ins().sextend(types::I64, t));
+        MethodTarget::BoolNot => {
+            if !args.is_empty() {
+                invariant_violation("not 扩展函数元数 (sema 已校验)");
             }
-            "push" => {
-                let [a] = args else {
-                    invariant_violation("push 元数 (sema 已校验)")
-                };
-                let v = emit_expr_expected(c, bcx, frame, &a.value, elem)?;
-                let sw = storage_word(bcx, v, elem);
-                let raw = array_raw(bcx, rv);
-                c.call_rt(bcx, "alias.arr.push", &[raw, sw])?;
-                bump_array_version(bcx, rv);
+            Ok(emit_bool_not(bcx, rv))
+        }
+        MethodTarget::StringLen => {
+            let t = c.call_rt(bcx, "alias.str.len", &[rv])?;
+            Ok(bcx.ins().sextend(types::I64, t))
+        }
+        MethodTarget::StringUpper => c.call_rt(bcx, "alias.str.upper", &[rv]),
+        MethodTarget::StringLower => c.call_rt(bcx, "alias.str.lower", &[rv]),
+        MethodTarget::StringTrim => c.call_rt(bcx, "alias.str.trim", &[rv]),
+        MethodTarget::ArrayLen => {
+            let VTy::Array(_) = &svt else {
+                invariant_violation("array.len 目标必须保留数组类型")
+            };
+            let raw = array_raw(bcx, rv);
+            let t = c.call_rt(bcx, "alias.arr.len", &[raw])?;
+            Ok(bcx.ins().sextend(types::I64, t))
+        }
+        MethodTarget::ArrayPush => {
+            let VTy::Array(elem) = &svt else {
+                invariant_violation("array.push 目标必须保留数组类型")
+            };
+            let [arg] = args else {
+                invariant_violation("push 元数 (sema 已校验)")
+            };
+            let value = emit_expr_expected(c, bcx, frame, &arg.value, elem)?;
+            let word = storage_word(bcx, value, elem);
+            let raw = array_raw(bcx, rv);
+            c.call_rt(bcx, "alias.arr.push", &[raw, word])?;
+            bump_array_version(bcx, rv);
+            Ok(bcx.ins().iconst(types::I64, 0))
+        }
+        MethodTarget::ArrayPop => {
+            let VTy::Array(elem) = &svt else {
+                invariant_violation("array.pop 目标必须保留数组类型")
+            };
+            let raw = array_raw(bcx, rv);
+            let len = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 8);
+            let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
+            let span_id = new_span_id(c, span);
+            let abort_b = bcx.create_block();
+            let ok_b = bcx.create_block();
+            bcx.ins().brif(empty, abort_b, &[], ok_b, &[]);
+            bcx.seal_block(abort_b);
+            bcx.seal_block(ok_b);
+            bcx.switch_to_block(abort_b);
+            let aid = bcx.ins().iconst(types::I32, span_id as i64);
+            c.call_rt(bcx, "alias.abort_pop", &[aid])?;
+            jump_zero_return(bcx, frame);
+            bcx.switch_to_block(ok_b);
+            let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
+            bump_array_version(bcx, rv);
+            Ok(restore_word(bcx, raw_value, elem))
+        }
+        MethodTarget::ArrayIterator => {
+            let VTy::Array(_) = &svt else {
+                invariant_violation("array.iterator 目标必须保留数组类型")
+            };
+            make_iterator(c, bcx, rv)
+        }
+        MethodTarget::User { receiver, name } => {
+            let receiver_vty = c.vty(receiver);
+            if receiver_vty != svt {
+                invariant_violation("已解析方法接收者与表达式静态类型一致")
+            }
+            let key = (receiver_vty.display_name(), name.clone());
+            let (param_vtys, ret_vty) = c
+                .method_sigs
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| invariant_violation("已解析用户方法必须存在于方法表"));
+            let fid = *c
+                .methods
+                .get(&key)
+                .unwrap_or_else(|| invariant_violation("已解析用户方法必须存在函数 ID"));
+            let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
+            let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
+            words.push(bcx.use_var(frame.globals));
+            words.push(bcx.ins().iconst(types::I64, 0));
+            words.push(norm_store(bcx, rv, &param_vtys[0]));
+            for (arg, param) in args.iter().zip(param_vtys.iter().skip(1)) {
+                let value = emit_expr_expected(c, bcx, frame, &arg.value, param)?;
+                words.push(norm_store(bcx, value, param));
+            }
+            let inst = bcx.ins().call(fref, &words);
+            if ret_vty == VTy::Unit {
                 return Ok(bcx.ins().iconst(types::I64, 0));
             }
-            "pop" => {
-                let raw = array_raw(bcx, rv);
-                let len = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 8);
-                let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
-                let span_id = new_span_id(c, span);
-                let abort_b = bcx.create_block();
-                let ok_b = bcx.create_block();
-                bcx.ins().brif(empty, abort_b, &[], ok_b, &[]);
-                bcx.seal_block(abort_b);
-                bcx.seal_block(ok_b);
-                bcx.switch_to_block(abort_b);
-                let aid = bcx.ins().iconst(types::I32, span_id as i64);
-                c.call_rt(bcx, "alias.abort_pop", &[aid])?;
-                jump_zero_return(bcx, frame);
-                bcx.switch_to_block(ok_b);
-                let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
-                bump_array_version(bcx, rv);
-                return Ok(restore_word(bcx, raw_value, elem));
-            }
-            "iterator" => return make_iterator(c, bcx, rv),
-            _ => {}
+            let raw = first_result(bcx, inst);
+            Ok(norm_load(bcx, raw, &ret_vty))
         }
     }
-
-    let tname = match &svt {
-        VTy::Other | VTy::Unit => {
-            return Err(native_err(span, "原生后端无法推断该表达式的接收者类型"))
-        }
-        other => other.display_name(),
-    };
-    if let Some((param_vtys, ret_vty)) = c
-        .method_sigs
-        .get(&(tname.clone(), name.to_string()))
-        .cloned()
-    {
-        let fid = c.methods[&(tname.clone(), name.to_string())];
-        let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
-        let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
-        words.push(bcx.use_var(frame.globals));
-        words.push(bcx.ins().iconst(types::I64, 0));
-        words.push(norm_store(bcx, rv, &param_vtys[0]));
-        for (a, pt) in args.iter().zip(param_vtys.iter().skip(1)) {
-            let v = emit_expr_expected(c, bcx, frame, &a.value, pt)?;
-            words.push(norm_store(bcx, v, pt));
-        }
-        let inst = bcx.ins().call(fref, &words);
-        if ret_vty == VTy::Unit {
-            return Ok(bcx.ins().iconst(types::I64, 0));
-        }
-        let raw = first_result(bcx, inst);
-        return Ok(norm_load(bcx, raw, &ret_vty));
-    }
-    if tname == "string" {
-        match name {
-            "len" => {
-                let t = c.call_rt(bcx, "alias.str.len", &[rv])?;
-                return Ok(bcx.ins().sextend(types::I64, t));
-            }
-            "upper" => return c.call_rt(bcx, "alias.str.upper", &[rv]),
-            "lower" => return c.call_rt(bcx, "alias.str.lower", &[rv]),
-            "trim" => return c.call_rt(bcx, "alias.str.trim", &[rv]),
-            _ => {}
-        }
-    }
-    Err(native_err(
-        span,
-        format!("类型 {tname} 上没有方法 '{name}'"),
-    ))
 }
 
 pub(crate) fn field_offset<M: Module>(
     c: &Compiler<M>,
-    frame: &Frame,
     recv: &Expr,
     field: &str,
 ) -> AliasResult<i32> {
-    Ok(field_entry(c, frame, recv, field)?.1)
+    Ok(field_entry(c, recv, field)?.1)
 }
 
-pub(crate) fn field_vty<M: Module>(
-    c: &Compiler<M>,
-    frame: &Frame,
-    recv: &Expr,
-    field: &str,
-) -> AliasResult<VTy> {
-    Ok(field_entry(c, frame, recv, field)?.0)
+pub(crate) fn field_vty<M: Module>(c: &Compiler<M>, recv: &Expr, field: &str) -> AliasResult<VTy> {
+    Ok(field_entry(c, recv, field)?.0)
 }
 
-fn field_entry<M: Module>(
-    c: &Compiler<M>,
-    frame: &Frame,
-    recv: &Expr,
-    field: &str,
-) -> AliasResult<(VTy, i32)> {
-    if let VTy::Struct(s) = static_vty(c, frame, recv) {
+fn field_entry<M: Module>(c: &Compiler<M>, recv: &Expr, field: &str) -> AliasResult<(VTy, i32)> {
+    if let VTy::Struct(s) = c.vty(recv.ty()) {
         if let Some(layout) = c.struct_layouts.get(&s) {
             if let Some(entry) = layout.fields.iter().find(|entry| entry.name == field) {
                 return Ok((entry.vty.clone(), entry.offset));
@@ -2019,13 +2052,13 @@ pub(crate) fn emit_incdec<M: Module>(
     let [arg] = args else {
         return Err(native_err(span, format!("{name} 恰好接受 1 个参数")));
     };
-    let Expr::Ident(target, tspan) = &arg.value else {
+    let Expr::Ident(target, tspan, _) = &arg.value else {
         return Err(native_err(span, format!("{name} 的参数必须是可变绑定名")));
     };
     let Some(addr) = cell_addr(c, frame, target) else {
         return Err(native_err(*tspan, format!("'{target}' 未定义")));
     };
-    let vty = vty_of_name(c, frame, target);
+    let vty = bound_vty(c, frame, target);
     if !vty.is_numeric() {
         invariant_violation("increase/decrease 目标为数值绑定 (sema 已校验)");
     }
@@ -2057,7 +2090,7 @@ pub(crate) fn emit_print<M: Module>(
         return Err(native_err(span, format!("{name} 恰好接受 1 个参数")));
     };
     let v = emit_expr(c, bcx, frame, &arg.value)?;
-    match static_vty(c, frame, &arg.value) {
+    match c.vty(arg.value.ty()) {
         VTy::I(IntW::W32) | VTy::U(UIntW::U8) | VTy::U(UIntW::U16) => {
             let t = bcx.ins().ireduce(types::I32, v);
             let h = if name == "println" {
@@ -2068,7 +2101,7 @@ pub(crate) fn emit_print<M: Module>(
             c.call_rt(bcx, h, &[t])?;
         }
         _ => {
-            let s = display_word(c, bcx, frame, &arg.value, v)?;
+            let s = display_word(c, bcx, &arg.value, v)?;
             let h = if name == "println" {
                 "alias.println.str"
             } else {
