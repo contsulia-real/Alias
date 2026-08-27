@@ -79,6 +79,35 @@ impl Parser {
                 let value = self.parse_expr()?;
                 Ok(Stmt::Assign { target: "self".into(), value, span })
             }
+            // `println f 0` / `print f 'x'`：外层输出内建的唯一实参可以是
+            // 一个完整的普通无括号单参调用。只在第二个标识符后确实存在
+            // 普通无括号实参起始 token 时启用，因此 `println x + 1` 以及
+            // `dup 5 + 1` 的既有“无括号绑定紧于二元运算”规则完全不变。
+            Some(Tok::Ident(name))
+                if matches!(name.as_str(), "println" | "print")
+                    && matches!(self.peek_at(1), Some(Tok::Ident(_)))
+                    && matches!(
+                        self.peek_at(2),
+                        Some(Tok::Int(_))
+                            | Some(Tok::Float(_))
+                            | Some(Tok::Bool(_))
+                            | Some(Tok::Str(_))
+                            | Some(Tok::LParen)
+                            | Some(Tok::LBracket)
+                    ) =>
+            {
+                let outer_name = self.expect_ident()?;
+                let inner = self.parse_expr()?;
+                let inner_span = inner.span();
+                Ok(Stmt::ExprStmt {
+                    expr: Expr::Call {
+                        callee: Box::new(Expr::Ident(outer_name, span)),
+                        args: vec![CallArg { label: None, value: inner, span: inner_span }],
+                        span,
+                    },
+                    span,
+                })
+            }
             Some(_) => {
                 let expr = self.parse_expr()?;
                 if self.peek() == Some(&Tok::Assign) {

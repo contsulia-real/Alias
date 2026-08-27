@@ -124,8 +124,16 @@ impl Checker {
             }
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.expr(lhs, env)?;
-                // && / || 在运行时短路，但静态期仍检查右侧类型。
-                let r = self.expr(rhs, env)?;
+                // 已知整数左操作数为 RHS 整数字面量提供目标槽类型。
+                // 仅字面量参与，不放宽变量/表达式之间的隐式混算。
+                let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
+                    match literal_slot_unify(&l, rhs) {
+                        Some(r) => r?,
+                        None => self.expr(rhs, env)?,
+                    }
+                } else {
+                    self.expr(rhs, env)?
+                };
                 self.binary(*op, l, r, *span)
             }
             Expr::Ternary { cond, then_expr, else_expr, span } => {

@@ -5,7 +5,7 @@ mod exprs;
 mod stmts;
 pub(crate) mod types;
 
-use crate::ast::{BinOp, Binding, Expr, Item, Program};
+use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -98,6 +98,25 @@ pub fn check(program: &Program) -> AliasResult<()> {
                 if b.receiver.is_some() {
                     ck.method_def(b, &top)?;
                 } else {
+                    // 顶层命名函数在检查自己的函数体之前先登记完整签名。
+                    // 只让“当前函数自引用”提前可见，不开启后续声明的前向引用。
+                    if b.kind == BindKind::Func {
+                        if let Expr::FuncLit { params, .. } = &b.value {
+                            let ret = types::check_type_slot(&b.ty, b.span, &ck.structs)?;
+                            let mut ptys = Vec::with_capacity(params.len());
+                            for p in params {
+                                ptys.push(types::check_type_slot(&p.ty, p.span, &ck.structs)?);
+                            }
+                            Scope::insert(
+                                &top,
+                                b.name.clone(),
+                                VarInfo {
+                                    ty: Ty::Func { params: ptys, ret: Box::new(ret) },
+                                    mutable: false,
+                                },
+                            );
+                        }
+                    }
                     ck.bind(b, &top)?;
                 }
             }
