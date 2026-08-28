@@ -95,44 +95,116 @@ impl MethodInfo {
     }
 }
 
-fn builtin_method(receiver: &Ty, name: &str) -> Option<MethodInfo> {
-    let (params, ret, target) = match receiver {
-        ty if ty.is_numeric() => {
-            let op = match name {
-                "plus" => BinOp::Add,
-                "minus" => BinOp::Sub,
-                "times" => BinOp::Mul,
-                "div" => BinOp::Div,
-                _ => return None,
-            };
-            (vec![ty.clone()], ty.clone(), MethodTarget::Numeric(op))
+#[derive(Clone)]
+struct BuiltinMethodSpec {
+    name: &'static str,
+    params: Vec<Ty>,
+    ret: Ty,
+    target: MethodTarget,
+}
+
+impl BuiltinMethodSpec {
+    fn into_method_info(self) -> MethodInfo {
+        MethodInfo::Builtin {
+            params: self.params,
+            ret: self.ret,
+            target: self.target,
         }
-        Ty::Bool if name == "not" => (vec![], Ty::Bool, MethodTarget::BoolNot),
-        Ty::Str => match name {
-            "len" => (vec![], Ty::Int(IntW::W32), MethodTarget::StringLen),
-            "upper" => (vec![], Ty::Str, MethodTarget::StringUpper),
-            "lower" => (vec![], Ty::Str, MethodTarget::StringLower),
-            "trim" => (vec![], Ty::Str, MethodTarget::StringTrim),
-            _ => return None,
-        },
-        Ty::Array(elem) => match name {
-            "len" => (vec![], Ty::Int(IntW::W32), MethodTarget::ArrayLen),
-            "push" => (vec![(**elem).clone()], Ty::Unit, MethodTarget::ArrayPush),
-            "pop" => (vec![], (**elem).clone(), MethodTarget::ArrayPop),
-            "iterator" => (
+    }
+}
+
+/// 内建方法的唯一静态契约 owner。
+///
+/// 名字解析和 resolved-HIR 最终校验都从这同一组 spec 查询；新增方法若只改调用解析
+/// 而漏改验证器，或反过来，都会重新制造两个静态语义真相源。
+fn builtin_method_specs(receiver: &Ty) -> Vec<BuiltinMethodSpec> {
+    let spec = |name, params, ret, target| BuiltinMethodSpec {
+        name,
+        params,
+        ret,
+        target,
+    };
+    match receiver {
+        ty if ty.is_numeric() => vec![
+            spec(
+                "plus",
+                vec![ty.clone()],
+                ty.clone(),
+                MethodTarget::Numeric(BinOp::Add),
+            ),
+            spec(
+                "minus",
+                vec![ty.clone()],
+                ty.clone(),
+                MethodTarget::Numeric(BinOp::Sub),
+            ),
+            spec(
+                "times",
+                vec![ty.clone()],
+                ty.clone(),
+                MethodTarget::Numeric(BinOp::Mul),
+            ),
+            spec(
+                "div",
+                vec![ty.clone()],
+                ty.clone(),
+                MethodTarget::Numeric(BinOp::Div),
+            ),
+        ],
+        Ty::Bool => vec![spec("not", vec![], Ty::Bool, MethodTarget::BoolNot)],
+        Ty::Str => vec![
+            spec(
+                "len",
+                vec![],
+                Ty::Int(IntW::W32),
+                MethodTarget::StringLen,
+            ),
+            spec("upper", vec![], Ty::Str, MethodTarget::StringUpper),
+            spec("lower", vec![], Ty::Str, MethodTarget::StringLower),
+            spec("trim", vec![], Ty::Str, MethodTarget::StringTrim),
+        ],
+        Ty::Array(elem) => vec![
+            spec(
+                "len",
+                vec![],
+                Ty::Int(IntW::W32),
+                MethodTarget::ArrayLen,
+            ),
+            spec(
+                "push",
+                vec![(**elem).clone()],
+                Ty::Unit,
+                MethodTarget::ArrayPush,
+            ),
+            spec(
+                "pop",
+                vec![],
+                (**elem).clone(),
+                MethodTarget::ArrayPop,
+            ),
+            spec(
+                "iterator",
                 vec![],
                 Ty::Iterator(elem.clone()),
                 MethodTarget::ArrayIterator,
             ),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    Some(MethodInfo::Builtin {
-        params,
-        ret,
-        target,
-    })
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn builtin_method(receiver: &Ty, name: &str) -> Option<MethodInfo> {
+    builtin_method_specs(receiver)
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .map(BuiltinMethodSpec::into_method_info)
+}
+
+fn builtin_method_by_target(receiver: &Ty, target: &MethodTarget) -> Option<MethodInfo> {
+    builtin_method_specs(receiver)
+        .into_iter()
+        .find(|spec| &spec.target == target)
+        .map(BuiltinMethodSpec::into_method_info)
 }
 
 fn ensure_user_lexical_name(name: &str, span: Span) -> AliasResult<()> {
@@ -194,7 +266,7 @@ struct Checker {
     loop_depth: usize,
     main: Option<(BindingId, Ty, Span)>,
     structs: HashMap<String, StructInfo>,
-    /// 这里只保存用户方法。内建方法由 builtin_method() 这一 owner 按接收者类型解析。
+    /// 这里只保存用户方法；内建方法统一来自 builtin_method_specs()。
     methods: HashMap<String, HashMap<String, MethodInfo>>,
 
     next_binding_id: u32,
