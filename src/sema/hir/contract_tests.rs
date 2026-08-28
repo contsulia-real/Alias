@@ -49,7 +49,7 @@ fn resolved_hir_rejects_constructor_arg_type_drift() {
     };
     info.ty = Ty::Str;
 
-    let error = super::validate::validate_resolved_hir(&program)
+    let error = super::validate_resolved_hir(&program)
         .expect_err("constructor arg type drift must fail the final HIR gate");
     assert!(
         error
@@ -88,7 +88,7 @@ fn resolved_hir_rejects_missing_required_constructor_field() {
     args.pop();
     indices.pop();
 
-    let error = super::validate::validate_resolved_hir(&program)
+    let error = super::validate_resolved_hir(&program)
         .expect_err("missing required field must fail the final HIR gate");
     assert!(
         error.msg.contains("结构体构造 target 遗漏无默认值字段"),
@@ -116,12 +116,101 @@ fn resolved_hir_rejects_field_result_type_drift() {
         .expect("fixture must contain field access");
     info.ty = Ty::Str;
 
-    let error = super::validate::validate_resolved_hir(&program)
+    let error = super::validate_resolved_hir(&program)
         .expect_err("field result type drift must fail the final HIR gate");
     assert!(
         error
             .msg
             .contains("字段表达式类型与已解析字段声明不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_duplicate_binding_id() {
+    let mut program = checked(
+        "val i32 left = 1\nval i32 right = 2\nfunc i32 main = () -> return left + right\n",
+    );
+    let left_id = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "left" => Some(binding.binding_id),
+            _ => None,
+        })
+        .expect("left binding");
+    let right = program
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "right" => Some(binding),
+            _ => None,
+        })
+        .expect("right binding");
+    right.binding_id = left_id;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("duplicate BindingId must fail the final HIR gate");
+    assert!(error.msg.contains("BindingId 重复"), "实际: {}", error.msg);
+}
+
+#[test]
+fn final_hir_gate_rejects_ident_type_drift_from_binding_id() {
+    let mut program = checked("val i32 value = 7\nfunc i32 main = () -> return value\n");
+    let Body::Single(stmt) = main_body(&mut program) else {
+        panic!("fixture main must use single-statement body")
+    };
+    let Stmt::Return {
+        value: Some(Expr::Ident(_, Some(_), _, info)),
+    } = stmt.as_mut()
+    else {
+        panic!("fixture must return resolved ident")
+    };
+    info.ty = Ty::Str;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("Ident type drift must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("Ident 静态类型与 BindingId 声明类型不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_assign_target_type_drift() {
+    let mut program = checked(
+        "val string text = 'x'\nfunc i32 main = () -> {\n    var i32 n = 0\n    n = 1\n    return n\n}\n",
+    );
+    let text_id = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "text" => Some(binding.binding_id),
+            _ => None,
+        })
+        .expect("text binding");
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let target_id = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Assign { target_id, .. } => Some(target_id),
+            _ => None,
+        })
+        .expect("fixture must contain assignment");
+    *target_id = text_id;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("Assign target type drift must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("Assign RHS 类型与 BindingId 声明类型不一致"),
         "实际: {}",
         error.msg
     );
