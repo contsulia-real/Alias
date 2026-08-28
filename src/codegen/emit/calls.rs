@@ -6,8 +6,11 @@ use super::strings::display_word;
 use crate::codegen::abi::{
     norm_load, norm_store, restore_word, storage_word, user_signature, VTy,
 };
-use crate::codegen::layout::{ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
-use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
+use crate::codegen::layout::{
+    ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET,
+    RESULT_TAG_OFFSET, RESULT_WORDS,
+};
+use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget};
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
@@ -130,15 +133,17 @@ pub(crate) fn emit_result_ctor<M: Module>(
     let pvty = c.vty(arg.value.ty());
     let payload = emit_expr(c, bcx, frame, &arg.value)?;
     let pw = storage_word(bcx, payload, &pvty);
-    let n2 = bcx.ins().iconst(types::I32, 2);
-    let blk = c.call_rt(bcx, "alias.env.new", &[n2])?;
+    let words = bcx.ins().iconst(types::I32, RESULT_WORDS);
+    let blk = c.call_rt(bcx, "alias.env.new", &[words])?;
     let tag = match kind {
         CtorKind::Ok => 0i64,
         CtorKind::Err => 1i64,
     };
     let tagw = bcx.ins().iconst(types::I64, tag);
-    bcx.ins().store(MemFlagsData::new(), tagw, blk, 0);
-    bcx.ins().store(MemFlagsData::new(), pw, blk, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), tagw, blk, RESULT_TAG_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), pw, blk, RESULT_PAYLOAD_OFFSET);
     Ok(blk)
 }
 
