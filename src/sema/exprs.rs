@@ -8,5 +8,5 @@ mod match_expr;
 mod operators;
 mod typing;
 
-pub(super) use operators::require_value;
+pub(super) use operators::{binary_result_type, conversion_exists, require_value};
 pub(super) use typing::ExprCheckError;
