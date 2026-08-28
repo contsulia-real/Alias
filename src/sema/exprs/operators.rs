@@ -1,4 +1,8 @@
-use super::*;
+use super::typing::{ExprCheckError, ExprCheckResult};
+use crate::ast::{BinOp, Expr};
+use crate::sema::types::{int_literal_fits, Ty};
+use crate::sema::{op_mismatch, Checker};
+use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
     pub(super) fn binary(&mut self, op: BinOp, l: Ty, r: Ty, span: Span) -> AliasResult<Ty> {
