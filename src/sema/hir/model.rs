@@ -141,11 +141,14 @@ pub(crate) struct CallArg {
 pub(crate) enum BuiltinCall {
     Print,
     Println,
-    Typeof,
-    From,
-    TryFrom,
     Increase,
     Decrease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedConversion {
+    Convert,
+    Identity,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +180,8 @@ pub(crate) enum CallTarget {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExprInfo {
+    /// sema 已完成全部目标类型传播后的最终静态类型。backend 只能消费该结果，
+    /// 不得再次根据运算符、上下文或源码名字决定子表达式应采用什么类型。
     pub(crate) ty: Ty,
 }
 
@@ -210,6 +215,18 @@ pub(crate) enum Expr {
     This(Span, ExprInfo),
     Cast {
         expr: Box<Expr>,
+        span: Span,
+        info: ExprInfo,
+    },
+    Convert {
+        expr: Box<Expr>,
+        mode: ResolvedConversion,
+        span: Span,
+        info: ExprInfo,
+    },
+    Typeof {
+        expr: Box<Expr>,
+        type_name: String,
         span: Span,
         info: ExprInfo,
     },
@@ -304,6 +321,8 @@ impl Expr {
             | Self::Ident(_, _, _, info)
             | Self::This(_, info) => info,
             Self::Cast { info, .. }
+            | Self::Convert { info, .. }
+            | Self::Typeof { info, .. }
             | Self::Binary { info, .. }
             | Self::Neg { info, .. }
             | Self::Not { info, .. }
@@ -333,6 +352,8 @@ impl Expr {
             | Self::Ident(_, _, span, _)
             | Self::This(span, _) => *span,
             Self::Cast { span, .. }
+            | Self::Convert { span, .. }
+            | Self::Typeof { span, .. }
             | Self::Binary { span, .. }
             | Self::Neg { span, .. }
             | Self::Not { span, .. }
