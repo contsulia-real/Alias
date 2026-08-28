@@ -1,11 +1,10 @@
-use super::{
-    builtin_method, require_value, Checker, Env, ExprCheckError, MethodInfo, Scope,
-};
+use super::operators::require_value;
+use super::typing::ExprCheckError;
 use crate::ast::{CallArg, CtorKind, Expr};
-use crate::builtins::is_result_constructor;
+use crate::builtins::{classify_call_builtin, is_result_constructor, CallBuiltinName};
 use crate::sema::hir::{BuiltinCall, MethodTarget};
-use crate::sema::types::{Ty};
-use crate::sema::LowerCallTarget;
+use crate::sema::types::Ty;
+use crate::sema::{builtin_method, Checker, Env, LowerCallTarget, MethodInfo, Scope};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
@@ -33,53 +32,57 @@ impl Checker {
             }
         }
         if let Expr::Ident(name, _) = callee {
-            match name.as_str() {
-                "increase" | "decrease" => {
-                    return Err(AliasError {
-                        msg: format!("{name} 只能作为独立语句使用"),
-                        span,
-                    });
-                }
-                "println" | "print" => {
-                    let [arg] = args else {
+            if let Some(builtin) = classify_call_builtin(name) {
+                match builtin {
+                    CallBuiltinName::Increase | CallBuiltinName::Decrease => {
                         return Err(AliasError {
-                            msg: format!("{name} 恰好接受 1 个参数"),
+                            msg: format!("{name} 只能作为独立语句使用"),
                             span,
-                        });
-                    };
-                    require_value(self.expr(&arg.value, env)?, arg.value.span())?;
-                    return Ok(Ty::Unit);
-                }
-                "from" | "try_from" => {
-                    let [arg] = args else {
-                        return Err(AliasError {
-                            msg: format!("{name} 恰好接受 1 个参数"),
-                            span,
-                        });
-                    };
-                    require_value(self.expr(&arg.value, env)?, arg.value.span())?;
-                    return Err(AliasError {
-                        msg: format!("{name} 需要目标类型上下文"),
-                        span,
-                    });
-                }
-                "typeof" => {
-                    let [arg] = args else {
-                        return Err(AliasError {
-                            msg: "typeof 恰好接受 1 个参数".into(),
-                            span,
-                        });
-                    };
-                    let t = require_value(self.expr_raw_callable(&arg.value, env)?, arg.value.span())?;
-                    if t.contains_unknown() {
-                        return Err(AliasError {
-                            msg: "typeof 无法确定实参的静态类型".into(),
-                            span: arg.value.span(),
                         });
                     }
-                    return Ok(Ty::Str);
+                    CallBuiltinName::Print | CallBuiltinName::Println => {
+                        let [arg] = args else {
+                            return Err(AliasError {
+                                msg: format!("{name} 恰好接受 1 个参数"),
+                                span,
+                            });
+                        };
+                        require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                        return Ok(Ty::Unit);
+                    }
+                    CallBuiltinName::From | CallBuiltinName::TryFrom => {
+                        let [arg] = args else {
+                            return Err(AliasError {
+                                msg: format!("{name} 恰好接受 1 个参数"),
+                                span,
+                            });
+                        };
+                        require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                        return Err(AliasError {
+                            msg: format!("{name} 需要目标类型上下文"),
+                            span,
+                        });
+                    }
+                    CallBuiltinName::Typeof => {
+                        let [arg] = args else {
+                            return Err(AliasError {
+                                msg: "typeof 恰好接受 1 个参数".into(),
+                                span,
+                            });
+                        };
+                        let t = require_value(
+                            self.expr_raw_callable(&arg.value, env)?,
+                            arg.value.span(),
+                        )?;
+                        if t.contains_unknown() {
+                            return Err(AliasError {
+                                msg: "typeof 无法确定实参的静态类型".into(),
+                                span: arg.value.span(),
+                            });
+                        }
+                        return Ok(Ty::Str);
+                    }
                 }
-                _ => {}
             }
         }
 
@@ -138,16 +141,17 @@ impl Checker {
                 CtorKind::Err
             });
         }
-        match name.as_str() {
-            "print" => LowerCallTarget::Builtin(BuiltinCall::Print),
-            "println" => LowerCallTarget::Builtin(BuiltinCall::Println),
-            "increase" => LowerCallTarget::Builtin(BuiltinCall::Increase),
-            "decrease" => LowerCallTarget::Builtin(BuiltinCall::Decrease),
-            "typeof" => LowerCallTarget::Typeof,
+        match classify_call_builtin(name) {
+            Some(CallBuiltinName::Print) => LowerCallTarget::Builtin(BuiltinCall::Print),
+            Some(CallBuiltinName::Println) => LowerCallTarget::Builtin(BuiltinCall::Println),
+            Some(CallBuiltinName::Increase) => LowerCallTarget::Builtin(BuiltinCall::Increase),
+            Some(CallBuiltinName::Decrease) => LowerCallTarget::Builtin(BuiltinCall::Decrease),
+            Some(CallBuiltinName::Typeof) => LowerCallTarget::Typeof,
             // Successful contextual conversion checks record their resolved target before
             // ordinary call-target resolution. Without an expected type these calls fail.
-            "from" | "try_from" => LowerCallTarget::FunctionValue,
-            _ => LowerCallTarget::FunctionValue,
+            Some(CallBuiltinName::From | CallBuiltinName::TryFrom) | None => {
+                LowerCallTarget::FunctionValue
+            }
         }
     }
 
