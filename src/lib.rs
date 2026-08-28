@@ -2,6 +2,7 @@
 //! 二进制入口在 main.rs；公开接口只保留完整 build/run 管线与诊断类型。
 
 mod ast;
+mod builtins;
 mod codegen;
 mod lexer;
 mod limits;
