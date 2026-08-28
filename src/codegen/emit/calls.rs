@@ -1,9 +1,20 @@
 use super::arrays::{array_raw, bump_array_version, make_iterator};
 use super::cells::{cell_addr, first_result, read_cell, write_cell};
-use super::expr::{emit_expr, emit_expr_expected};
+use super::expr::emit_expr;
 use super::ops::{emit_binary_values, new_span_id};
-use super::strings::{display_word, str_literal_handle};
-use super::*;
+use super::strings::display_word;
+use crate::codegen::abi::{
+    norm_load, norm_store, restore_word, storage_word, user_signature, VTy,
+};
+use crate::codegen::layout::{ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
+use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
+use crate::sema::hir::{BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget};
+use crate::sema::types::{FloatW, IntW, UIntW};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, TrapCode, Value};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::Module;
 
 pub(crate) fn emit_call<M: Module>(
     c: &mut Compiler<M>,
@@ -16,25 +27,13 @@ pub(crate) fn emit_call<M: Module>(
 ) -> AliasResult<Value> {
     match target {
         CallTarget::Builtin(BuiltinCall::Increase) => {
-            emit_incdec(c, bcx, frame, "increase", args, span)
+            emit_incdec(c, bcx, frame, BinOp::Add, args, span)
         }
         CallTarget::Builtin(BuiltinCall::Decrease) => {
-            emit_incdec(c, bcx, frame, "decrease", args, span)
+            emit_incdec(c, bcx, frame, BinOp::Sub, args, span)
         }
-        CallTarget::Builtin(BuiltinCall::Print) => emit_print(c, bcx, frame, "print", args, span),
-        CallTarget::Builtin(BuiltinCall::Println) => {
-            emit_print(c, bcx, frame, "println", args, span)
-        }
-        CallTarget::Builtin(BuiltinCall::Typeof) => {
-            let [arg] = args else {
-                invariant_violation("typeof 元数 (sema 已校验)")
-            };
-            let tn = c.vty(arg.value.ty()).display_name();
-            str_literal_handle(c, bcx, &tn)
-        }
-        CallTarget::Builtin(BuiltinCall::From | BuiltinCall::TryFrom) => {
-            invariant_violation("上下文转换必须由带目标类型的发射入口处理")
-        }
+        CallTarget::Builtin(BuiltinCall::Print) => emit_print(c, bcx, frame, false, args),
+        CallTarget::Builtin(BuiltinCall::Println) => emit_print(c, bcx, frame, true, args),
         CallTarget::StructConstructor {
             name,
             arg_field_indices,
@@ -62,13 +61,21 @@ fn call_closure<M: Module>(
 ) -> AliasResult<Value> {
     let mut words: Vec<Value> = Vec::with_capacity(args.len() + 2);
     for (a, pt) in args.iter().zip(param_vtys) {
-        let v = emit_expr_expected(c, bcx, frame, &a.value, pt)?;
+        let v = emit_expr(c, bcx, frame, &a.value)?;
         words.push(norm_store(bcx, v, pt));
     }
-    let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
-    let env = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), clo, value_word_offset(1));
+    let code = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        clo,
+        CLOSURE_CODE_OFFSET,
+    );
+    let env = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        clo,
+        CLOSURE_ENV_OFFSET,
+    );
     words.insert(0, env);
     words.insert(0, bcx.use_var(frame.globals));
     let sig = user_signature(c.cc, param_vtys, ret_vty);
@@ -103,7 +110,7 @@ pub(crate) fn emit_construct<M: Module>(
             .map(|(arg, _)| &arg.value)
             .or(field.default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
-        let v = emit_expr_expected(c, bcx, frame, expr, &field.vty)?;
+        let v = emit_expr(c, bcx, frame, expr)?;
         let sv = norm_store(bcx, v, &field.vty);
         bcx.ins().store(MemFlagsData::new(), sv, ptr, field.offset);
     }
@@ -121,22 +128,8 @@ pub(crate) fn emit_result_ctor<M: Module>(
         invariant_violation("result 构造元数 (sema 已校验)")
     };
     let pvty = c.vty(arg.value.ty());
-    emit_result_ctor_typed(c, bcx, frame, kind, args, &pvty)
-}
-
-pub(crate) fn emit_result_ctor_typed<M: Module>(
-    c: &mut Compiler<M>,
-    bcx: &mut FunctionBuilder,
-    frame: &mut Frame,
-    kind: CtorKind,
-    args: &[CallArg],
-    pvty: &VTy,
-) -> AliasResult<Value> {
-    let [arg] = args else {
-        invariant_violation("result 构造元数 (sema 已校验)")
-    };
-    let payload = emit_expr_expected(c, bcx, frame, &arg.value, pvty)?;
-    let pw = storage_word(bcx, payload, pvty);
+    let payload = emit_expr(c, bcx, frame, &arg.value)?;
+    let pw = storage_word(bcx, payload, &pvty);
     let n2 = bcx.ins().iconst(types::I32, 2);
     let blk = c.call_rt(bcx, "alias.env.new", &[n2])?;
     let tag = match kind {
@@ -145,8 +138,7 @@ pub(crate) fn emit_result_ctor_typed<M: Module>(
     };
     let tagw = bcx.ins().iconst(types::I64, tag);
     bcx.ins().store(MemFlagsData::new(), tagw, blk, 0);
-    bcx.ins()
-        .store(MemFlagsData::new(), pw, blk, value_word_offset(1));
+    bcx.ins().store(MemFlagsData::new(), pw, blk, 8);
     Ok(blk)
 }
 
@@ -167,7 +159,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let [arg] = args else {
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
             };
-            let r = emit_expr_expected(c, bcx, frame, &arg.value, &svt)?;
+            let r = emit_expr(c, bcx, frame, &arg.value)?;
             emit_binary_values(c, bcx, frame, (*op, &svt, rv, r, span))
         }
         MethodTarget::BoolNot => {
@@ -199,7 +191,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let [arg] = args else {
                 invariant_violation("push 元数 (sema 已校验)")
             };
-            let value = emit_expr_expected(c, bcx, frame, &arg.value, elem)?;
+            let value = emit_expr(c, bcx, frame, &arg.value)?;
             let word = storage_word(bcx, value, elem);
             let raw = array_raw(bcx, rv);
             c.call_rt_void(bcx, "alias.arr.push", &[raw, word])?;
@@ -213,7 +205,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let raw = array_raw(bcx, rv);
             let len = bcx
                 .ins()
-                .load(types::I64, MemFlagsData::new(), raw, value_word_offset(1));
+                .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET);
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let span_id = new_span_id(c, span);
             let abort_b = bcx.create_block();
@@ -259,7 +251,7 @@ pub(crate) fn emit_method_call<M: Module>(
             words.push(bcx.ins().iconst(types::I64, 0));
             words.push(norm_store(bcx, rv, &param_vtys[0]));
             for (arg, param) in args.iter().zip(param_vtys.iter().skip(1)) {
-                let value = emit_expr_expected(c, bcx, frame, &arg.value, param)?;
+                let value = emit_expr(c, bcx, frame, &arg.value)?;
                 words.push(norm_store(bcx, value, param));
             }
             let inst = bcx.ins().call(fref, &words);
@@ -303,26 +295,22 @@ fn field_entry<M: Module>(
     invariant_violation("字段访问索引必须由 sema/HIR 解析到结构体布局");
 }
 
-pub(crate) fn emit_incdec<M: Module>(
+fn emit_incdec<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    name: &str,
+    op: BinOp,
     args: &[CallArg],
     span: Span,
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(span, format!("{name} 恰好接受 1 个参数")));
+        invariant_violation("increase/decrease 元数 (sema 已校验)")
     };
-    let Expr::Ident(target, Some(target_id), tspan, _) = &arg.value else {
-        return Err(native_err(span, format!("{name} 的参数必须是可变绑定名")));
+    let Expr::Ident(_, Some(target_id), _, _) = &arg.value else {
+        invariant_violation("increase/decrease 参数为已解析可变绑定 (sema 已校验)")
     };
-    let Some(addr) = cell_addr(c, frame, *target_id) else {
-        return Err(native_err(
-            *tspan,
-            format!("内部: '{target}' 的 BindingId 无存储"),
-        ));
-    };
+    let addr = cell_addr(c, frame, *target_id)
+        .unwrap_or_else(|| invariant_violation("increase/decrease BindingId 必须有存储"));
     let vty = bound_vty(c, frame, *target_id);
     if !vty.is_numeric() {
         invariant_violation("increase/decrease 目标为数值绑定 (sema 已校验)");
@@ -333,46 +321,40 @@ pub(crate) fn emit_incdec<M: Module>(
         VTy::F(FloatW::F64) => bcx.ins().f64const(1.0),
         _ => bcx.ins().iconst(types::I64, 1),
     };
-    let op = if name == "increase" {
-        BinOp::Add
-    } else {
-        BinOp::Sub
-    };
     let next = emit_binary_values(c, bcx, frame, (op, &vty, cur, one, span))?;
     write_cell(bcx, frame, &addr, next, &vty);
     Ok(bcx.ins().iconst(types::I64, 0))
 }
 
-pub(crate) fn emit_print<M: Module>(
+fn emit_print<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    name: &str,
+    newline: bool,
     args: &[CallArg],
-    span: Span,
 ) -> AliasResult<Value> {
     let [arg] = args else {
-        return Err(native_err(span, format!("{name} 恰好接受 1 个参数")));
+        invariant_violation("print/println 元数 (sema 已校验)")
     };
     let v = emit_expr(c, bcx, frame, &arg.value)?;
     match c.vty(arg.value.ty()) {
         VTy::I(IntW::W32) | VTy::U(UIntW::U8) | VTy::U(UIntW::U16) => {
             let t = bcx.ins().ireduce(types::I32, v);
-            let h = if name == "println" {
+            let symbol = if newline {
                 "alias.println.i32"
             } else {
                 "alias.print.i32"
             };
-            c.call_rt_void(bcx, h, &[t])?;
+            c.call_rt_void(bcx, symbol, &[t])?;
         }
         _ => {
             let s = display_word(c, bcx, &arg.value, v)?;
-            let h = if name == "println" {
+            let symbol = if newline {
                 "alias.println.str"
             } else {
                 "alias.print.str"
             };
-            c.call_rt_void(bcx, h, &[s])?;
+            c.call_rt_void(bcx, symbol, &[s])?;
         }
     }
     Ok(bcx.ins().iconst(types::I64, 0))
