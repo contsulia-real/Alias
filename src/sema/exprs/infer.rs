@@ -1,4 +1,13 @@
-use super::*;
+use super::calls::resolve_method_target;
+use super::operators::{contextual_conversion, conversion_exists, literal_slot_unify, require_value};
+use super::typing::ExprCheckError;
+use crate::ast::{Expr, StrPartAst};
+use crate::sema::types::{
+    check_value_type_slot, default_negative_int_ty, default_positive_int_ty, types_match, FloatW,
+    IntW, Ty,
+};
+use crate::sema::{Checker, Env, LowerCallTarget};
+use crate::{AliasError, AliasResult};
 
 impl Checker {
     pub(super) fn expr_inner(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
