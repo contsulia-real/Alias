@@ -1,5 +1,6 @@
 use super::super::{validate_nesting, Parser};
-use crate::ast::{ArmBody, Body, CtorKind, Expr, MatchArm, Param, Pattern, StrPartAst};
+use crate::ast::{ArmBody, Body, Expr, MatchArm, Param, Pattern, StrPartAst};
+use crate::builtins::classify_result_constructor;
 use crate::lexer::{StrPart, Tok, Token};
 use crate::{AliasError, AliasResult};
 
@@ -163,15 +164,12 @@ impl Parser {
         let span = self.span();
         match self.peek().cloned() {
             Some(Tok::Ident(name))
-                if matches!(name.as_str(), "ok" | "err")
+                if classify_result_constructor(&name).is_some()
                     && self.peek_at(1) == Some(&Tok::LParen) =>
             {
                 self.bump();
-                let ctor = if name == "ok" {
-                    CtorKind::Ok
-                } else {
-                    CtorKind::Err
-                };
+                let ctor = classify_result_constructor(&name)
+                    .expect("pattern guard 已确认 result 构造器名字");
                 self.expect(&Tok::LParen)?;
                 let binding = match self.peek().cloned() {
                     Some(Tok::Ident(n)) => {
