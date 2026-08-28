@@ -1,7 +1,7 @@
 use super::operators::require_value;
 use super::typing::ExprCheckError;
 use crate::ast::{CallArg, CtorKind, Expr};
-use crate::builtins::{classify_call_builtin, is_result_constructor, CallBuiltinName};
+use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
 use crate::sema::hir::{BuiltinCall, MethodTarget};
 use crate::sema::types::Ty;
 use crate::sema::{builtin_method, Checker, Env, LowerCallTarget, MethodInfo, Scope};
@@ -19,8 +19,8 @@ impl Checker {
             if self.structs.contains_key(name) {
                 return self.construct(name, args, span, env);
             }
-            if is_result_constructor(name) {
-                return self.result_ctor(name, args, span, env);
+            if let Some(kind) = classify_result_constructor(name) {
+                return self.result_ctor(name, kind, args, span, env);
             }
         }
         for a in args {
@@ -134,12 +134,8 @@ impl Checker {
         if self.structs.contains_key(name) {
             return LowerCallTarget::StructConstructor(name.clone());
         }
-        if is_result_constructor(name) {
-            return LowerCallTarget::ResultConstructor(if name == "ok" {
-                CtorKind::Ok
-            } else {
-                CtorKind::Err
-            });
+        if let Some(kind) = classify_result_constructor(name) {
+            return LowerCallTarget::ResultConstructor(kind);
         }
         match classify_call_builtin(name) {
             Some(CallBuiltinName::Print) => LowerCallTarget::Builtin(BuiltinCall::Print),
@@ -219,6 +215,7 @@ impl Checker {
     fn result_ctor(
         &mut self,
         name: &str,
+        kind: CtorKind,
         args: &[CallArg],
         span: Span,
         env: &Env,
@@ -236,10 +233,9 @@ impl Checker {
             });
         }
         let t = require_value(self.expr(&arg.value, env)?, arg.value.span())?;
-        Ok(if name == "ok" {
-            Ty::Result(Box::new(t), Box::new(Ty::Unknown))
-        } else {
-            Ty::Result(Box::new(Ty::Unknown), Box::new(t))
+        Ok(match kind {
+            CtorKind::Ok => Ty::Result(Box::new(t), Box::new(Ty::Unknown)),
+            CtorKind::Err => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
         })
     }
 
