@@ -1,4 +1,19 @@
-use super::*;
+use super::declare_runtime_shim;
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
+use crate::codegen::{native_err, Compiler};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{FuncId, Linkage, Module};
+
+const DISPLAY_BUFFER_BYTES: i64 = 64;
+const FRACTION_DIGITS: i64 = 6;
+const FRACTION_SCALE: i64 = 1_000_000;
+const FRACTION_FIRST_DIVISOR: i64 = 100_000;
+const ROUND_CARRY: i64 = 10_000_000;
 
 fn static_string_block<M: Module>(
     c: &mut Compiler<'_, M>,
@@ -14,15 +29,24 @@ fn static_string_block<M: Module>(
     let gv = c.module.declare_data_in_func(id, bcx.func);
     let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
     let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
-    let sz = bcx.ins().iconst(types::I64, 16);
+    let sz = bcx.ins().iconst(types::I64, STRING_BYTES);
     let call = bcx.ins().call(alloc_ref, &[sz]);
     let blk = first_result(bcx, call);
     let n = bcx.ins().iconst(types::I64, len);
-    bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
-    bcx.ins().store(MemFlagsData::new(), n, blk, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), n, blk, STRING_LEN_OFFSET);
     Ok(blk)
 }
 
+/// 以固定、无 libc 的科学计数格式显示有限浮点数。
+///
+/// 算法先把绝对值归一化到 `[1, 10)` 并累计十进制指数，再把尾数放大 10^6、
+/// 加 0.5 后取整，得到最多六位小数。若舍入得到 10_000_000，则尾数回到
+/// 1_000_000 且指数 +1。随后输出首位、六位小数并删除末尾 `0`，最后输出 `e`
+/// 和指数。改变缩放/进位常数时必须同步这几个阶段，否则 9.9999995 一类边界会
+/// 产生错误尾数或指数。
 pub(super) fn emit_float_display_shim<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
@@ -98,6 +122,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let zero_blk = static_string_block(c, &mut bcx, alloc, "rt_zero", 1)?;
     bcx.ins().return_(&[zero_blk]);
 
+    // 有限非零值归一化到 [1, 10)，exp 记录移动的小数位数。
     bcx.switch_to_block(finite_b);
     let norm = bcx.declare_var(types::F64);
     bcx.def_var(norm, abs);
@@ -144,22 +169,23 @@ pub(super) fn emit_float_display_shim<M: Module>(
     bcx.ins().jump(low_check, &[]);
     bcx.seal_block(low_check);
 
+    // 六位小数四舍五入；9.9999995... 会发生十进制进位并推进指数。
     bcx.switch_to_block(normalized);
     let nv = bcx.use_var(norm);
-    let million_f = bcx.ins().f64const(1_000_000.0);
+    let scale_f = bcx.ins().f64const(FRACTION_SCALE as f64);
     let half_f = bcx.ins().f64const(0.5);
-    let scaled_f = bcx.ins().fmul(nv, million_f);
+    let scaled_f = bcx.ins().fmul(nv, scale_f);
     let rounded_f = bcx.ins().fadd(scaled_f, half_f);
     let scaled0 = bcx.ins().fcvt_to_uint(types::I64, rounded_f);
-    let carry = bcx.ins().icmp_imm_s(IntCC::Equal, scaled0, 10_000_000);
-    let one_m = bcx.ins().iconst(types::I64, 1_000_000);
-    let scaled = bcx.ins().select(carry, one_m, scaled0);
+    let carry = bcx.ins().icmp_imm_s(IntCC::Equal, scaled0, ROUND_CARRY);
+    let scale_i = bcx.ins().iconst(types::I64, FRACTION_SCALE);
+    let scaled = bcx.ins().select(carry, scale_i, scaled0);
     let ev = bcx.use_var(exp);
     let ev1 = bcx.ins().iadd_imm_s(ev, 1);
     let final_exp = bcx.ins().select(carry, ev1, ev);
 
     let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
-    let cap = bcx.ins().iconst(types::I64, 64);
+    let cap = bcx.ins().iconst(types::I64, DISPLAY_BUFFER_BYTES);
     let buf_call = bcx.ins().call(alloc_ref, &[cap]);
     let buf = first_result(&bcx, buf_call);
     let pos = bcx.declare_var(types::I64);
@@ -170,8 +196,8 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let minus = bcx.ins().iconst(types::I8, b'-' as i64);
     bcx.ins().store(MemFlagsData::new(), minus, buf, 0);
 
-    let million = bcx.ins().iconst(types::I64, 1_000_000);
-    let whole = bcx.ins().udiv(scaled, million);
+    let scale = bcx.ins().iconst(types::I64, FRACTION_SCALE);
+    let whole = bcx.ins().udiv(scaled, scale);
     let ascii0 = bcx.ins().iconst(types::I64, b'0' as i64);
     let first_ch = bcx.ins().iadd(whole, ascii0);
     let p0 = bcx.use_var(pos);
@@ -182,7 +208,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let p1 = bcx.ins().iadd_imm_s(p0, 1);
     bcx.def_var(pos, p1);
     let frac = bcx.declare_var(types::I64);
-    let frac0 = bcx.ins().urem(scaled, million);
+    let frac0 = bcx.ins().urem(scaled, scale);
     bcx.def_var(frac, frac0);
     let has_frac = bcx.ins().icmp_imm_s(IntCC::NotEqual, frac0, 0);
     let frac_b = bcx.create_block();
@@ -197,11 +223,11 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let after_dot = bcx.ins().iadd_imm_s(p, 1);
     bcx.def_var(pos, after_dot);
     let divisor = bcx.declare_var(types::I64);
-    let div0 = bcx.ins().iconst(types::I64, 100_000);
+    let div0 = bcx.ins().iconst(types::I64, FRACTION_FIRST_DIVISOR);
     bcx.def_var(divisor, div0);
     let digits_left = bcx.declare_var(types::I64);
-    let six = bcx.ins().iconst(types::I64, 6);
-    bcx.def_var(digits_left, six);
+    let digits = bcx.ins().iconst(types::I64, FRACTION_DIGITS);
+    bcx.def_var(digits_left, digits);
     let digit_loop = bcx.create_block();
     let trim_check = bcx.create_block();
     bcx.ins().jump(digit_loop, &[]);
@@ -231,6 +257,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     bcx.ins().jump(digit_loop, &[]);
     bcx.seal_block(digit_loop);
 
+    // 小数固定写满六位后从尾部回退，保留最短但确定的表示。
     bcx.switch_to_block(trim_check);
     let p = bcx.use_var(pos);
     let last_pos = bcx.ins().iadd_imm_s(p, -1);
@@ -318,11 +345,13 @@ pub(super) fn emit_float_display_shim<M: Module>(
     bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
     let final_len = bcx.ins().iadd_imm_s(p, 1);
     let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
-    let sz = bcx.ins().iconst(types::I64, 16);
+    let sz = bcx.ins().iconst(types::I64, STRING_BYTES);
     let blk_call = bcx.ins().call(alloc_ref, &[sz]);
     let blk = first_result(&bcx, blk_call);
-    bcx.ins().store(MemFlagsData::new(), buf, blk, 0);
-    bcx.ins().store(MemFlagsData::new(), final_len, blk, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), buf, blk, STRING_DATA_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), final_len, blk, STRING_LEN_OFFSET);
     bcx.ins().return_(&[blk]);
 
     bcx.finalize(c.module.target_config());
