@@ -3,6 +3,8 @@
 //! 这些名字属于语言本身而不是普通词法绑定。parser 只查询语法所需的分类，
 //! sema 消费结构化 builtin 身份；不要在各层复制字符串名单或再次按名字恢复身份。
 
+use crate::ast::CtorKind;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CallBuiltinName {
     Print,
@@ -27,16 +29,10 @@ pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResultConstructorName {
-    Ok,
-    Err,
-}
-
-pub(crate) fn classify_result_constructor(name: &str) -> Option<ResultConstructorName> {
+pub(crate) fn classify_result_constructor(name: &str) -> Option<CtorKind> {
     Some(match name {
-        "ok" => ResultConstructorName::Ok,
-        "err" => ResultConstructorName::Err,
+        "ok" => CtorKind::Ok,
+        "err" => CtorKind::Err,
         _ => return None,
     })
 }
