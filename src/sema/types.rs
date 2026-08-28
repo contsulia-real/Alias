@@ -71,8 +71,8 @@ pub(crate) enum Ty {
     Struct(String),
     Result(Box<Ty>, Box<Ty>),
     Array(Box<Ty>),
-    /// iterator<T> 是真实语言/runtime 类型。第一阶段由 for 消费，
-    /// 数组产生的 iterator 采用结构版本号 fail-fast 失效语义。
+    /// iterator<T> 是真实语言/runtime 类型；数组 iterator 携带结构版本号并在消费时
+    /// fail-fast 检查失效，当前 `for` 也可直接消费 iterator 值。
     Iterator(Box<Ty>),
     Unknown,
 }
