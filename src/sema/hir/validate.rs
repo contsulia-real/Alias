@@ -1,9 +1,10 @@
 use super::{
-    ArmBody, BindingId, Body, CallTarget, CheckedProgram, Expr, Item, Stmt, StrPart,
+    ArmBody, BindingId, BindingOwner, Body, CallTarget, CheckedProgram, Expr, Item, MethodId,
+    MethodTarget, Stmt, StrPart,
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 enum HirValidationNode<'a> {
     Expr(&'a Expr),
@@ -112,7 +113,7 @@ fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
         match item {
             Item::Binding(binding) => {
                 ids.insert(binding.binding_id);
-                if let super::BindingOwner::Method { self_id, .. } = &binding.owner {
+                if let BindingOwner::Method { self_id, .. } = &binding.owner {
                     ids.insert(*self_id);
                 }
                 stack.push(HirValidationNode::Expr(&binding.value));
@@ -160,6 +161,36 @@ fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
         }
     }
     ids
+}
+
+fn collect_user_methods(program: &CheckedProgram) -> AliasResult<HashMap<MethodId, Ty>> {
+    let mut methods = HashMap::new();
+    for item in &program.items {
+        let Item::Binding(binding) = item else {
+            continue;
+        };
+        let BindingOwner::Method {
+            method_id,
+            receiver,
+            ..
+        } = &binding.owner
+        else {
+            continue;
+        };
+        if receiver.contains_unknown() {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 用户方法接收者类型未确定".into(),
+                span: binding.span,
+            });
+        }
+        if methods.insert(*method_id, receiver.clone()).is_some() {
+            return Err(AliasError {
+                msg: format!("内部 sema 不变式被破坏: MethodId 重复 {method_id:?}"),
+                span: binding.span,
+            });
+        }
+    }
+    Ok(methods)
 }
 
 fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt) {
@@ -254,6 +285,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
     // The source is untrusted and nesting is bounded but nontrivial; validation uses explicit
     // stacks so the final authority gate itself does not reintroduce host-recursion risk.
     let known_ids = collect_declared_ids(program);
+    let user_methods = collect_user_methods(program)?;
     if !known_ids.contains(&program.main_id) {
         return Err(AliasError {
             msg: "内部 sema 不变式被破坏: main BindingId 不存在".into(),
@@ -455,7 +487,27 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         stack.push(HirValidationNode::Expr(then_expr));
                         stack.push(HirValidationNode::Expr(cond));
                     }
-                    Expr::MethodCall { recv, args, .. } => {
+                    Expr::MethodCall {
+                        recv, args, target, ..
+                    } => {
+                        if let MethodTarget::User { receiver, id } = target {
+                            let Some(declared_receiver) = user_methods.get(id) else {
+                                return Err(AliasError {
+                                    msg: format!(
+                                        "内部 sema 不变式被破坏: 用户方法引用未知 MethodId {id:?}"
+                                    ),
+                                    span: expr.span(),
+                                });
+                            };
+                            if declared_receiver != receiver || recv.ty() != receiver {
+                                return Err(AliasError {
+                                    msg: format!(
+                                        "内部 sema 不变式被破坏: MethodId {id:?} 接收者与调用目标不一致"
+                                    ),
+                                    span: expr.span(),
+                                });
+                            }
+                        }
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
                         }
