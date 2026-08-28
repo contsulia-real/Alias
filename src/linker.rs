@@ -7,6 +7,7 @@
 //! 零新增 crate; lld_rs 绑定停在 LLVM14 且拖 llvm-sys 构建依赖, 违反
 //! 加依赖清单律。定位失败时可用环境变量 ALIAS_RUST_LLD 覆盖。
 
+use crate::target::TARGET_TRIPLE;
 use crate::{AliasError, AliasResult, Span};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,7 @@ fn create_temp_object(bytes: &[u8]) -> AliasResult<TempObject> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        // 只需要进程内文件名唯一性，不承担任何跨线程内存同步职责。
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let path = base.join(format!(
             "alias_link_{}_{tick:032x}_{seq:016x}.obj",
@@ -39,15 +41,24 @@ fn create_temp_object(bytes: &[u8]) -> AliasResult<TempObject> {
             .open(&path)
         {
             Ok(mut file) => {
-                file.write_all(bytes).map_err(|e| AliasError {
-                    msg: format!("无法写出临时目标文件 {}: {e}", path.display()),
-                    span: Span::default(),
-                })?;
-                file.flush().map_err(|e| AliasError {
-                    msg: format!("无法刷新临时目标文件 {}: {e}", path.display()),
-                    span: Span::default(),
-                })?;
-                return Ok(TempObject(path));
+                // 文件一创建就交给 RAII owner；写入失败也不能把半写对象遗留在临时目录。
+                // Windows 删除打开文件可能失败，所以错误路径先显式关闭句柄，再让 TempObject Drop。
+                let temp = TempObject(path);
+                let write_result = file
+                    .write_all(bytes)
+                    .map_err(|e| ("写出", e))
+                    .and_then(|_| file.flush().map_err(|e| ("刷新", e)));
+                drop(file);
+                if let Err((action, error)) = write_result {
+                    return Err(AliasError {
+                        msg: format!(
+                            "无法{action}临时目标文件 {}: {error}",
+                            temp.0.display()
+                        ),
+                        span: Span::default(),
+                    });
+                }
+                return Ok(temp);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
@@ -116,7 +127,7 @@ fn locate_rust_lld() -> AliasResult<std::path::PathBuf> {
     let lld = std::path::PathBuf::from(&sysroot)
         .join("lib")
         .join("rustlib")
-        .join("x86_64-pc-windows-msvc")
+        .join(TARGET_TRIPLE)
         .join("bin")
         .join("rust-lld.exe");
     if lld.exists() {
@@ -164,7 +175,7 @@ pub fn link_exe(obj_bytes: &[u8], out_exe: &std::path::Path) -> AliasResult<()> 
             span: Span::default(),
         });
 
-    let result = out.and_then(|o| {
+    out.and_then(|o| {
         if o.status.success() {
             Ok(())
         } else {
@@ -177,8 +188,7 @@ pub fn link_exe(obj_bytes: &[u8], out_exe: &std::path::Path) -> AliasResult<()> 
                 span: Span::default(),
             })
         }
-    });
-    result
+    })
 }
 
 #[cfg(test)]
