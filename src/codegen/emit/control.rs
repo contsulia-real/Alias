@@ -3,9 +3,24 @@ use super::calls::{field_offset, field_vty};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, write_cell,
 };
-use super::expr::{emit_expr, emit_expr_expected};
-use super::*;
+use super::expr::emit_expr;
+use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy, VALUE_WORD_BYTES};
+use crate::codegen::funcgen::emit_funclit_value_typed;
+use crate::codegen::layout::{
+    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET,
+    ITERATOR_VERSION_OFFSET,
+};
+use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
+use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, Block, BlockArg, InstBuilder, MemFlagsData};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::Module;
 
+/// `frame.terminated` 描述的是当前 Cranelift builder cursor 是否已经发出 terminator，
+/// 不是源语言层面的“函数是否永远终止”。每次切到新可达 block 都必须重置它；遗漏
+/// 会让后续语句被当成死代码，反向误清零则可能在已终止 block 后继续发指令。
 pub(crate) fn emit_body<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -67,7 +82,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 )?;
             } else {
                 let vty = c.vty(&b.ty);
-                let v = emit_expr_expected(c, bcx, frame, &b.value, &vty)?;
+                let v = emit_expr(c, bcx, frame, &b.value)?;
                 emit_local_cell(c, bcx, frame, v, vty, b.binding_id)?;
             }
             Ok(())
@@ -79,7 +94,7 @@ pub(crate) fn emit_stmt<M: Module>(
             ..
         } => {
             let fvty = field_vty(c, recv, *field_index)?;
-            let v = emit_expr_expected(c, bcx, frame, value, &fvty)?;
+            let v = emit_expr(c, bcx, frame, value)?;
             let p = emit_expr(c, bcx, frame, recv)?;
             let off = field_offset(c, recv, *field_index)?;
             let sv = norm_store(bcx, v, &fvty);
@@ -90,7 +105,7 @@ pub(crate) fn emit_stmt<M: Module>(
             target_id, value, ..
         } => {
             let tvty = bound_vty(c, frame, *target_id);
-            let v = emit_expr_expected(c, bcx, frame, value, &tvty)?;
+            let v = emit_expr(c, bcx, frame, value)?;
             match cell_addr(c, frame, *target_id) {
                 Some(addr) => {
                     write_cell(bcx, frame, &addr, v, &tvty);
@@ -122,7 +137,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     "内部: 非 unit return 缺少返回值，sema 返回值不变式被破坏",
                 ));
             };
-            let v = emit_expr_expected(c, bcx, frame, value, &expected)?;
+            let v = emit_expr(c, bcx, frame, value)?;
             let v = coerce_ret(bcx, frame, v);
             bcx.ins().jump(ret_block, &[BlockArg::Value(v)]);
             frame.terminated = true;
@@ -320,10 +335,18 @@ fn emit_for<M: Module>(
 
     bcx.switch_to_block(header);
     frame.terminated = false;
-    let array = bcx.ins().load(types::I64, MemFlagsData::new(), iter, 0);
-    let expected = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), iter, value_word_offset(2));
+    let array = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        iter,
+        ITERATOR_ARRAY_OFFSET,
+    );
+    let expected = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        iter,
+        ITERATOR_VERSION_OFFSET,
+    );
     let actual = array_version(bcx, array);
     let invalid = bcx.ins().icmp(IntCC::NotEqual, actual, expected);
     bcx.ins().brif(invalid, invalid_b, &[], valid_b, &[]);
@@ -337,13 +360,16 @@ fn emit_for<M: Module>(
 
     bcx.switch_to_block(valid_b);
     frame.terminated = false;
-    let cursor = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), iter, value_word_offset(1));
+    let cursor = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        iter,
+        ITERATOR_INDEX_OFFSET,
+    );
     let raw = array_raw(bcx, array);
     let len = bcx
         .ins()
-        .load(types::I64, MemFlagsData::new(), raw, value_word_offset(1));
+        .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET);
     let more = bcx.ins().icmp(IntCC::UnsignedLessThan, cursor, len);
     bcx.ins().brif(more, body_b, &[], end_b, &[]);
     frame.terminated = true;
@@ -352,7 +378,9 @@ fn emit_for<M: Module>(
     bcx.switch_to_block(body_b);
     frame.terminated = false;
     let raw = array_raw(bcx, array);
-    let data = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 0);
+    let data = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
     let off = bcx.ins().imul_imm_s(cursor, VALUE_WORD_BYTES);
     let addr = bcx.ins().iadd(data, off);
     let raw_elem = bcx
@@ -360,8 +388,10 @@ fn emit_for<M: Module>(
         .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
     let elem = norm_load(bcx, raw_elem, elem_vty);
     let next = bcx.ins().iadd_imm_s(cursor, 1);
+    // cursor 在进入用户 body 前推进；因此 continue 跳回 header 时不会重复当前元素。
+    // 若把该 store 移到 body 之后，任何 continue 都会形成同一元素的无限循环。
     bcx.ins()
-        .store(MemFlagsData::new(), next, iter, value_word_offset(1));
+        .store(MemFlagsData::new(), next, iter, ITERATOR_INDEX_OFFSET);
 
     push_scope(frame);
     emit_local_cell(c, bcx, frame, elem, elem_vty.clone(), binding_id)?;
