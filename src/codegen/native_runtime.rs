@@ -1,12 +1,15 @@
 //! Native runtime facade. Runtime contracts remain the single ABI source.
 
-use super::*;
-use crate::codegen::Compiler;
+use crate::codegen::runtime::{
+    runtime_contract, validate_contract_table, RuntimeContract, RUNTIME_CONTRACTS,
+};
+use crate::codegen::{invariant_violation, native_err, Compiler};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::Function;
-use cranelift_codegen::ir::{BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    BlockArg, Function, InstBuilder, StackSlotData, StackSlotKind, UserFuncName, Value,
+};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
