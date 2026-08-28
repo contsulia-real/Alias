@@ -1,4 +1,15 @@
-use super::*;
+use super::{declare_runtime_shim, NativeExterns};
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::{native_err, Compiler};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::{
+    types, Function, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, TrapCode,
+    UserFuncName, Value,
+};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{Linkage, Module};
+use std::collections::HashMap;
 
 const SPAN_RECORD_BYTES: i64 = 8;
 
