@@ -1,14 +1,12 @@
 //! 扩展方法当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
-//! 语义锚点 (用户批准设计, spec-notes 附录五):
+//! 当前语义锚点：
 //! - 方法定义文法: pub? func <Ret> <RecvType>.<name> = (params) -> 体
 //! - self 是隐式 val 绑定 (不在参数表), 类型 = 接收者类型
 //! - 方法名按接收者类型划分命名空间; 内建 len/upper/lower/trim 不可覆盖
 //! - 调用点静态分派: 接收者推断类型 → 方法表; 返回类型流入推断
 //!
 //! 列号语义: token span col = max(可视列-1, 1) (lexer.rs span_here)。
-//!
-//! allow: SIZE_OK — 法律表为纯数据矩阵 (项目先例 sema_laws.rs 同注)。
 
 use alias::{run, AliasError};
 
@@ -95,14 +93,14 @@ fn same_method_name_across_types() {
     assert_eq!(run(src).unwrap(), 4);
 }
 
-/// pub 标志被接受并存储 — 单编译单元内恒可调 (spec-notes 附录五)。
+/// pub 是顶层声明修饰语；同一编译单元内的方法可调用性不因 pub 改变。
 #[test]
 fn pub_methods_callable_in_same_unit() {
     let src = "pub func string string.shout = () -> return '${self}!'\nfunc i32 main = () -> {\n    while 'hey'.shout() != 'hey!' {\n        return 1\n    }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
 }
 
-/// 非 pub 方法同样可调 — 可见性检查机制就位, 单元内直通。
+/// 非 pub 方法在同一编译单元内同样可调。
 #[test]
 fn private_methods_callable_in_same_unit() {
     let src = "func string string.whisper = () -> return '${self}'\nfunc i32 main = () -> {\n    while 'ss'.whisper() != 'ss' {\n        return 1\n    }\n    return 0\n}\n";
@@ -190,7 +188,7 @@ fn method_arg_type_mismatch_rejected() {
     );
 }
 
-/// self 重绑定被拒 (Q② val 语义)。
+/// self 是隐式 val，不能重新绑定。
 #[test]
 fn self_rebinding_rejected() {
     assert_law(
@@ -200,7 +198,7 @@ fn self_rebinding_rejected() {
     );
 }
 
-/// increase self 同样被拒 (Q② 家族)。
+/// increase 同样不能修改隐式 val self。
 #[test]
 fn self_increase_rejected() {
     assert_law(
@@ -231,8 +229,7 @@ fn duplicate_method_same_type_rejected() {
     );
 }
 
-/// 跨类型同名不算重复 (正向对照已覆盖); 此处锁跨类型不误报由
-/// same_method_name_across_types 承担。
+/// 跨类型同名不算重复；正向用例 same_method_name_across_types 锁定该规则。
 /// 方法按裸函数名调用 — 方法不入绑定命名空间。
 #[test]
 fn method_called_as_bare_function_rejected() {
@@ -243,7 +240,7 @@ fn method_called_as_bare_function_rejected() {
     );
 }
 
-/// self 用于方法体外 — 关键字降为普通名, 作用域解析失败。
+/// self 只存在于方法体内；其它作用域按普通未定义名字处理。
 #[test]
 fn self_outside_method_rejected() {
     assert_law(
