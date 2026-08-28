@@ -1,4 +1,4 @@
-use super::{Body, CallTarget, Expr, Item, Stmt};
+use super::{Body, BuiltinCall, CallTarget, Expr, Item, Stmt};
 use crate::sema::types::{IntW, Ty};
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -170,6 +170,39 @@ fn final_hir_gate_rejects_ident_type_drift_from_binding_id() {
         error
             .msg
             .contains("Ident 静态类型与 BindingId 声明类型不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_builtin_name_target_drift() {
+    let mut program = checked("func i32 main = () -> {\n    println 1\n    return 0\n}\n");
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let target = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Expr {
+                expr:
+                    Expr::Call {
+                        target: CallTarget::Builtin(target),
+                        ..
+                    },
+                ..
+            } => Some(target),
+            _ => None,
+        })
+        .expect("fixture must contain builtin call");
+    *target = BuiltinCall::Print;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("builtin name/target drift must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("内建调用 callee 名与 resolved target 不一致"),
         "实际: {}",
         error.msg
     );

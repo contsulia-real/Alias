@@ -20,6 +20,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CASE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn public_run_does_not_depend_on_the_caller_thread_stack() {
+    let nesting = 96;
+    let source = format!(
+        "func i32 main = () -> return {}1{}\n",
+        "(".repeat(nesting),
+        ")".repeat(nesting)
+    );
+    let caller = std::thread::Builder::new()
+        // This stack only needs to enter the API and wait; accepted compiler recursion belongs to
+        // the internally provisioned compiler worker rather than to an embedding caller.
+        .stack_size(256 * 1024)
+        .spawn(move || run(&source))
+        .expect("创建小栈调用线程失败");
+    assert_eq!(caller.join().expect("小栈调用线程异常退出").unwrap(), 1);
+}
+
 fn run_cli(src: &str) -> std::process::Output {
     // 这里只需要进程内唯一目录后缀，不承担线程间状态发布；Relaxed 已足够。
     let seq = CASE_SEQ.fetch_add(1, Ordering::Relaxed);

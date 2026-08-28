@@ -48,8 +48,8 @@ source.as
 
 ```text
 src/
-├── main.rs                 # CLI 参数、编译器工作线程栈与进程退出映射
-├── lib.rs                  # run/build 编排；AliasError / Span
+├── main.rs                 # CLI 参数与进程退出映射
+├── lib.rs                  # run/build 编排、编译器工作线程栈；AliasError / Span
 ├── target.rs               # 编译器内部目标 triple owner
 ├── limits.rs               # 当前共享输入/表达式限制 owner
 ├── builtins.rs             # 预定义语言名字分类 owner
@@ -178,7 +178,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 - 对用户输入的深度/规模必须有显式上限；
 - HIR capture/validation 等遍历避免对不可信嵌套使用宿主递归；
-- CLI 在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖 Windows 主线程默认栈承载合法输入；
+- 公开 build/run 管线在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖调用者线程栈承载合法输入；
 - 用户输入超限必须产生 `AliasError`，不能 panic；
 - internal invariant panic 只用于 sema 成功后理论上不可达的编译器内部状态。
 

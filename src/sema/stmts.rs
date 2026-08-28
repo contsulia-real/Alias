@@ -4,10 +4,10 @@ use super::exprs::{require_value, ExprCheckError};
 use super::hir::{BindingId, BuiltinCall};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{
-    decl_mismatch, ensure_user_lexical_name, Checker, Env, LowerCallTarget, Scope, VarInfo,
+    decl_mismatch, ensure_user_lexical_name, resolved_builtin_call, Checker, Env, LowerCallTarget,
+    Scope, VarInfo,
 };
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
-use crate::builtins::{classify_call_builtin, CallBuiltinName};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
@@ -356,20 +356,12 @@ impl Checker {
             Stmt::Expr { expr, .. } => {
                 if let Expr::Call { callee, args, span } = expr {
                     if let Expr::Ident(name, _) = callee.as_ref() {
-                        if let Some(
-                            kind @ (CallBuiltinName::Increase | CallBuiltinName::Decrease),
-                        ) = classify_call_builtin(name)
+                        if let Some(builtin @ (BuiltinCall::Increase | BuiltinCall::Decrease)) =
+                            resolved_builtin_call(name)
                         {
                             self.incdec(name, args, *span, env)?;
                             self.record_expr_type(expr, Ty::Unit);
-                            self.record_call_target(
-                                expr,
-                                LowerCallTarget::Builtin(match kind {
-                                    CallBuiltinName::Increase => BuiltinCall::Increase,
-                                    CallBuiltinName::Decrease => BuiltinCall::Decrease,
-                                    _ => unreachable!(),
-                                }),
-                            );
+                            self.record_call_target(expr, LowerCallTarget::Builtin(builtin));
                             self.record_resolved_callee(expr, &Ty::Unit);
                             return Ok(None);
                         }

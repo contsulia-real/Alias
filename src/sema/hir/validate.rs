@@ -2,7 +2,7 @@ use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget,
     CheckedProgram, CtorKind, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
 };
-use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
+use crate::builtins::classify_result_constructor;
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
@@ -419,18 +419,6 @@ fn direct_resolved_callee_name(callee: &Expr) -> AliasResult<&str> {
     }
 }
 
-fn builtin_target_matches_name(name: &str, builtin: &BuiltinCall) -> bool {
-    match classify_call_builtin(name) {
-        Some(CallBuiltinName::Print) => builtin == &BuiltinCall::Print,
-        Some(CallBuiltinName::Println) => builtin == &BuiltinCall::Println,
-        Some(CallBuiltinName::Increase) => builtin == &BuiltinCall::Increase,
-        Some(CallBuiltinName::Decrease) => builtin == &BuiltinCall::Decrease,
-        Some(CallBuiltinName::From | CallBuiltinName::TryFrom | CallBuiltinName::Typeof) | None => {
-            false
-        }
-    }
-}
-
 fn validate_call_target(
     expr: &Expr,
     callee: &Expr,
@@ -547,7 +535,7 @@ fn validate_call_target(
         }
         CallTarget::Builtin(builtin) => {
             let callee_name = direct_resolved_callee_name(callee)?;
-            if !builtin_target_matches_name(callee_name, builtin) {
+            if crate::sema::resolved_builtin_call(callee_name).as_ref() != Some(builtin) {
                 return Err(invariant(
                     callee.span(),
                     "内建调用 callee 名与 resolved target 不一致",

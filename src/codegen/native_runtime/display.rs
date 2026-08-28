@@ -9,6 +9,9 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, Sta
 use cranelift_module::Module;
 use std::collections::HashMap;
 
+const DECIMAL_BUFFER_BYTES: i64 = 24;
+const DECIMAL_LAST_INDEX: i64 = DECIMAL_BUFFER_BYTES - 1;
+
 pub(super) fn emit_display_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
     ext: &NativeExterns,
@@ -30,12 +33,16 @@ pub(super) fn emit_display_runtime<M: Module>(
     }
 
     shim!(c, "rt.write.dec", |bcx, a| {
-        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
+        let buf = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, DECIMAL_BUFFER_BYTES)]
+        );
         let ten = bcx.ins().iconst(types::I64, 10);
-        let digits = bcx.ins().iconst(types::I64, 48);
+        let digits = bcx.ins().iconst(types::I64, b'0' as i64);
         let pos = bcx.declare_var(types::I64);
-        let p23 = bcx.ins().iconst(types::I64, 23);
-        bcx.def_var(pos, p23);
+        let end_pos = bcx.ins().iconst(types::I64, DECIMAL_LAST_INDEX);
+        bcx.def_var(pos, end_pos);
         let n = bcx.declare_var(types::I64);
         bcx.def_var(n, a[1]);
         let loop_b = bcx.create_block();
@@ -72,8 +79,8 @@ pub(super) fn emit_display_runtime<M: Module>(
             };
             let len = {
                 let p = bcx.use_var(pos);
-                let c23 = bcx.ins().iconst(types::I64, 23);
-                bcx.ins().isub(c23, p)
+                let last_index = bcx.ins().iconst(types::I64, DECIMAL_LAST_INDEX);
+                bcx.ins().isub(last_index, p)
             };
             let ss =
                 bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
@@ -88,7 +95,11 @@ pub(super) fn emit_display_runtime<M: Module>(
     });
 
     shim!(c, "alias.display.int", |bcx, a| {
-        let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
+        let buf = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, DECIMAL_BUFFER_BYTES)]
+        );
         let v64 = bcx.ins().sextend(types::I64, a[0]);
         let zero = bcx.ins().iconst(types::I64, 0);
         let neg = bcx.ins().icmp(IntCC::SignedLessThan, v64, zero);
@@ -96,11 +107,11 @@ pub(super) fn emit_display_runtime<M: Module>(
         let mag = bcx.ins().select(neg, neg_mag, v64);
         let ten = bcx.ins().iconst(types::I64, 10);
         let pos = bcx.declare_var(types::I64);
-        let p23 = bcx.ins().iconst(types::I64, 23);
-        bcx.def_var(pos, p23);
+        let end_pos = bcx.ins().iconst(types::I64, DECIMAL_LAST_INDEX);
+        bcx.def_var(pos, end_pos);
         let n = bcx.declare_var(types::I64);
         bcx.def_var(n, mag);
-        let digits = bcx.ins().iconst(types::I64, 48);
+        let digits = bcx.ins().iconst(types::I64, b'0' as i64);
         let loop_b = bcx.create_block();
         let sign_b = bcx.create_block();
         let end_b = bcx.create_block();
@@ -134,7 +145,7 @@ pub(super) fn emit_display_runtime<M: Module>(
             bcx.ins().brif(neg, do_sign, &[], end_b, &[]);
             bcx.switch_to_block(do_sign);
             bcx.seal_block(do_sign);
-            let minus = bcx.ins().iconst(types::I64, 45);
+            let minus = bcx.ins().iconst(types::I64, b'-' as i64);
             let p = bcx.use_var(pos);
             let one = bcx.ins().iconst(types::I64, 1);
             let newp = bcx.ins().isub(p, one);
@@ -153,8 +164,8 @@ pub(super) fn emit_display_runtime<M: Module>(
             };
             let len = {
                 let p = bcx.use_var(pos);
-                let c23 = bcx.ins().iconst(types::I64, 23);
-                bcx.ins().isub(c23, p)
+                let last_index = bcx.ins().iconst(types::I64, DECIMAL_LAST_INDEX);
+                bcx.ins().isub(last_index, p)
             };
             let blk = call_rt_m!(
                 bcx,

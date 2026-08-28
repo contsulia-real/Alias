@@ -7,7 +7,7 @@ mod stmts;
 pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
-use crate::builtins::is_reserved_lexical_name;
+use crate::builtins::{classify_call_builtin, is_reserved_lexical_name, CallBuiltinName};
 use crate::sema::hir::{BindingId, BuiltinCall, MethodId, MethodTarget, ResolvedConversion};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
@@ -107,6 +107,19 @@ impl BuiltinMethodSpec {
             params: self.params,
             ret: self.ret,
             target: self.target,
+        }
+    }
+}
+
+/// 可直接求值的内建调用名字到 HIR target 的唯一映射 owner。
+fn resolved_builtin_call(name: &str) -> Option<BuiltinCall> {
+    match classify_call_builtin(name) {
+        Some(CallBuiltinName::Print) => Some(BuiltinCall::Print),
+        Some(CallBuiltinName::Println) => Some(BuiltinCall::Println),
+        Some(CallBuiltinName::Increase) => Some(BuiltinCall::Increase),
+        Some(CallBuiltinName::Decrease) => Some(BuiltinCall::Decrease),
+        Some(CallBuiltinName::From | CallBuiltinName::TryFrom | CallBuiltinName::Typeof) | None => {
+            None
         }
     }
 }

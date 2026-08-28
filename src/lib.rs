@@ -49,6 +49,7 @@ impl fmt::Display for AliasError {
 pub type AliasResult<T> = Result<T, AliasError>;
 
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+const COMPILER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 struct TempExecutable {
     dir: PathBuf,
@@ -117,6 +118,26 @@ pub fn run(src: &str) -> AliasResult<i32> {
 
 /// 唯一编译管线：前端 → COFF 目标文件 → rust-lld → 独立原生可执行文件。
 pub fn build(src: &str, out_exe: &Path) -> AliasResult<()> {
+    let source = src.to_owned();
+    let output = out_exe.to_owned();
+    let worker = std::thread::Builder::new()
+        .name("alias-compiler".into())
+        // Frontend and Cranelift emission still contain bounded recursive descents. Provisioning
+        // the stack here keeps the public build/run contract independent of the caller thread's
+        // stack while retaining the language's explicit nesting limits.
+        .stack_size(COMPILER_STACK_BYTES)
+        .spawn(move || compile_on_worker(&source, &output))
+        .map_err(|error| AliasError {
+            msg: format!("无法启动编译器工作线程: {error}"),
+            span: Span::default(),
+        })?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn compile_on_worker(src: &str, out_exe: &Path) -> AliasResult<()> {
     let tokens = lexer::lex(src)?;
     let program = parser::parse(tokens)?;
     let checked = sema::check(program)?;

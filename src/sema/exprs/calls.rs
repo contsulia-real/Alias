@@ -2,9 +2,9 @@ use super::operators::require_value;
 use super::typing::ExprCheckError;
 use crate::ast::{CallArg, CtorKind, Expr};
 use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
-use crate::sema::hir::{BuiltinCall, MethodTarget};
+use crate::sema::hir::MethodTarget;
 use crate::sema::types::Ty;
-use crate::sema::{builtin_method, Checker, Env, LowerCallTarget, Scope};
+use crate::sema::{builtin_method, resolved_builtin_call, Checker, Env, LowerCallTarget, Scope};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
@@ -145,18 +145,15 @@ impl Checker {
         if let Some(kind) = classify_result_constructor(name) {
             return LowerCallTarget::ResultConstructor(kind);
         }
-        match classify_call_builtin(name) {
-            Some(CallBuiltinName::Print) => LowerCallTarget::Builtin(BuiltinCall::Print),
-            Some(CallBuiltinName::Println) => LowerCallTarget::Builtin(BuiltinCall::Println),
-            Some(CallBuiltinName::Increase) => LowerCallTarget::Builtin(BuiltinCall::Increase),
-            Some(CallBuiltinName::Decrease) => LowerCallTarget::Builtin(BuiltinCall::Decrease),
-            Some(CallBuiltinName::Typeof) => LowerCallTarget::Typeof,
-            // Successful contextual conversion checks record their resolved target before
-            // ordinary call-target resolution. Without an expected type these calls fail.
-            Some(CallBuiltinName::From | CallBuiltinName::TryFrom) | None => {
-                LowerCallTarget::FunctionValue
-            }
+        if let Some(builtin) = resolved_builtin_call(name) {
+            return LowerCallTarget::Builtin(builtin);
         }
+        if classify_call_builtin(name) == Some(CallBuiltinName::Typeof) {
+            return LowerCallTarget::Typeof;
+        }
+        // Successful contextual conversion checks record their resolved target before ordinary
+        // call-target resolution. Without an expected type these calls fail.
+        LowerCallTarget::FunctionValue
     }
 
     fn construct(

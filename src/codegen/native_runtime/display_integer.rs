@@ -9,6 +9,8 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
 
+const INTEGER_BUFFER_BYTES: i64 = 32;
+
 pub(super) fn emit_integer_display_shim<M: Module>(
     c: &mut Compiler<'_, M>,
     name: &str,
@@ -27,8 +29,8 @@ pub(super) fn emit_integer_display_shim<M: Module>(
 
     let alloc = c.import_runtime("rt.heap.alloc")?;
     let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
-    let sz32 = bcx.ins().iconst(types::I64, 32);
-    let buf_call = bcx.ins().call(alloc_ref, &[sz32]);
+    let buffer_bytes = bcx.ins().iconst(types::I64, INTEGER_BUFFER_BYTES);
+    let buf_call = bcx.ins().call(alloc_ref, &[buffer_bytes]);
     let buf = first_result(&bcx, buf_call);
     let zero = bcx.ins().iconst(types::I64, 0);
     let neg = if signed {
@@ -39,7 +41,7 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     let neg_mag = bcx.ins().isub(zero, value);
     let mag = bcx.ins().select(neg, neg_mag, value);
     let pos = bcx.declare_var(types::I64);
-    let end_pos = bcx.ins().iconst(types::I64, 32);
+    let end_pos = bcx.ins().iconst(types::I64, INTEGER_BUFFER_BYTES);
     bcx.def_var(pos, end_pos);
     let n = bcx.declare_var(types::I64);
     bcx.def_var(n, mag);
@@ -91,8 +93,8 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     bcx.seal_block(end_b);
     let p = bcx.use_var(pos);
     let start = bcx.ins().iadd(buf, p);
-    let c32 = bcx.ins().iconst(types::I64, 32);
-    let len = bcx.ins().isub(c32, p);
+    let buffer_bytes = bcx.ins().iconst(types::I64, INTEGER_BUFFER_BYTES);
+    let len = bcx.ins().isub(buffer_bytes, p);
     let string_bytes = bcx.ins().iconst(types::I64, STRING_BYTES);
     let blk_call = bcx.ins().call(alloc_ref, &[string_bytes]);
     let blk = first_result(&bcx, blk_call);
