@@ -224,8 +224,9 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// `typeof` 在 sema 已取得静态类型名；operand 在 lowering 时只为消费 facts 而遍历，
+    /// 不进入最终 HIR，因此不会求值、捕获变量或让 backend 重新解释类型名称。
     Typeof {
-        expr: Box<Expr>,
         type_name: String,
         span: Span,
         info: ExprInfo,
