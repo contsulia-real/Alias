@@ -1,4 +1,13 @@
-use super::*;
+use super::declare_runtime_shim;
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
+use crate::codegen::Compiler;
+use crate::AliasResult;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{FuncId, Module};
 
 const TRIM_SET: &[u8] = b" \t\r\n";
 
@@ -29,8 +38,18 @@ fn emit_case_shim<M: Module>(
     bcx.seal_block(entry);
     let a: Vec<Value> = bcx.block_params(entry).to_vec();
 
-    let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
-    let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
+    let pa = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        a[0],
+        STRING_DATA_OFFSET,
+    );
+    let la = bcx.ins().load(
+        types::I64,
+        MemFlagsData::new(),
+        a[0],
+        STRING_LEN_OFFSET,
+    );
     let lo_c = bcx.ins().iconst(types::I8, lo);
     let hi_c = bcx.ins().iconst(types::I8, hi);
     let delta_c = bcx.ins().iconst(types::I8, delta);
@@ -85,12 +104,14 @@ fn emit_case_shim<M: Module>(
         bcx.switch_to_block(done_b);
         let blk = {
             let r = c.module.declare_func_in_func(alloc_f, bcx.func);
-            let sz = bcx.ins().iconst(types::I64, 16);
+            let sz = bcx.ins().iconst(types::I64, STRING_BYTES);
             let inst = bcx.ins().call(r, &[sz]);
             first_result(&bcx, inst)
         };
-        bcx.ins().store(MemFlagsData::new(), out, blk, 0);
-        bcx.ins().store(MemFlagsData::new(), la, blk, 8);
+        bcx.ins()
+            .store(MemFlagsData::new(), out, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), la, blk, STRING_LEN_OFFSET);
         bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
     }
     bcx.switch_to_block(else_b);
@@ -99,12 +120,14 @@ fn emit_case_shim<M: Module>(
         let blk = {
             let f = c.import_runtime("rt.heap.alloc")?;
             let r = c.module.declare_func_in_func(f, bcx.func);
-            let sz = bcx.ins().iconst(types::I64, 16);
+            let sz = bcx.ins().iconst(types::I64, STRING_BYTES);
             let inst = bcx.ins().call(r, &[sz]);
             first_result(&bcx, inst)
         };
-        bcx.ins().store(MemFlagsData::new(), zero, blk, 0);
-        bcx.ins().store(MemFlagsData::new(), zero, blk, 8);
+        bcx.ins()
+            .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), zero, blk, STRING_LEN_OFFSET);
         bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
     }
     bcx.switch_to_block(end_b);
@@ -126,7 +149,11 @@ pub(super) fn emit_string_runtime<M: Module>(
     }
 
     shim!(c, "alias.str.new", |bcx, a| {
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
+        let blk = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+        );
         let len64 = bcx.ins().sextend(types::I64, a[1]);
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len64, 0);
         let then_b = bcx.create_block();
@@ -140,27 +167,50 @@ pub(super) fn emit_string_runtime<M: Module>(
             let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![len64]);
             let mv = c.module.declare_func_in_func(rtl_move_memory, bcx.func);
             bcx.ins().call(mv, &[buf, a[0], len64]);
-            bcx.ins().store(MemFlagsData::new(), buf, blk, 0);
+            bcx.ins()
+                .store(MemFlagsData::new(), buf, blk, STRING_DATA_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(else_b);
         {
             let zero = bcx.ins().iconst(types::I64, 0);
-            bcx.ins().store(MemFlagsData::new(), zero, blk, 0);
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(end_b);
         bcx.seal_block(end_b);
-        bcx.ins().store(MemFlagsData::new(), len64, blk, 8);
+        bcx.ins()
+            .store(MemFlagsData::new(), len64, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
         true
     });
 
     shim!(c, "alias.str.concat", |bcx, a| {
-        let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
-        let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
-        let lb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 8);
+        let pa = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_DATA_OFFSET,
+        );
+        let la = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_LEN_OFFSET,
+        );
+        let pb = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[1],
+            STRING_DATA_OFFSET,
+        );
+        let lb = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[1],
+            STRING_LEN_OFFSET,
+        );
         let total = bcx.ins().iadd(la, lb);
         let has_total = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, total, 0);
         let alloc_b = bcx.create_block();
@@ -202,18 +252,44 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.ins().jump(after_b_b, &[]);
         bcx.switch_to_block(after_b_b);
         bcx.seal_block(after_b_b);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-        bcx.ins().store(MemFlagsData::new(), out_word, blk, 0);
-        bcx.ins().store(MemFlagsData::new(), total, blk, 8);
+        let blk = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+        );
+        bcx.ins()
+            .store(MemFlagsData::new(), out_word, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), total, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
         true
     });
 
     shim!(c, "alias.str.cmp", |bcx, a| {
-        let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
-        let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
-        let lb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 8);
+        let pa = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_DATA_OFFSET,
+        );
+        let la = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_LEN_OFFSET,
+        );
+        let pb = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[1],
+            STRING_DATA_OFFSET,
+        );
+        let lb = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[1],
+            STRING_LEN_OFFSET,
+        );
         let min_len = bcx.ins().smin(la, lb);
         let i = bcx.declare_var(types::I64);
         let i0 = bcx.ins().iconst(types::I64, 0);
@@ -268,7 +344,12 @@ pub(super) fn emit_string_runtime<M: Module>(
     });
 
     shim!(c, "alias.str.len", |bcx, a| {
-        let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
+        let l = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_LEN_OFFSET,
+        );
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
         true
@@ -277,8 +358,18 @@ pub(super) fn emit_string_runtime<M: Module>(
     emit_case_shim(c, "alias.str.lower", b'A' as i64, b'Z' as i64, 32)?;
 
     shim!(c, "alias.str.trim", |bcx, a| {
-        let pa = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
-        let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
+        let pa = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_DATA_OFFSET,
+        );
+        let la = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_LEN_OFFSET,
+        );
         let st = bcx.declare_var(types::I64);
         let st0 = bcx.ins().iconst(types::I64, 0);
         bcx.def_var(st, st0);
@@ -357,17 +448,29 @@ pub(super) fn emit_string_runtime<M: Module>(
             let stv3 = bcx.use_var(st);
             let src = bcx.ins().iadd(pa, stv3);
             bcx.ins().call(mv, &[out, src, n]);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-            bcx.ins().store(MemFlagsData::new(), out, blk, 0);
-            bcx.ins().store(MemFlagsData::new(), n, blk, 8);
+            let blk = call_rt_m!(
+                bcx,
+                "rt.heap.alloc",
+                vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+            );
+            bcx.ins()
+                .store(MemFlagsData::new(), out, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), n, blk, STRING_LEN_OFFSET);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
         }
         bcx.switch_to_block(else_b);
         {
             let zero = bcx.ins().iconst(types::I64, 0);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-            bcx.ins().store(MemFlagsData::new(), zero, blk, 0);
-            bcx.ins().store(MemFlagsData::new(), zero, blk, 8);
+            let blk = call_rt_m!(
+                bcx,
+                "rt.heap.alloc",
+                vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+            );
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, blk, STRING_LEN_OFFSET);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
         }
         bcx.switch_to_block(end_b);
