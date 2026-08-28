@@ -120,6 +120,100 @@ func i32 main = () -> {
 }
 
 #[test]
+fn resolved_hir_rejects_corrupt_constructor_field_index() {
+    let source = r#"
+struct point { val i32 x = 7 }
+func i32 main = () -> {
+    val point p = point(x = 9)
+    return p.x
+}
+"#;
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let mut checked = crate::sema::check(program).unwrap();
+    let main = checked
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "main" => Some(binding),
+            _ => None,
+        })
+        .expect("main binding");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main value must be function literal")
+    };
+    let Body::Block(stmts) = body.as_mut() else {
+        panic!("fixture main must use block body")
+    };
+    let indices = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Binding(binding) if binding.name == "p" => match &mut binding.value {
+                Expr::Call {
+                    target: CallTarget::StructConstructor {
+                        arg_field_indices, ..
+                    },
+                    ..
+                } => Some(arg_field_indices),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("fixture must contain struct constructor");
+    indices[0] = usize::MAX;
+
+    let error = super::validate::validate_resolved_hir(&checked)
+        .expect_err("corrupt constructor index must fail the final HIR gate");
+    assert!(
+        error.msg.contains("字段索引越界或重复"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn resolved_hir_rejects_corrupt_field_index() {
+    let source = r#"
+struct point { val i32 x = 7 }
+func i32 main = () -> {
+    val point p = point()
+    return p.x
+}
+"#;
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let mut checked = crate::sema::check(program).unwrap();
+    let main = checked
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "main" => Some(binding),
+            _ => None,
+        })
+        .expect("main binding");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main value must be function literal")
+    };
+    let Body::Block(stmts) = body.as_mut() else {
+        panic!("fixture main must use block body")
+    };
+    let field_index = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Return {
+                value: Some(Expr::Field { field_index, .. }),
+            } => Some(field_index),
+            _ => None,
+        })
+        .expect("fixture must contain field access");
+    *field_index = usize::MAX;
+
+    let error = super::validate::validate_resolved_hir(&checked)
+        .expect_err("corrupt field index must fail the final HIR gate");
+    assert!(error.msg.contains("字段索引越界"), "实际: {}", error.msg);
+}
+
+#[test]
 fn deep_capture_and_type_walk_do_not_depend_on_host_recursion() {
     let depth = 32;
     let source = nested_closure_source(depth);
