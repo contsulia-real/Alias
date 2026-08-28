@@ -14,6 +14,7 @@ pub(crate) const CALL_BUILTINS: &[&str] = &[
 ];
 
 pub(crate) const RESULT_CONSTRUCTORS: &[&str] = &["ok", "err"];
+pub(crate) const OUTPUT_BUILTINS: &[&str] = &["print", "println"];
 
 pub(crate) const TYPE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
@@ -22,6 +23,10 @@ pub(crate) const TYPE_NAMES: &[&str] = &[
 
 pub(crate) fn is_no_paren_builtin(name: &str) -> bool {
     CALL_BUILTINS.contains(&name)
+}
+
+pub(crate) fn is_output_builtin(name: &str) -> bool {
+    OUTPUT_BUILTINS.contains(&name)
 }
 
 pub(crate) fn is_result_constructor(name: &str) -> bool {
