@@ -156,7 +156,7 @@ pub(crate) fn validate_contract_table() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{runtime_contract, validate_contract_table};
 
     #[test]
     fn runtime_contract_table_is_unique() {
