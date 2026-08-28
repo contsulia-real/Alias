@@ -1,14 +1,28 @@
-use super::arrays::{array_raw, emit_array_lit_typed};
-use super::calls::{emit_call, emit_method_call, emit_result_ctor_typed, field_offset, field_vty};
+use super::arrays::{array_raw, emit_array_lit};
+use super::calls::{emit_call, emit_method_call, field_offset, field_vty};
 use super::cells::{cell_addr, coerce_ret, ensure_current, pop_scope, push_scope, read_cell};
 use super::control::emit_stmt;
 use super::ops::{
-    binary_vty_flows_expected, conversion_exists_vty, emit_abort_branch, emit_binary,
-    emit_binary_values, emit_convert, emit_index_guard, is_contextual_conversion, narrow,
-    widen_signed, widen_unsigned,
+    emit_abort_branch, emit_binary, emit_convert, emit_index_guard, narrow, widen_signed,
+    widen_unsigned,
 };
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
-use super::*;
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, restore_word, storage_word, value_word_offset, VTy,
+    VALUE_WORD_BYTES,
+};
+use crate::codegen::funcgen::emit_funclit_value;
+use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
+use crate::sema::hir::{
+    ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, ResolvedConversion, Stmt,
+};
+use crate::sema::types::FloatW;
+use crate::AliasResult;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
+use cranelift_codegen::ir::types;
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::Module;
 
 pub(crate) fn emit_expr<M: Module>(
     c: &mut Compiler<M>,
@@ -18,7 +32,11 @@ pub(crate) fn emit_expr<M: Module>(
 ) -> AliasResult<Value> {
     match e {
         Expr::Int(n, ..) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
-        Expr::Float(v, ..) => Ok(bcx.ins().f64const(*v)),
+        Expr::Float(v, ..) => match c.vty(e.ty()) {
+            VTy::F(FloatW::F32) => Ok(bcx.ins().f32const(*v as f32)),
+            VTy::F(FloatW::F64) => Ok(bcx.ins().f64const(*v)),
+            _ => invariant_violation("浮点字面量携带浮点静态类型"),
+        },
         Expr::Bool(b, ..) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
         Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts),
         Expr::Ident(name, id, span, _) => {
@@ -54,7 +72,32 @@ pub(crate) fn emit_expr<M: Module>(
             let value = emit_expr(c, bcx, frame, expr)?;
             emit_convert(c, bcx, frame, *span, value, &src, &dst)
         }
+        Expr::Convert {
+            expr,
+            mode,
+            span,
+            ..
+        } => match mode {
+            ResolvedConversion::Identity => emit_expr(c, bcx, frame, expr),
+            ResolvedConversion::Convert => {
+                let src = c.vty(expr.ty());
+                let dst = c.vty(e.ty());
+                let value = emit_expr(c, bcx, frame, expr)?;
+                emit_convert(c, bcx, frame, *span, value, &src, &dst)
+            }
+        },
+        Expr::Typeof { type_name, .. } => str_literal_handle(c, bcx, type_name),
         Expr::Neg { expr, span, .. } => {
+            // Negative integer literals have already been range-checked against the final HIR
+            // type. Emitting the signed bit pattern directly is required for each INT_MIN;
+            // applying runtime unary-neg overflow checks would incorrectly reject the literal.
+            if let Expr::Int(magnitude, ..) = expr.as_ref() {
+                if matches!(c.vty(e.ty()), VTy::I(_)) {
+                    return Ok(bcx
+                        .ins()
+                        .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64));
+                }
+            }
             let v = emit_expr(c, bcx, frame, expr)?;
             let t = c.vty(expr.ty());
             match t {
@@ -84,7 +127,7 @@ pub(crate) fn emit_expr<M: Module>(
             Ok(emit_bool_not(bcx, v))
         }
         Expr::BitNot { expr, .. } => {
-            let vty = c.vty(expr.ty());
+            let vty = c.vty(e.ty());
             let v = emit_expr(c, bcx, frame, expr)?;
             emit_bit_not_typed(bcx, v, &vty)
         }
@@ -113,8 +156,8 @@ pub(crate) fn emit_expr<M: Module>(
             else_expr,
             ..
         } => {
-            let expected = c.vty(e.ty());
-            emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, &expected)
+            let result = c.vty(e.ty());
+            emit_ternary(c, bcx, frame, cond, then_expr, else_expr, &result)
         }
         Expr::Call {
             callee,
@@ -173,7 +216,7 @@ pub(crate) fn emit_expr<M: Module>(
             let VTy::Array(elem_vty) = c.vty(e.ty()) else {
                 invariant_violation("数组字面量携带 array 类型")
             };
-            emit_array_lit_typed(c, bcx, frame, elems, &elem_vty)
+            emit_array_lit(c, bcx, frame, elems, &elem_vty)
         }
         Expr::FuncLit {
             params,
@@ -183,7 +226,7 @@ pub(crate) fn emit_expr<M: Module>(
         } => emit_funclit_value(c, bcx, frame, params, body, captures, e.ty()),
         Expr::Match { subject, arms, .. } => {
             let result_vty = c.vty(e.ty());
-            emit_match_typed(c, bcx, frame, subject, arms, &result_vty)
+            emit_match(c, bcx, frame, subject, arms, &result_vty)
         }
         Expr::Propagate { expr, .. } => {
             let subj = emit_expr(c, bcx, frame, expr)?;
@@ -269,47 +312,47 @@ fn emit_short_circuit<M: Module>(
     Ok(out)
 }
 
-fn emit_ternary_typed<M: Module>(
+fn emit_ternary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     cond: &Expr,
     then_expr: &Expr,
     else_expr: &Expr,
-    expected: &VTy,
+    result_vty: &VTy,
 ) -> AliasResult<Value> {
     let cv = emit_expr(c, bcx, frame, cond)?;
     let then_b = bcx.create_block();
     let else_b = bcx.create_block();
     let join_b = bcx.create_block();
-    let out = bcx.append_block_param(join_b, cl_type(expected));
+    let out = bcx.append_block_param(join_b, cl_type(result_vty));
     bcx.ins().brif(cv, then_b, &[], else_b, &[]);
     bcx.seal_block(then_b);
     bcx.seal_block(else_b);
 
     bcx.switch_to_block(then_b);
     frame.terminated = false;
-    let a = emit_expr_expected(c, bcx, frame, then_expr, expected)?;
+    let a = emit_expr(c, bcx, frame, then_expr)?;
     if !frame.terminated {
-        let a = norm_store(bcx, a, expected);
+        let a = norm_store(bcx, a, result_vty);
         bcx.ins().jump(join_b, &[BlockArg::Value(a)]);
     }
 
     bcx.switch_to_block(else_b);
     frame.terminated = false;
-    let b = emit_expr_expected(c, bcx, frame, else_expr, expected)?;
+    let b = emit_expr(c, bcx, frame, else_expr)?;
     if !frame.terminated {
-        let b = norm_store(bcx, b, expected);
+        let b = norm_store(bcx, b, result_vty);
         bcx.ins().jump(join_b, &[BlockArg::Value(b)]);
     }
 
     bcx.seal_block(join_b);
     bcx.switch_to_block(join_b);
     frame.terminated = false;
-    Ok(norm_load(bcx, out, expected))
+    Ok(norm_load(bcx, out, result_vty))
 }
 
-fn emit_match_typed<M: Module>(
+fn emit_match<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -360,11 +403,9 @@ fn emit_match_typed<M: Module>(
         frame.terminated = false;
         Ok(match jv {
             Some(value) => restore_word(bcx, value, result_vty),
-            // unit match 不产值；调用方只会把它作为语句使用。
             None => subj,
         })
     } else {
-        // 所有臂都已经 return。保持 terminated，不创建伪造的可达 continuation。
         Ok(subj)
     }
 }
@@ -396,91 +437,6 @@ fn emit_pattern_test<M: Module>(
             bcx.ins().icmp_imm_s(IntCC::Equal, tag, want)
         }
     })
-}
-
-pub(crate) fn emit_expr_expected<M: Module>(
-    c: &mut Compiler<M>,
-    bcx: &mut FunctionBuilder,
-    frame: &mut Frame,
-    e: &Expr,
-    expected: &VTy,
-) -> AliasResult<Value> {
-    match (e, expected) {
-        (Expr::Int(value, ..), VTy::I(_) | VTy::U(_)) => {
-            Ok(bcx.ins().iconst(types::I64, *value as i64))
-        }
-        (Expr::Neg { expr, .. }, VTy::I(_)) if matches!(expr.as_ref(), Expr::Int(..)) => {
-            let Expr::Int(magnitude, ..) = expr.as_ref() else {
-                unreachable!()
-            };
-            Ok(bcx
-                .ins()
-                .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64))
-        }
-        (
-            Expr::Call {
-                args, span, target, ..
-            },
-            _,
-        ) if is_contextual_conversion(target) => {
-            let [arg] = args.as_slice() else {
-                invariant_violation("from/try_from 元数 (sema 已校验)")
-            };
-            let source = c.vty(arg.value.ty());
-            if conversion_exists_vty(&source, expected) {
-                let value = emit_expr(c, bcx, frame, &arg.value)?;
-                emit_convert(c, bcx, frame, *span, value, &source, expected)
-            } else {
-                emit_expr(c, bcx, frame, &arg.value)
-            }
-        }
-        (
-            Expr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-                ..
-            },
-            _,
-        ) => emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, expected),
-        (Expr::Match { subject, arms, .. }, _) => {
-            emit_match_typed(c, bcx, frame, subject, arms, expected)
-        }
-        (
-            Expr::Binary {
-                op, lhs, rhs, span, ..
-            },
-            _,
-        ) if binary_vty_flows_expected(*op, expected) => {
-            let l = emit_expr_expected(c, bcx, frame, lhs, expected)?;
-            let r = emit_expr_expected(c, bcx, frame, rhs, expected)?;
-            emit_binary_values(c, bcx, frame, (*op, expected, l, r, *span))
-        }
-        (Expr::BitNot { expr, .. }, VTy::I(_) | VTy::U(_)) => {
-            let v = emit_expr_expected(c, bcx, frame, expr, expected)?;
-            emit_bit_not_typed(bcx, v, expected)
-        }
-        (Expr::ArrayLit { elems, .. }, VTy::Array(elem)) => {
-            emit_array_lit_typed(c, bcx, frame, elems, elem)
-        }
-        (Expr::Call { args, target, .. }, VTy::Result(ok, err))
-            if matches!(target, CallTarget::ResultConstructor(_)) =>
-        {
-            let CallTarget::ResultConstructor(kind) = target else {
-                unreachable!()
-            };
-            let payload = match kind {
-                CtorKind::Ok => (**ok).clone(),
-                CtorKind::Err => (**err).clone(),
-            };
-            emit_result_ctor_typed(c, bcx, frame, *kind, args, &payload)
-        }
-        (Expr::Float(..), VTy::F(FloatW::F32)) => {
-            let v = emit_expr(c, bcx, frame, e)?;
-            Ok(norm_store(bcx, v, expected))
-        }
-        _ => emit_expr(c, bcx, frame, e),
-    }
 }
 
 pub(crate) fn emit_match_arm<M: Module>(
@@ -528,7 +484,7 @@ pub(crate) fn emit_match_arm<M: Module>(
 
     let joined = match &arm.body {
         ArmBody::Value(e) => {
-            let v = emit_expr_expected(c, bcx, frame, e, result_vty)?;
+            let v = emit_expr(c, bcx, frame, e)?;
             if *result_vty == VTy::Unit {
                 bcx.ins().jump(join_b, &[]);
             } else {
@@ -539,11 +495,7 @@ pub(crate) fn emit_match_arm<M: Module>(
             true
         }
         ArmBody::Ret(e) => {
-            let expected = frame
-                .ret_vty
-                .clone()
-                .unwrap_or_else(|| invariant_violation("return match 臂位于函数帧内"));
-            let v = emit_expr_expected(c, bcx, frame, e, &expected)?;
+            let v = emit_expr(c, bcx, frame, e)?;
             let v = coerce_ret(bcx, frame, v);
             let rb = frame
                 .ret_block
@@ -561,8 +513,8 @@ pub(crate) fn emit_match_arm<M: Module>(
             for (i, s) in stmts.iter().enumerate() {
                 ensure_current(bcx, frame);
                 if i + 1 == n {
-                    if let Stmt::Expr { expr, .. } = s {
-                        tail = Some(emit_expr_expected(c, bcx, frame, expr, result_vty)?);
+                    if let Stmt::Expr { expr } = s {
+                        tail = Some(emit_expr(c, bcx, frame, expr)?);
                         continue;
                     }
                 }
