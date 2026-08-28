@@ -1,5 +1,6 @@
 use super::expr::emit_expr;
 use crate::codegen::abi::VTy;
+use crate::codegen::layout::RESULT_TAG_OFFSET;
 use crate::codegen::{native_err, Compiler, Frame};
 use crate::sema::hir::{Expr, StrPart};
 use crate::sema::types::{FloatW, IntW, UIntW};
@@ -102,7 +103,9 @@ pub(crate) fn display_typed<M: Module>(
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),
         VTy::Iterator(_) => str_literal_handle(c, bcx, "<iterator>"),
         VTy::Result(..) => {
-            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), w, 0);
+            let tag = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), w, RESULT_TAG_OFFSET);
             let t = bcx.ins().ireduce(types::I32, tag);
             c.call_rt(bcx, "alias.display.result", &[t])
         }
