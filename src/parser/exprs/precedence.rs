@@ -1,4 +1,9 @@
-use super::*;
+use super::super::Parser;
+use crate::ast::{BinOp, CallArg, Expr};
+use crate::builtins::is_no_paren_builtin;
+use crate::lexer::Tok;
+use crate::limits::MAX_EXPR_CHAIN;
+use crate::{AliasError, AliasResult};
 
 impl Parser {
     pub(in crate::parser) fn parse_expr(&mut self) -> AliasResult<Expr> {
@@ -68,6 +73,7 @@ impl Parser {
     }
 
     /// 无括号调用与方法中缀共享这一边界，但 parser 只做 token 形状能确定的裁决：
+    /// - 预定义无括号调用名由 builtins owner 分类，不在 parser 复制名字表；
     /// - `a XXX b` 明确是 `a.XXX(b)`；
     /// - `f x` / `value method` 两项邻接保留为 Juxtapose，交给 sema 根据 lhs 静态类型裁决；
     /// - 非标识符实参的 `f 1`、`f 'x'` 等直接是单参函数调用。
@@ -82,17 +88,8 @@ impl Parser {
                     if chain > MAX_EXPR_CHAIN {
                         return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));
                     }
-                    let callee_is_bare_builtin = matches!(&lhs, Expr::Ident(n, _)
-                    if matches!(
-                        n.as_str(),
-                        "println"
-                            | "print"
-                            | "increase"
-                            | "decrease"
-                            | "from"
-                            | "try_from"
-                            | "typeof"
-                    ));
+                    let callee_is_bare_builtin =
+                        matches!(&lhs, Expr::Ident(n, _) if is_no_paren_builtin(n));
                     if callee_is_bare_builtin {
                         let arg = self.parse_unary()?;
                         let a_span = arg.span();
