@@ -879,178 +879,209 @@ fn lower_match_arm(arm: &crate::ast::MatchArm, facts: &mut LowerFacts) -> AliasR
     })
 }
 
-fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
-    fn check_expr(expr: &Expr) -> AliasResult<()> {
-        if expr.ty().contains_unknown() {
-            return Err(AliasError {
-                msg: format!("内部 sema 不变式被破坏: HIR 仍含未确定类型 {}", expr.ty().name()),
-                span: expr.span(),
-            });
-        }
-        match expr {
-            Expr::Ident(name, None, span, _) => {
-                // None 只允许作为不求值的 builtin/constructor 直接 callee；父调用负责验证。
-                let _ = (name, span);
-            }
-            Expr::Str(parts, ..) => {
-                for part in parts {
-                    if let StrPart::Hole(hole) = part {
-                        check_expr(hole)?;
-                    }
-                }
-            }
-            Expr::Cast { expr, .. }
-            | Expr::Neg { expr, .. }
-            | Expr::Not { expr, .. }
-            | Expr::BitNot { expr, .. }
-            | Expr::Propagate { expr, .. } => check_expr(expr)?,
-            Expr::Binary { lhs, rhs, .. } => {
-                check_expr(lhs)?;
-                check_expr(rhs)?;
-            }
-            Expr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-                ..
-            } => {
-                check_expr(cond)?;
-                check_expr(then_expr)?;
-                check_expr(else_expr)?;
-            }
-            Expr::Call {
-                callee,
-                args,
-                info,
-                ..
-            } => {
-                let Some(target) = info.call_target.as_ref() else {
-                    return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: HIR Call 缺少 target".into(),
-                        span: expr.span(),
-                    });
-                };
-                match target {
-                    CallTarget::FunctionValue => {
-                        if matches!(callee.as_ref(), Expr::Ident(_, None, ..)) {
-                            return Err(AliasError {
-                                msg: "内部 sema 不变式被破坏: 函数值 callee 缺少 BindingId".into(),
-                                span: callee.span(),
-                            });
-                        }
-                        check_expr(callee)?;
-                    }
-                    _ => {
-                        if !matches!(callee.as_ref(), Expr::Ident(..)) {
-                            return Err(AliasError {
-                                msg: "内部 sema 不变式被破坏: builtin/constructor callee 非直接名字".into(),
-                                span: callee.span(),
-                            });
-                        }
-                    }
-                }
-                for arg in args {
-                    check_expr(&arg.value)?;
-                }
-            }
-            Expr::MethodCall {
-                recv, args, info, ..
-            } => {
-                if matches!(
-                    info.call_target,
-                    Some(CallTarget::Method(MethodTarget::User { id: None, .. }))
-                ) {
-                    return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: HIR 用户方法缺少 MethodId".into(),
-                        span: expr.span(),
-                    });
-                }
-                check_expr(recv)?;
-                for arg in args {
-                    check_expr(&arg.value)?;
-                }
-            }
-            Expr::Field { recv, .. } => check_expr(recv)?,
-            Expr::Index { recv, idx, .. } => {
-                check_expr(recv)?;
-                check_expr(idx)?;
-            }
-            Expr::ArrayLit { elems, .. } => {
-                for elem in elems {
-                    check_expr(elem)?;
-                }
-            }
-            Expr::FuncLit { body, .. } => check_body(body)?,
-            Expr::Match { subject, arms, .. } => {
-                check_expr(subject)?;
-                for arm in arms {
-                    match &arm.body {
-                        ArmBody::Block(stmts) => check_stmts(stmts)?,
-                        ArmBody::Value(value) | ArmBody::Ret(value) => check_expr(value)?,
-                    }
-                }
-            }
-            Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Ident(_, Some(_), ..) | Expr::This(..) => {}
-        }
-        Ok(())
-    }
-    fn check_stmt(stmt: &Stmt) -> AliasResult<()> {
-        match stmt {
-            Stmt::Binding(binding) => check_expr(&binding.value),
-            Stmt::Assign { value, .. } => check_expr(value),
-            Stmt::FieldAssign { recv, value, .. } => {
-                check_expr(recv)?;
-                check_expr(value)
-            }
-            Stmt::ExprStmt { expr, .. } => check_expr(expr),
-            Stmt::Return { value, .. } => {
-                if let Some(value) = value { check_expr(value)?; }
-                Ok(())
-            }
-            Stmt::If { branches, else_body, .. } => {
-                for (cond, body) in branches {
-                    check_expr(cond)?;
-                    check_stmts(body)?;
-                }
-                if let Some(body) = else_body { check_stmts(body)?; }
-                Ok(())
-            }
-            Stmt::While { cond, body, .. } => {
-                check_expr(cond)?;
-                check_stmts(body)
-            }
-            Stmt::For { iterable, body, .. } => {
-                check_expr(iterable)?;
-                check_stmts(body)
-            }
-            Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
-        }
-    }
-    fn check_stmts(stmts: &[Stmt]) -> AliasResult<()> {
-        for stmt in stmts { check_stmt(stmt)?; }
-        Ok(())
-    }
-    fn check_body(body: &Body) -> AliasResult<()> {
-        match body {
-            Body::Block(stmts) => check_stmts(stmts),
-            Body::Single(stmt) => check_stmt(stmt),
-        }
-    }
+enum HirValidationNode<'a> {
+    Expr(&'a Expr),
+    Stmt(&'a Stmt),
+}
 
-    for item in &program.items {
+fn push_validation_body<'a>(stack: &mut Vec<HirValidationNode<'a>>, body: &'a Body) {
+    match body {
+        Body::Block(stmts) => {
+            for stmt in stmts.iter().rev() {
+                stack.push(HirValidationNode::Stmt(stmt));
+            }
+        }
+        Body::Single(stmt) => stack.push(HirValidationNode::Stmt(stmt)),
+    }
+}
+
+fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
+    let mut stack = Vec::new();
+    for item in program.items.iter().rev() {
         match item {
-            Item::Binding(binding) => check_expr(&binding.value)?,
+            Item::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
             Item::StructDef(def) => {
-                for field in &def.fields {
+                for field in def.fields.iter().rev() {
                     if field.ty.contains_unknown() {
                         return Err(AliasError {
                             msg: "内部 sema 不变式被破坏: 字段类型未确定".into(),
                             span: field.span,
                         });
                     }
-                    if let Some(default) = &field.default { check_expr(default)?; }
+                    if let Some(default) = &field.default {
+                        stack.push(HirValidationNode::Expr(default));
+                    }
                 }
             }
+        }
+    }
+
+    while let Some(node) = stack.pop() {
+        match node {
+            HirValidationNode::Expr(expr) => {
+                if expr.ty().contains_unknown() {
+                    return Err(AliasError {
+                        msg: format!(
+                            "内部 sema 不变式被破坏: HIR 仍含未确定类型 {}",
+                            expr.ty().name()
+                        ),
+                        span: expr.span(),
+                    });
+                }
+                match expr {
+                    Expr::Ident(..) | Expr::This(..) | Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) => {}
+                    Expr::Str(parts, ..) => {
+                        for part in parts.iter().rev() {
+                            if let StrPart::Hole(hole) = part {
+                                stack.push(HirValidationNode::Expr(hole));
+                            }
+                        }
+                    }
+                    Expr::Cast { expr, .. }
+                    | Expr::Neg { expr, .. }
+                    | Expr::Not { expr, .. }
+                    | Expr::BitNot { expr, .. }
+                    | Expr::Propagate { expr, .. } => {
+                        stack.push(HirValidationNode::Expr(expr));
+                    }
+                    Expr::Binary { lhs, rhs, .. } => {
+                        stack.push(HirValidationNode::Expr(rhs));
+                        stack.push(HirValidationNode::Expr(lhs));
+                    }
+                    Expr::Ternary {
+                        cond,
+                        then_expr,
+                        else_expr,
+                        ..
+                    } => {
+                        stack.push(HirValidationNode::Expr(else_expr));
+                        stack.push(HirValidationNode::Expr(then_expr));
+                        stack.push(HirValidationNode::Expr(cond));
+                    }
+                    Expr::Call {
+                        callee,
+                        args,
+                        info,
+                        ..
+                    } => {
+                        let Some(target) = info.call_target.as_ref() else {
+                            return Err(AliasError {
+                                msg: "内部 sema 不变式被破坏: HIR Call 缺少 target".into(),
+                                span: expr.span(),
+                            });
+                        };
+                        match target {
+                            CallTarget::FunctionValue => {
+                                if matches!(callee.as_ref(), Expr::Ident(_, None, ..)) {
+                                    return Err(AliasError {
+                                        msg: "内部 sema 不变式被破坏: 函数值 callee 缺少 BindingId".into(),
+                                        span: callee.span(),
+                                    });
+                                }
+                                stack.push(HirValidationNode::Expr(callee));
+                            }
+                            _ => {
+                                if !matches!(callee.as_ref(), Expr::Ident(..)) {
+                                    return Err(AliasError {
+                                        msg: "内部 sema 不变式被破坏: builtin/constructor callee 非直接名字".into(),
+                                        span: callee.span(),
+                                    });
+                                }
+                            }
+                        }
+                        for arg in args.iter().rev() {
+                            stack.push(HirValidationNode::Expr(&arg.value));
+                        }
+                    }
+                    Expr::MethodCall {
+                        recv, args, info, ..
+                    } => {
+                        if matches!(
+                            info.call_target,
+                            Some(CallTarget::Method(MethodTarget::User { id: None, .. }))
+                        ) {
+                            return Err(AliasError {
+                                msg: "内部 sema 不变式被破坏: HIR 用户方法缺少 MethodId".into(),
+                                span: expr.span(),
+                            });
+                        }
+                        for arg in args.iter().rev() {
+                            stack.push(HirValidationNode::Expr(&arg.value));
+                        }
+                        stack.push(HirValidationNode::Expr(recv));
+                    }
+                    Expr::Field { recv, .. } => stack.push(HirValidationNode::Expr(recv)),
+                    Expr::Index { recv, idx, .. } => {
+                        stack.push(HirValidationNode::Expr(idx));
+                        stack.push(HirValidationNode::Expr(recv));
+                    }
+                    Expr::ArrayLit { elems, .. } => {
+                        for elem in elems.iter().rev() {
+                            stack.push(HirValidationNode::Expr(elem));
+                        }
+                    }
+                    Expr::FuncLit { body, .. } => push_validation_body(&mut stack, body),
+                    Expr::Match { subject, arms, .. } => {
+                        for arm in arms.iter().rev() {
+                            match &arm.body {
+                                ArmBody::Block(stmts) => {
+                                    for stmt in stmts.iter().rev() {
+                                        stack.push(HirValidationNode::Stmt(stmt));
+                                    }
+                                }
+                                ArmBody::Value(value) | ArmBody::Ret(value) => {
+                                    stack.push(HirValidationNode::Expr(value));
+                                }
+                            }
+                        }
+                        stack.push(HirValidationNode::Expr(subject));
+                    }
+                }
+            }
+            HirValidationNode::Stmt(stmt) => match stmt {
+                Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
+                Stmt::Assign { value, .. } => stack.push(HirValidationNode::Expr(value)),
+                Stmt::FieldAssign { recv, value, .. } => {
+                    stack.push(HirValidationNode::Expr(value));
+                    stack.push(HirValidationNode::Expr(recv));
+                }
+                Stmt::ExprStmt { expr, .. } => stack.push(HirValidationNode::Expr(expr)),
+                Stmt::Return { value, .. } => {
+                    if let Some(value) = value {
+                        stack.push(HirValidationNode::Expr(value));
+                    }
+                }
+                Stmt::If {
+                    branches,
+                    else_body,
+                    ..
+                } => {
+                    if let Some(body) = else_body {
+                        for stmt in body.iter().rev() {
+                            stack.push(HirValidationNode::Stmt(stmt));
+                        }
+                    }
+                    for (cond, body) in branches.iter().rev() {
+                        for stmt in body.iter().rev() {
+                            stack.push(HirValidationNode::Stmt(stmt));
+                        }
+                        stack.push(HirValidationNode::Expr(cond));
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    for stmt in body.iter().rev() {
+                        stack.push(HirValidationNode::Stmt(stmt));
+                    }
+                    stack.push(HirValidationNode::Expr(cond));
+                }
+                Stmt::For { iterable, body, .. } => {
+                    for stmt in body.iter().rev() {
+                        stack.push(HirValidationNode::Stmt(stmt));
+                    }
+                    stack.push(HirValidationNode::Expr(iterable));
+                }
+                Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            },
         }
     }
     Ok(())
@@ -1084,6 +1115,13 @@ fn populate_captures(program: &mut CheckedProgram) {
     }
 }
 
+fn populate_body_captures(body: &mut Body, globals: &HashSet<BindingId>) {
+    match body {
+        Body::Block(stmts) => populate_stmt_list_captures(stmts, globals),
+        Body::Single(stmt) => populate_stmt_list_captures(std::slice::from_mut(stmt.as_mut()), globals),
+    }
+}
+
 fn populate_expr_captures(expr: &mut Expr, globals: &HashSet<BindingId>) {
     match expr {
         Expr::FuncLit {
@@ -1093,6 +1131,9 @@ fn populate_expr_captures(expr: &mut Expr, globals: &HashSet<BindingId>) {
             body,
             ..
         } => {
+            // 先填完所有子函数字面量；父函数分析时只消费子函数已经完成的
+            // captures，不再在 CaptureCollector 栈上递归分析整棵子函数树。
+            populate_body_captures(body, globals);
             *captures = analyze_function_captures(params, implicit_bindings, body, globals);
         }
         Expr::Str(parts, ..) => {
@@ -1393,10 +1434,10 @@ fn scan_expr_uses(expr: &mut Expr, collector: &mut CaptureCollector<'_>) {
         Expr::ArrayLit { elems, .. } => {
             for elem in elems { scan_expr_uses(elem, collector); }
         }
-        Expr::FuncLit { params, implicit_bindings, captures, body, .. } => {
-            let child = analyze_function_captures(params, implicit_bindings, body, collector.globals);
-            *captures = child.clone();
-            for id in child { collector.use_id(id); }
+        Expr::FuncLit { captures, .. } => {
+            for id in captures.iter().copied() {
+                collector.use_id(id);
+            }
         }
         Expr::Match { subject, arms, .. } => {
             scan_expr_uses(subject, collector);
