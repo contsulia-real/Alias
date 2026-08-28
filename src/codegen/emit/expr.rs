@@ -1,0 +1,574 @@
+use super::*;
+
+pub(crate) fn emit_expr<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    e: &Expr,
+) -> AliasResult<Value> {
+    match e {
+        Expr::Int(n, ..) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
+        Expr::Float(v, ..) => Ok(bcx.ins().f64const(*v)),
+        Expr::Bool(b, ..) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
+        Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts),
+        Expr::Ident(name, id, span, _) => {
+            let id = id.unwrap_or_else(|| {
+                panic!("内部代码生成不变式被破坏: 可求值标识符 '{name}' 缺少 BindingId")
+            });
+            match cell_addr(c, frame, id) {
+                Some(addr) => {
+                    let vty = bound_vty(c, frame, id);
+                    Ok(read_cell(bcx, frame, &addr, &vty))
+                }
+                None => Err(native_err(*span, format!("内部: BindingId {:?} 无存储", id))),
+            }
+        }
+        Expr::This(span, _) => {
+            let fid = frame
+                .this_fid
+                .ok_or_else(|| native_err(*span, "this 只能出现在 func 体内"))?;
+            let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
+            let code = bcx.ins().func_addr(c.ptr_ty, fref);
+            let env = frame
+                .env
+                .map(|var| bcx.use_var(var))
+                .unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
+            c.call_rt(bcx, "alias.closure.new", &[code, env])
+        }
+        Expr::Cast { expr, span, .. } => {
+            let dst = c.vty(e.ty());
+            let src = c.vty(expr.ty());
+            let value = emit_expr(c, bcx, frame, expr)?;
+            emit_convert(c, bcx, frame, *span, value, &src, &dst)
+        }
+        Expr::Neg { expr, span, .. } => {
+            let v = emit_expr(c, bcx, frame, expr)?;
+            let t = c.vty(expr.ty());
+            match t {
+                VTy::I(w) => {
+                    let wt = cl_type(&VTy::I(w));
+                    let red = narrow(bcx, v, w.bits());
+                    let min = bcx.ins().iconst(
+                        wt,
+                        match w.bits() {
+                            8 => i8::MIN as i64,
+                            16 => i16::MIN as i64,
+                            32 => i32::MIN as i64,
+                            _ => i64::MIN,
+                        },
+                    );
+                    let overflow = bcx.ins().icmp(IntCC::Equal, red, min);
+                    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", *span)?;
+                    let n = bcx.ins().ineg(red);
+                    Ok(widen_signed(bcx, n, wt))
+                }
+                VTy::F(_) => Ok(bcx.ins().fneg(v)),
+                _ => invariant_violation("取负操作数为有符号整数或浮点 (sema 已校验)"),
+            }
+        }
+        Expr::Not { expr, .. } => {
+            let v = emit_expr(c, bcx, frame, expr)?;
+            Ok(emit_bool_not(bcx, v))
+        }
+        Expr::BitNot { expr, .. } => {
+            let vty = c.vty(expr.ty());
+            let v = emit_expr(c, bcx, frame, expr)?;
+            emit_bit_not_typed(bcx, v, &vty)
+        }
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => emit_short_circuit(c, bcx, frame, false, lhs, rhs),
+        Expr::Binary {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+            ..
+        } => emit_short_circuit(c, bcx, frame, true, lhs, rhs),
+        Expr::Binary {
+            op, lhs, rhs, span, ..
+        } => {
+            let l = emit_expr(c, bcx, frame, lhs)?;
+            let r = emit_expr(c, bcx, frame, rhs)?;
+            emit_binary(c, bcx, frame, *op, lhs, l, r, *span)
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let expected = c.vty(e.ty());
+            emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, &expected)
+        }
+        Expr::Call {
+            callee, args, span, ..
+        } => emit_call(
+            c,
+            bcx,
+            frame,
+            callee,
+            args,
+            e.call_target()
+                .unwrap_or_else(|| invariant_violation("调用表达式必须携带已解析目标")),
+            *span,
+        ),
+        Expr::MethodCall {
+            recv, args, span, ..
+        } => {
+            let Some(CallTarget::Method(target)) = e.call_target() else {
+                invariant_violation("方法调用必须携带已解析目标")
+            };
+            emit_method_call(c, bcx, frame, recv, args, target, *span)
+        }
+        Expr::Field {
+            recv,
+            field_index,
+            ..
+        } => {
+            let p = emit_expr(c, bcx, frame, recv)?;
+            let fvty = field_vty(c, recv, *field_index)?;
+            let off = field_offset(c, recv, *field_index)?;
+            let raw = bcx.ins().load(cl_type(&fvty), MemFlagsData::new(), p, off);
+            Ok(norm_load(bcx, raw, &fvty))
+        }
+        Expr::Index {
+            recv, idx, span, ..
+        } => {
+            let array = emit_expr(c, bcx, frame, recv)?;
+            let idxw = emit_expr(c, bcx, frame, idx)?;
+            let elem_vty = match c.vty(recv.ty()) {
+                VTy::Array(inner) => (*inner).clone(),
+                _ => invariant_violation("下标主语为 array (sema 已校验)"),
+            };
+            let raw_array = array_raw(bcx, array);
+            let idx32 = bcx.ins().ireduce(types::I32, idxw);
+            let len64 = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), raw_array, 8);
+            let len32 = bcx.ins().ireduce(types::I32, len64);
+            emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
+            let dp = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), raw_array, 0);
+            let idx64 = bcx.ins().sextend(types::I64, idx32);
+            let off = bcx.ins().imul_imm_s(idx64, 8);
+            let addr = bcx.ins().iadd(dp, off);
+            let raw = bcx
+                .ins()
+                .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
+            Ok(norm_load(bcx, raw, &elem_vty))
+        }
+        Expr::ArrayLit { elems, .. } => {
+            let VTy::Array(elem_vty) = c.vty(e.ty()) else {
+                invariant_violation("数组字面量携带 array 类型")
+            };
+            emit_array_lit_typed(c, bcx, frame, elems, &elem_vty)
+        }
+        Expr::FuncLit {
+            params,
+            body,
+            captures,
+            ..
+        } => emit_funclit_value(c, bcx, frame, params, body, captures, e.ty()),
+        Expr::Match { subject, arms, .. } => {
+            let result_vty = c.vty(e.ty());
+            emit_match_typed(c, bcx, frame, subject, arms, &result_vty)
+        }
+        Expr::Propagate { expr, .. } => {
+            let subj = emit_expr(c, bcx, frame, expr)?;
+            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+            let is_err = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 1);
+            let err_b = bcx.create_block();
+            let ok_b = bcx.create_block();
+            bcx.ins().brif(is_err, err_b, &[], ok_b, &[]);
+            bcx.seal_block(err_b);
+            bcx.seal_block(ok_b);
+
+            bcx.switch_to_block(err_b);
+            let rb = frame
+                .ret_block
+                .unwrap_or_else(|| invariant_violation("? 仅在函数体内可达 (sema 已校验)"));
+            bcx.ins().jump(rb, &[BlockArg::Value(subj)]);
+            frame.terminated = true;
+
+            bcx.switch_to_block(ok_b);
+            frame.terminated = false;
+            let pvty = match c.vty(expr.ty()) {
+                VTy::Result(t, _) => *t,
+                _ => invariant_violation("? 操作数携带 result 类型"),
+            };
+            let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
+            Ok(restore_word(bcx, raw, &pvty))
+        }
+    }
+}
+
+fn emit_bool_not(bcx: &mut FunctionBuilder, v: Value) -> Value {
+    let b = bcx.ins().icmp_imm_s(IntCC::Equal, v, 0);
+    bcx.ins().uextend(types::I64, b)
+}
+
+fn emit_bit_not_typed(bcx: &mut FunctionBuilder, v: Value, vty: &VTy) -> AliasResult<Value> {
+    match vty {
+        VTy::I(w) => {
+            let wt = cl_type(vty);
+            let red = narrow(bcx, v, w.bits());
+            let n = bcx.ins().bnot(red);
+            Ok(widen_signed(bcx, n, wt))
+        }
+        VTy::U(w) => {
+            let wt = cl_type(vty);
+            let red = narrow(bcx, v, w.bits());
+            let n = bcx.ins().bnot(red);
+            Ok(widen_unsigned(bcx, n, wt))
+        }
+        _ => invariant_violation("位非操作数为整数 (sema 已校验)"),
+    }
+}
+
+fn emit_short_circuit<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    is_or: bool,
+    lhs: &Expr,
+    rhs: &Expr,
+) -> AliasResult<Value> {
+    let l = emit_expr(c, bcx, frame, lhs)?;
+    let rhs_b = bcx.create_block();
+    let join_b = bcx.create_block();
+    let out = bcx.append_block_param(join_b, types::I64);
+    let short = bcx.ins().iconst(types::I64, if is_or { 1 } else { 0 });
+    if is_or {
+        bcx.ins()
+            .brif(l, join_b, &[BlockArg::Value(short)], rhs_b, &[]);
+    } else {
+        bcx.ins()
+            .brif(l, rhs_b, &[], join_b, &[BlockArg::Value(short)]);
+    }
+    bcx.seal_block(rhs_b);
+    bcx.switch_to_block(rhs_b);
+    let r = emit_expr(c, bcx, frame, rhs)?;
+    bcx.ins().jump(join_b, &[BlockArg::Value(r)]);
+    bcx.seal_block(join_b);
+    bcx.switch_to_block(join_b);
+    frame.terminated = false;
+    Ok(out)
+}
+
+fn emit_ternary_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    cond: &Expr,
+    then_expr: &Expr,
+    else_expr: &Expr,
+    expected: &VTy,
+) -> AliasResult<Value> {
+    let cv = emit_expr(c, bcx, frame, cond)?;
+    let then_b = bcx.create_block();
+    let else_b = bcx.create_block();
+    let join_b = bcx.create_block();
+    let out = bcx.append_block_param(join_b, cl_type(expected));
+    bcx.ins().brif(cv, then_b, &[], else_b, &[]);
+    bcx.seal_block(then_b);
+    bcx.seal_block(else_b);
+
+    bcx.switch_to_block(then_b);
+    frame.terminated = false;
+    let a = emit_expr_expected(c, bcx, frame, then_expr, expected)?;
+    if !frame.terminated {
+        let a = norm_store(bcx, a, expected);
+        bcx.ins().jump(join_b, &[BlockArg::Value(a)]);
+    }
+
+    bcx.switch_to_block(else_b);
+    frame.terminated = false;
+    let b = emit_expr_expected(c, bcx, frame, else_expr, expected)?;
+    if !frame.terminated {
+        let b = norm_store(bcx, b, expected);
+        bcx.ins().jump(join_b, &[BlockArg::Value(b)]);
+    }
+
+    bcx.seal_block(join_b);
+    bcx.switch_to_block(join_b);
+    frame.terminated = false;
+    Ok(norm_load(bcx, out, expected))
+}
+
+fn emit_match_typed<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    subject: &Expr,
+    arms: &[MatchArm],
+    result_vty: &VTy,
+) -> AliasResult<Value> {
+    let subject_vty = c.vty(subject.ty());
+    let subj = emit_expr(c, bcx, frame, subject)?;
+    let join_b = bcx.create_block();
+    let jv = if *result_vty == VTy::Unit {
+        None
+    } else {
+        Some(bcx.append_block_param(join_b, types::I64))
+    };
+    let mut any_join = false;
+
+    for (idx, arm) in arms.iter().enumerate() {
+        let arm_b = bcx.create_block();
+        let last = idx + 1 == arms.len();
+        let next_b = if last { None } else { Some(bcx.create_block()) };
+
+        if let Some(next_b) = next_b {
+            let matched = emit_pattern_test(c, bcx, &arm.pattern, subj)?;
+            bcx.ins().brif(matched, arm_b, &[], next_b, &[]);
+            frame.terminated = true;
+            bcx.seal_block(arm_b);
+            bcx.seal_block(next_b);
+        } else {
+            bcx.ins().jump(arm_b, &[]);
+            frame.terminated = true;
+            bcx.seal_block(arm_b);
+        }
+
+        bcx.switch_to_block(arm_b);
+        frame.terminated = false;
+        any_join |= emit_match_arm(c, bcx, frame, arm, &subject_vty, result_vty, subj, join_b)?;
+
+        if let Some(next_b) = next_b {
+            bcx.switch_to_block(next_b);
+            frame.terminated = false;
+        }
+    }
+
+    if any_join {
+        bcx.seal_block(join_b);
+        bcx.switch_to_block(join_b);
+        frame.terminated = false;
+        Ok(match jv {
+            Some(value) => restore_word(bcx, value, result_vty),
+            None => bcx.ins().iconst(types::I64, 0),
+        })
+    } else {
+        ensure_current(bcx, frame);
+        Ok(bcx.ins().iconst(types::I64, 0))
+    }
+}
+
+fn emit_pattern_test<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    pattern: &Pattern,
+    subj: Value,
+) -> AliasResult<Value> {
+    Ok(match pattern {
+        Pattern::Wildcard { .. } | Pattern::Binding { .. } => bcx.ins().iconst(types::I64, 1),
+        Pattern::Int { value, .. } => {
+            let rhs = bcx.ins().iconst(types::I64, *value as i64);
+            bcx.ins().icmp(IntCC::Equal, subj, rhs)
+        }
+        Pattern::Bool { value, .. } => bcx.ins().icmp_imm_s(IntCC::Equal, subj, *value as i64),
+        Pattern::Str { value, .. } => {
+            let rhs = str_literal_handle(c, bcx, value)?;
+            let ord = call_str_cmp(c, bcx, subj, rhs)?;
+            bcx.ins().icmp_imm_s(IntCC::Equal, ord, 0)
+        }
+        Pattern::Constructor { ctor, .. } => {
+            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+            let want = match ctor {
+                CtorKind::Ok => 0,
+                CtorKind::Err => 1,
+            };
+            bcx.ins().icmp_imm_s(IntCC::Equal, tag, want)
+        }
+    })
+}
+
+pub(crate) fn emit_expr_expected<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    e: &Expr,
+    expected: &VTy,
+) -> AliasResult<Value> {
+    match (e, expected) {
+        (Expr::Int(value, ..), VTy::I(_) | VTy::U(_)) => {
+            Ok(bcx.ins().iconst(types::I64, *value as i64))
+        }
+        (Expr::Neg { expr, .. }, VTy::I(_)) if matches!(expr.as_ref(), Expr::Int(..)) => {
+            let Expr::Int(magnitude, ..) = expr.as_ref() else {
+                unreachable!()
+            };
+            Ok(bcx
+                .ins()
+                .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64))
+        }
+        (
+            Expr::Call {
+                args, span, info, ..
+            },
+            _,
+        ) if is_contextual_conversion(info) => {
+            let [arg] = args.as_slice() else {
+                invariant_violation("from/try_from 元数 (sema 已校验)")
+            };
+            let source = c.vty(arg.value.ty());
+            if conversion_exists_vty(&source, expected) {
+                let value = emit_expr(c, bcx, frame, &arg.value)?;
+                emit_convert(c, bcx, frame, *span, value, &source, expected)
+            } else {
+                emit_expr(c, bcx, frame, &arg.value)
+            }
+        }
+        (
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            },
+            _,
+        ) => emit_ternary_typed(c, bcx, frame, cond, then_expr, else_expr, expected),
+        (Expr::Match { subject, arms, .. }, _) => {
+            emit_match_typed(c, bcx, frame, subject, arms, expected)
+        }
+        (
+            Expr::Binary {
+                op, lhs, rhs, span, ..
+            },
+            _,
+        ) if binary_vty_flows_expected(*op, expected) => {
+            let l = emit_expr_expected(c, bcx, frame, lhs, expected)?;
+            let r = emit_expr_expected(c, bcx, frame, rhs, expected)?;
+            emit_binary_values(c, bcx, frame, *op, expected, l, r, *span)
+        }
+        (Expr::BitNot { expr, .. }, VTy::I(_) | VTy::U(_)) => {
+            let v = emit_expr_expected(c, bcx, frame, expr, expected)?;
+            emit_bit_not_typed(bcx, v, expected)
+        }
+        (Expr::ArrayLit { elems, .. }, VTy::Array(elem)) => {
+            emit_array_lit_typed(c, bcx, frame, elems, elem)
+        }
+        (Expr::Call { args, info, .. }, VTy::Result(ok, err))
+            if matches!(info.call_target, Some(CallTarget::ResultConstructor(_))) =>
+        {
+            let Some(CallTarget::ResultConstructor(kind)) = info.call_target.as_ref() else {
+                unreachable!()
+            };
+            let payload = match kind {
+                CtorKind::Ok => (**ok).clone(),
+                CtorKind::Err => (**err).clone(),
+            };
+            emit_result_ctor_typed(c, bcx, frame, *kind, args, &payload)
+        }
+        (Expr::Float(..), VTy::F(FloatW::F32)) => {
+            let v = emit_expr(c, bcx, frame, e)?;
+            Ok(norm_store(bcx, v, expected))
+        }
+        _ => emit_expr(c, bcx, frame, e),
+    }
+}
+
+pub(crate) fn emit_match_arm<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    arm: &MatchArm,
+    subject_vty: &VTy,
+    result_vty: &VTy,
+    subj: Value,
+    join_b: Block,
+) -> AliasResult<bool> {
+    push_scope(frame);
+
+    match (&arm.pattern, subject_vty, arm.binding_id) {
+        (Pattern::Binding { .. }, _, Some(binding_id)) => {
+            emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), binding_id)?;
+        }
+        (
+            Pattern::Constructor {
+                ctor,
+                binding: Some(_),
+                ..
+            },
+            VTy::Result(ok, err),
+            Some(binding_id),
+        ) => {
+            let bind_vty = match ctor {
+                CtorKind::Ok => (**ok).clone(),
+                CtorKind::Err => (**err).clone(),
+            };
+            let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
+            let payload = restore_word(bcx, raw, &bind_vty);
+            emit_local_cell(c, bcx, frame, payload, bind_vty, binding_id)?;
+        }
+        (Pattern::Binding { .. }, _, None)
+        | (Pattern::Constructor { binding: Some(_), .. }, _, None) => {
+            invariant_violation("Pattern 绑定必须携带 BindingId")
+        }
+        _ => {}
+    }
+
+    let joined = match &arm.body {
+        ArmBody::Value(e) => {
+            let v = emit_expr_expected(c, bcx, frame, e, result_vty)?;
+            if *result_vty == VTy::Unit {
+                bcx.ins().jump(join_b, &[]);
+            } else {
+                let word = storage_word(bcx, v, result_vty);
+                bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+            }
+            frame.terminated = true;
+            true
+        }
+        ArmBody::Ret(e) => {
+            let expected = frame
+                .ret_vty
+                .clone()
+                .unwrap_or_else(|| invariant_violation("return match 臂位于函数帧内"));
+            let v = emit_expr_expected(c, bcx, frame, e, &expected)?;
+            let v = coerce_ret(bcx, frame, v);
+            let rb = frame
+                .ret_block
+                .unwrap_or_else(|| invariant_violation("never 臂仅在函数体内可达 (sema 已校验)"));
+            bcx.ins().jump(rb, &[BlockArg::Value(v)]);
+            frame.terminated = true;
+            false
+        }
+        ArmBody::Block(stmts) => {
+            let rb = frame.ret_block.unwrap_or_else(|| {
+                invariant_violation("臂内 return 仅在函数体内可达 (sema 已校验)")
+            });
+            let n = stmts.len();
+            let mut tail: Option<Value> = None;
+            for (i, s) in stmts.iter().enumerate() {
+                ensure_current(bcx, frame);
+                if i + 1 == n {
+                    if let Stmt::ExprStmt { expr, .. } = s {
+                        tail = Some(emit_expr_expected(c, bcx, frame, expr, result_vty)?);
+                        continue;
+                    }
+                }
+                emit_stmt(c, bcx, frame, s, rb)?;
+            }
+            if frame.terminated {
+                false
+            } else {
+                if *result_vty == VTy::Unit {
+                    bcx.ins().jump(join_b, &[]);
+                } else {
+                    let v = tail.unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
+                    let word = storage_word(bcx, v, result_vty);
+                    bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                }
+                frame.terminated = true;
+                true
+            }
+        }
+    };
+    pop_scope(frame);
+    Ok(joined)
+}

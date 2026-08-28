@@ -1,0 +1,277 @@
+use super::*;
+
+impl Checker {
+    pub(super) fn expr_inner(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
+        match e {
+            Expr::Int(value, ..) => Ok(default_positive_int_ty(*value)),
+            Expr::Float(..) => Ok(Ty::Float(FloatW::F64)),
+            Expr::Bool(..) => Ok(Ty::Bool),
+            Expr::Str(parts, _) => {
+                for p in parts {
+                    if let StrPartAst::Hole(h) = p {
+                        if contextual_conversion(h).is_some() {
+                            self.expr_expected(h, env, &Ty::Str)
+                                .map_err(ExprCheckError::into_alias)?;
+                        } else {
+                            require_value(self.expr(h, env)?, h.span())?;
+                        }
+                    }
+                }
+                Ok(Ty::Str)
+            }
+            Expr::Ident(..) | Expr::This(..) => unreachable!("直接名字由 expr 统一处理"),
+            Expr::Cast { target, expr, span } => {
+                let target_ty = check_value_type_slot(target, *span, &self.structs)?;
+                let source_ty = require_value(self.expr(expr, env)?, expr.span())?;
+                if conversion_exists(&source_ty, &target_ty) {
+                    Ok(target_ty)
+                } else {
+                    Err(AliasError {
+                        msg: format!("不存在 {} → {} 转换", source_ty.name(), target_ty.name()),
+                        span: *span,
+                    })
+                }
+            }
+            Expr::Neg { expr, .. } => {
+                if let Expr::Int(magnitude, span) = expr.as_ref() {
+                    return default_negative_int_ty(*magnitude).ok_or_else(|| AliasError {
+                        msg: "负整数字面量超出 i64 表示范围".into(),
+                        span: *span,
+                    });
+                }
+                let t = self.expr(expr, env)?;
+                if t.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                match t {
+                    Ty::Int(w) => Ok(Ty::Int(w)),
+                    Ty::Float(w) => Ok(Ty::Float(w)),
+                    other => Err(AliasError {
+                        msg: format!("取负需要有符号整数或浮点, 实际 {}", other.name()),
+                        span: expr.span(),
+                    }),
+                }
+            }
+            Expr::Not { expr, .. } => {
+                self.require_bool(expr, env, "! 操作数")?;
+                Ok(Ty::Bool)
+            }
+            Expr::BitNot { expr, .. } => {
+                let t = self.expr(expr, env)?;
+                if t.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                match t {
+                    Ty::Int(w) => Ok(Ty::Int(w)),
+                    Ty::UInt(w) => Ok(Ty::UInt(w)),
+                    other => Err(AliasError {
+                        msg: format!("~ 操作数需要整数, 实际 {}", other.name()),
+                        span: expr.span(),
+                    }),
+                }
+            }
+            Expr::Binary { op, lhs, rhs, span } => {
+                let l = self.expr(lhs, env)?;
+                let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
+                    match literal_slot_unify(&l, rhs) {
+                        Some(r) => {
+                            let ty = r.map_err(ExprCheckError::into_alias)?;
+                            self.record_expr_type(rhs, ty.clone());
+                            self.record_literal_components(rhs, &ty);
+                            ty
+                        }
+                        None => self.expr(rhs, env)?,
+                    }
+                } else {
+                    self.expr(rhs, env)?
+                };
+                self.binary(*op, l, r, *span)
+            }
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+                span,
+            } => {
+                self.require_bool(cond, env, "?: 条件")?;
+                let a = self.expr(then_expr, env)?;
+                let b = self.expr(else_expr, env)?;
+                if a.is_unknown() {
+                    Ok(b)
+                } else if b.is_unknown() || types_match(&a, &b) {
+                    Ok(a)
+                } else {
+                    Err(AliasError {
+                        msg: format!("?: 两个值分支类型不一致: {} 与 {}", a.name(), b.name()),
+                        span: *span,
+                    })
+                }
+            }
+            Expr::Call { callee, args, span } => {
+                let ty = self.call(callee, args, *span, env)?;
+                self.record_call_target(e, self.resolve_call_target(callee, env));
+                Ok(ty)
+            }
+            Expr::Juxtapose { lhs, rhs, span } => {
+                let lhs_ty = self.expr_raw_callable(lhs, env)?;
+                match &lhs_ty {
+                    Ty::Func { params, ret } if params.len() == 1 => {
+                        match self.expr_expected(rhs, env, &params[0]) {
+                            Ok(_) => {}
+                            Err(ExprCheckError::Mismatch { actual, .. }) => {
+                                return Err(AliasError {
+                                    msg: format!(
+                                        "第 1 个实参需要 {}, 实际 {}",
+                                        params[0].name(),
+                                        actual.name()
+                                    ),
+                                    span: rhs.span(),
+                                });
+                            }
+                            Err(error) => return Err(error.into_alias()),
+                        }
+                        self.record_call_target(e, CallTarget::FunctionValue);
+                        Ok((**ret).clone())
+                    }
+                    Ty::FuncPoly | Ty::Unknown => {
+                        require_value(self.expr(rhs, env)?, rhs.span())?;
+                        self.record_call_target(e, CallTarget::FunctionValue);
+                        Ok(Ty::Unknown)
+                    }
+                    _ => {
+                        let Expr::Ident(name, _) = rhs.as_ref() else {
+                            return Err(AliasError {
+                                msg: format!("{} 不是可调用值", lhs_ty.name()),
+                                span: *span,
+                            });
+                        };
+                        let ty = self.method_call_with_receiver_ty(
+                            lhs,
+                            lhs_ty.clone(),
+                            name,
+                            &[],
+                            *span,
+                            env,
+                        )?;
+                        let target = resolve_method_target(self, &lhs_ty, name, *span)?;
+                        self.record_call_target(e, CallTarget::Method(target));
+                        Ok(ty)
+                    }
+                }
+            }
+            Expr::MethodCall {
+                recv,
+                name,
+                args,
+                span,
+            } => {
+                let ty = self.method_call(recv, name, args, *span, env)?;
+                let recv_ty = self.expr_facts[&Self::expr_key(recv)].ty.clone();
+                let target = resolve_method_target(self, &recv_ty, name, *span)?;
+                self.record_call_target(e, CallTarget::Method(target));
+                Ok(ty)
+            }
+            Expr::Index { recv, idx, .. } => {
+                let rt = self.expr(recv, env)?;
+                if rt.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                let Ty::Array(elem) = rt else {
+                    return Err(AliasError {
+                        msg: format!("下标访问需要 array 类型, 实际 {}", rt.name()),
+                        span: recv.span(),
+                    });
+                };
+                let it = self.expr(idx, env)?;
+                if !it.is_unknown() && it != Ty::Int(IntW::W32) {
+                    return Err(AliasError {
+                        msg: format!("下标需要 i32, 实际 {}", it.name()),
+                        span: idx.span(),
+                    });
+                }
+                Ok(*elem)
+            }
+            Expr::ArrayLit { elems, .. } => {
+                let mut elem_ty: Option<Ty> = None;
+                for item in elems {
+                    let t = require_value(self.expr(item, env)?, item.span())?;
+                    match &elem_ty {
+                        None => elem_ty = Some(t),
+                        Some(first) if !types_match(first, &t) => {
+                            return Err(AliasError {
+                                msg: format!(
+                                    "数组元素类型不一致: {} 与 {}",
+                                    first.name(),
+                                    t.name()
+                                ),
+                                span: item.span(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Ty::Array(Box::new(elem_ty.unwrap_or(Ty::Unknown))))
+            }
+            Expr::Field { recv, name, span } => {
+                let rt = self.expr(recv, env)?;
+                if rt.is_unknown() {
+                    return Ok(Ty::Unknown);
+                }
+                match rt {
+                    Ty::Struct(s) => {
+                        let info = &self.structs[&s];
+                        let Some((index, field)) = info
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, field)| field.name == *name)
+                        else {
+                            return Err(AliasError {
+                                msg: format!("结构体 {s} 没有字段 '{name}'"),
+                                span: *span,
+                            });
+                        };
+                        let ty = field.ty.clone();
+                        self.field_indices.insert(Self::expr_key(e), index);
+                        Ok(ty)
+                    }
+                    other => Err(AliasError {
+                        msg: format!("{} 没有字段 '{}'", other.name(), name),
+                        span: *span,
+                    }),
+                }
+            }
+            Expr::FuncLit { params, body, span } => {
+                let (ty, param_ids) = self.funclit(params, body, env, None, *span)?;
+                if let Ty::Func {
+                    params: param_types,
+                    ..
+                } = &ty
+                {
+                    self.record_params(params, param_types, &param_ids);
+                }
+                Ok(ty)
+            }
+            Expr::Match {
+                subject,
+                arms,
+                span,
+            } => self
+                .match_expr(subject, arms, *span, env, None)
+                .map_err(ExprCheckError::into_alias),
+            Expr::Propagate { expr, span } => self.propagate(expr, *span, env),
+        }
+    }
+
+    pub(super) fn require_bool(&mut self, e: &Expr, env: &Env, what: &str) -> AliasResult<()> {
+        let t = self.expr(e, env)?;
+        if t.is_unknown() || t == Ty::Bool {
+            Ok(())
+        } else {
+            Err(AliasError {
+                msg: format!("{what}需要 bool, 实际 {}", t.name()),
+                span: e.span(),
+            })
+        }
+    }
+}
