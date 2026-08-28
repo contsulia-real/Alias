@@ -138,8 +138,8 @@ pub enum CtorKind {
     Err,
 }
 
-/// match Pattern 第一批：通配、整体绑定、整数/布尔/字符串字面量，
-/// 以及 result 的 ok/err 构造器 Pattern。构造器载荷当前只允许名字或 `_`。
+/// 当前 match Pattern：通配、整体绑定、整数/布尔/字符串字面量，
+/// 以及 result 的 ok/err 构造器 Pattern。构造器载荷只允许名字或 `_`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Wildcard {
