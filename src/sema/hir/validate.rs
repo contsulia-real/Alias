@@ -112,8 +112,8 @@ fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
         match item {
             Item::Binding(binding) => {
                 ids.insert(binding.binding_id);
-                if let super::BindingOwner::Method { self_id, .. } = binding.owner {
-                    ids.insert(self_id);
+                if let super::BindingOwner::Method { self_id, .. } = &binding.owner {
+                    ids.insert(*self_id);
                 }
                 stack.push(HirValidationNode::Expr(&binding.value));
             }
