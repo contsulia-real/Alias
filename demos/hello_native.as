@@ -1,6 +1,6 @@
-// 当前原生后端演练夹具：算术(含除法)、循环、
+// 当前原生编译演练夹具：算术(含除法)、循环、
 // increase/decrease、函数定义+调用、字符串+插值、闭包引用捕获、
-// 一等函数值、println i32/bool/string、Q⑥ 顶层副作用。
+// 一等函数值、println i32/bool/string、main 前的顶层初始化副作用。
 // struct/match 等能力由各自 demo 覆盖；本文件只演练这里出现的当前语法。
 
 func i32 square = (i32 x) -> return x * x
