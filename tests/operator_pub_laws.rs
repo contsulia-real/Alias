@@ -1,4 +1,4 @@
-//! pub / 余数 / 位运算 / 移位法律测试。
+//! pub / 余数 / 位运算 / 移位当前法律测试。
 
 use alias::run;
 
@@ -16,14 +16,10 @@ fn pub_named_recursion_runs() {
 }
 
 #[test]
-fn public_has_no_keyword_or_compatibility_diagnostic() {
+fn public_is_not_a_language_keyword() {
     let src = "public func i32 nope = () -> return 1\nfunc i32 main = () -> return 0\n";
     let msg = err(src);
-    assert!(!msg.contains("废弃"), "不应存在 public 迁移兼容诊断: {msg}");
-    assert!(
-        !msg.contains("请使用 pub"),
-        "不应存在 public 迁移兼容诊断: {msg}"
-    );
+    assert!(msg.contains("顶层只允许"), "public 应按普通非法顶层语法拒绝: {msg}");
 }
 
 #[test]
