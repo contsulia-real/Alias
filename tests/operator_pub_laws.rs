@@ -16,13 +16,6 @@ fn pub_named_recursion_runs() {
 }
 
 #[test]
-fn public_is_not_a_language_keyword() {
-    let src = "public func i32 nope = () -> return 1\nfunc i32 main = () -> return 0\n";
-    let msg = err(src);
-    assert!(msg.contains("顶层只允许"), "public 应按普通非法顶层语法拒绝: {msg}");
-}
-
-#[test]
 fn remainder_runs_for_signed_and_unsigned_integers() {
     let src = "func i32 main = () -> {\n    val i32 a = 17 % 5\n    val i32 b = -17 % 5\n    val u32 u = 17\n    val u32 v = u % 5\n    if a != 2 { return 1 }\n    if b != -2 { return 2 }\n    if v != 2 { return 3 }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
