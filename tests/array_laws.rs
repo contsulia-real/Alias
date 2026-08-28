@@ -1,17 +1,15 @@
 //! array<T> 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
-//! 语义锚点 (用户批准设计, spec-notes 附录六):
-//! - 字面量 [e1, e2, ...] 元素类型一致; 类型槽 array<T> 恰一参
-//! - 引用语义: 实例 = 泄漏头块 {data_ptr, len, cap}, 别名共享
-//! - 下标读带越界守卫 (i<0 或 i>=len → span-ID 中止存根, exit 1);
-//!   下标赋值本阶段拒绝
-//! - 内建 len/push/pop 编译器提供; pop 空数组运行时中止
+//! 当前语义锚点见 `docs/spec-notes.md`：
+//! - 字面量 [e1, e2, ...] 元素类型一致；类型槽 array<T> 恰一参；
+//! - 引用语义：别名共享同一 array wrapper、底层内容与结构版本；
+//! - 下标读带越界守卫 (i<0 或 i>=len → span-ID 中止存根, exit 1)；
+//!   下标赋值当前未支持并显式拒绝；
+//! - 内建 len/push/pop/iterator 由编译器提供；push/pop 推进共享结构版本，
+//!   pop 空数组运行时中止。
 //!
-//! 列号语义: token span col = 可视列-1 (lexer.rs span_here 先例)。
-//! 运行时中止只能由已编译进程产生；这里走 CLI 子进程，逐字节锁定
-//! 用户可见的 stderr 与退出码 (native_parity 先例)。
-//!
-//! allow: SIZE_OK — 法律表为纯数据矩阵 (项目先例 sema_laws.rs 同注)。
+//! 列号语义按当前 lexer Span 算法冻结。运行时中止只能由已编译进程产生；
+//! 这里走 CLI 子进程逐字节锁定用户可见 stderr 与退出码。
 
 use alias::{run, AliasError};
 
@@ -170,7 +168,7 @@ fn push_wrong_element_type_rejected() {
     );
 }
 
-/// 下标赋值本阶段拒绝 (只读索引裁决)。
+/// 下标赋值当前未支持并显式拒绝。
 #[test]
 fn index_assignment_rejected() {
     assert_law(
@@ -215,12 +213,14 @@ fn array_two_params_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 运行时中止 — span-ID 存根 exit 1, 仅子进程可观测 (详见文件头说明)
+// 运行时中止 — span-ID 存根 exit 1, 仅子进程可观测
 // ---------------------------------------------------------------------------
 
 fn cli_run(src: &str) -> (Vec<u8>, Vec<u8>, Option<i32>) {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // 序列号只用于同一测试进程内生成不重复文件名，不发布任何跨线程状态；
+    // 因此不需要 happens-before 关系，Relaxed 足够。
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("alias-arr-laws-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("创建临时目录失败");
     let p = dir.join(format!("case-{n}.as"));
