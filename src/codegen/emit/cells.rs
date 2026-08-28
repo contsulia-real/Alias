@@ -1,4 +1,13 @@
-use super::*;
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, size_align, value_word_offset, VTy,
+};
+use crate::codegen::{invariant_violation, Compiler, Frame, Slot};
+use crate::sema::hir::BindingId;
+use crate::AliasResult;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
+use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_module::Module;
+use std::collections::HashMap;
 
 pub(crate) enum CellAddr {
     Reg(Variable),
@@ -11,6 +20,9 @@ pub(crate) fn cell_addr<M: Module>(
     frame: &Frame,
     id: BindingId,
 ) -> Option<CellAddr> {
+    // 词法局部必须先于捕获和全局解析；否则 shadowing 会读写到错误的 cell。
+    // init_ctx 初始化顶层时只能看到已经登记到当前 frame 的槽位，禁止前向落回
+    // globals_final，否则顶层初始化顺序会被无意绕过。
     for scope in frame.scopes.iter().rev() {
         if let Some(s) = scope.get(&id) {
             return Some(match s {
@@ -43,6 +55,8 @@ pub(crate) fn read_cell(
             bcx.ins().load(t, MemFlagsData::new(), cp, 0)
         }
         CellAddr::EnvLoad(i) => {
+            // 捕获环境保存的是共享 cell 指针而不是值本身；必须先从 env 取 cell，
+            // 再按绑定 ABI 取值，才能让内外层闭包观察到同一次可变绑定更新。
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
             let cell = bcx
                 .ins()
@@ -71,6 +85,7 @@ pub(crate) fn write_cell(
             bcx.ins().store(MemFlagsData::new(), sv, cp, 0);
         }
         CellAddr::EnvLoad(i) => {
+            // 与 read_cell 对称：env 槽是 cell 地址，直接覆盖 env 槽会破坏共享捕获语义。
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
             let cell = bcx
                 .ins()
@@ -121,6 +136,9 @@ pub(crate) fn first_result(bcx: &FunctionBuilder, inst: cranelift_codegen::ir::I
 
 pub(crate) fn ensure_current(bcx: &mut FunctionBuilder, frame: &mut Frame) {
     if frame.terminated {
+        // Cranelift 不允许在已有 terminator 的 block 后继续追加指令。这里创建并封闭一个
+        // 不可达 dead block，仅为了承接源代码中已经不可达的后续语句并保持 builder 合法；
+        // 它绝不能被接回可达 CFG，否则会把源级死代码重新变成可执行路径。
         let dead = bcx.create_block();
         bcx.switch_to_block(dead);
         bcx.seal_block(dead);
