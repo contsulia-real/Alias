@@ -3,9 +3,8 @@
 //! 所有权律: 本模块是"如何把 COFF 字节变成可执行文件"的唯一拥有者;
 //! codegen 只产出字节, 不见链接细节。
 //!
-//! 选型依据 (MIGRATION.md M19): rust-lld.exe 由 rustup 工具链自带,
-//! 零新增 crate; lld_rs 绑定停在 LLVM14 且拖 llvm-sys 构建依赖, 违反
-//! 加依赖清单律。定位失败时可用环境变量 ALIAS_RUST_LLD 覆盖。
+//! rust-lld.exe 由 rustup 工具链自带，不新增 crate；替代绑定会引入额外 LLVM
+//! 构建依赖而没有当前收益。定位失败时可用环境变量 ALIAS_RUST_LLD 覆盖。
 
 use crate::target::TARGET_TRIPLE;
 use crate::{AliasError, AliasResult, Span};
