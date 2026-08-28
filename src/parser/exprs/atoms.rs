@@ -1,4 +1,7 @@
-use super::*;
+use super::super::{validate_nesting, Parser};
+use crate::ast::{ArmBody, Body, CtorKind, Expr, MatchArm, Param, Pattern, StrPartAst};
+use crate::lexer::{StrPart, Tok, Token};
+use crate::{AliasError, AliasResult};
 
 impl Parser {
     pub(super) fn parse_primary(&mut self) -> AliasResult<Expr> {
@@ -30,6 +33,12 @@ impl Parser {
                             validate_nesting(&sub_toks)?;
                             let mut sub = Parser::new(sub_toks);
                             let e = sub.parse_expr().map_err(|e| AliasError {
+                                msg: format!("插值内表达式错误: {}", e.msg),
+                                span: e.span,
+                            })?;
+                            // 插值是一个完整的表达式子流；允许 parse_expr 留下尾 token 会把
+                            // `${1, 2}` 一类非法源码静默截断为 `${1}`，破坏 fail-closed 边界。
+                            sub.expect_eof().map_err(|e| AliasError {
                                 msg: format!("插值内表达式错误: {}", e.msg),
                                 span: e.span,
                             })?;
