@@ -1,14 +1,7 @@
 //! parser::exprs — 表达式解析 facade。
 //!
-//! 优先级与原规则保持不变；实现按职责拆为 precedence / postfix / atoms。
-
-use super::{validate_nesting, Parser};
-use crate::ast::{
-    ArmBody, BinOp, Body, CallArg, CtorKind, Expr, MatchArm, Param, Pattern, StrPartAst,
-};
-use crate::lexer::{StrPart, Tok, Token};
-use crate::limits::MAX_EXPR_CHAIN;
-use crate::{AliasError, AliasResult};
+//! 实现按职责拆为 precedence / postfix / atoms；子模块直接依赖各自实际 owner，
+//! 本 facade 不再充当隐式依赖 barrel。
 
 mod atoms;
 mod postfix;
