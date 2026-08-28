@@ -16,7 +16,10 @@ impl Checker {
         env: &Env,
     ) -> AliasResult<Ty> {
         if let Expr::Ident(name, _) = callee {
-            if self.structs.contains_key(name) {
+            // User-defined struct constructors live in the top-level namespace, but current
+            // language semantics allow a lexical binding to shadow that constructor name.
+            // Scope lookup must therefore win before constructor classification.
+            if Scope::get(env, name).is_none() && self.structs.contains_key(name) {
                 return self.construct(name, args, span, env);
             }
             if let Some(kind) = classify_result_constructor(name) {
@@ -127,10 +130,15 @@ impl Checker {
         }
     }
 
-    pub(super) fn resolve_call_target(&self, callee: &Expr, _env: &Env) -> LowerCallTarget {
+    pub(super) fn resolve_call_target(&self, callee: &Expr, env: &Env) -> LowerCallTarget {
         let Expr::Ident(name, _) = callee else {
             return LowerCallTarget::FunctionValue;
         };
+        // Mirror call(): lexical bindings shadow user struct constructors. Predefined names
+        // cannot enter Scope, so their structured classification remains authoritative below.
+        if Scope::get(env, name).is_some() {
+            return LowerCallTarget::FunctionValue;
+        }
         if self.structs.contains_key(name) {
             return LowerCallTarget::StructConstructor(name.clone());
         }
