@@ -1,4 +1,9 @@
-use super::*;
+use super::{validate_native_runtime_coverage, NativeExterns};
+use crate::codegen::{invariant_violation, native_err, Compiler};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::types;
+use cranelift_module::{Linkage, Module};
+use std::collections::HashMap;
 
 pub(super) const RUNTIME_STATICS: &[(&str, &[u8])] = &[
     ("rt_nl", b"\n"),
