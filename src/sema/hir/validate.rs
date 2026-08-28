@@ -1,14 +1,28 @@
 use super::{
-    ArmBody, BindingId, BindingOwner, Body, CallTarget, CheckedProgram, Expr, Item, MethodId,
-    MethodTarget, Stmt, StrPart,
+    ArmBody, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget, CheckedProgram,
+    CtorKind, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
 };
-use crate::sema::types::Ty;
-use crate::{AliasError, AliasResult};
+use crate::sema::types::{types_match, Ty};
+use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
 
 enum HirValidationNode<'a> {
     Expr(&'a Expr),
     Stmt(&'a Stmt),
+}
+
+#[derive(Clone)]
+struct UserMethodContract {
+    receiver: Ty,
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
+    AliasError {
+        msg: format!("内部 sema 不变式被破坏: {}", msg.into()),
+        span,
+    }
 }
 
 fn push_validation_body<'a>(stack: &mut Vec<HirValidationNode<'a>>, body: &'a Body) {
@@ -106,6 +120,52 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
     }
 }
 
+fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt) {
+    match stmt {
+        Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
+        Stmt::Assign { value, .. } => stack.push(HirValidationNode::Expr(value)),
+        Stmt::FieldAssign { recv, value, .. } => {
+            stack.push(HirValidationNode::Expr(value));
+            stack.push(HirValidationNode::Expr(recv));
+        }
+        Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
+        Stmt::Return { value } => {
+            if let Some(value) = value {
+                stack.push(HirValidationNode::Expr(value));
+            }
+        }
+        Stmt::If {
+            branches,
+            else_body,
+        } => {
+            if let Some(body) = else_body {
+                for stmt in body.iter().rev() {
+                    stack.push(HirValidationNode::Stmt(stmt));
+                }
+            }
+            for (cond, body) in branches.iter().rev() {
+                for stmt in body.iter().rev() {
+                    stack.push(HirValidationNode::Stmt(stmt));
+                }
+                stack.push(HirValidationNode::Expr(cond));
+            }
+        }
+        Stmt::While { cond, body } => {
+            for stmt in body.iter().rev() {
+                stack.push(HirValidationNode::Stmt(stmt));
+            }
+            stack.push(HirValidationNode::Expr(cond));
+        }
+        Stmt::For { iterable, body, .. } => {
+            for stmt in body.iter().rev() {
+                stack.push(HirValidationNode::Stmt(stmt));
+            }
+            stack.push(HirValidationNode::Expr(iterable));
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
 fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
     let mut ids = HashSet::new();
     let mut stack = Vec::new();
@@ -163,7 +223,25 @@ fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
     ids
 }
 
-fn collect_user_methods(program: &CheckedProgram) -> AliasResult<HashMap<MethodId, Ty>> {
+fn collect_struct_fields(program: &CheckedProgram) -> AliasResult<HashMap<String, usize>> {
+    let mut structs = HashMap::new();
+    for item in &program.items {
+        let Item::StructDef(def) = item else {
+            continue;
+        };
+        if structs.insert(def.name.clone(), def.fields.len()).is_some() {
+            return Err(invariant(
+                Span::default(),
+                format!("结构体 '{}' 在 HIR 中重复", def.name),
+            ));
+        }
+    }
+    Ok(structs)
+}
+
+fn collect_user_methods(
+    program: &CheckedProgram,
+) -> AliasResult<HashMap<MethodId, UserMethodContract>> {
     let mut methods = HashMap::new();
     for item in &program.items {
         let Item::Binding(binding) = item else {
@@ -178,65 +256,30 @@ fn collect_user_methods(program: &CheckedProgram) -> AliasResult<HashMap<MethodI
             continue;
         };
         if receiver.contains_unknown() {
-            return Err(AliasError {
-                msg: "内部 sema 不变式被破坏: 用户方法接收者类型未确定".into(),
-                span: binding.span,
-            });
+            return Err(invariant(binding.span, "用户方法接收者类型未确定"));
         }
-        if methods.insert(*method_id, receiver.clone()).is_some() {
-            return Err(AliasError {
-                msg: format!("内部 sema 不变式被破坏: MethodId 重复 {method_id:?}"),
-                span: binding.span,
-            });
+        let Ty::Func { params, ret } = &binding.ty else {
+            return Err(invariant(binding.span, "用户方法绑定缺少完整函数类型"));
+        };
+        if params.first() != Some(receiver) {
+            return Err(invariant(
+                binding.span,
+                "用户方法函数类型首参数与接收者不一致",
+            ));
+        }
+        let contract = UserMethodContract {
+            receiver: receiver.clone(),
+            params: params[1..].to_vec(),
+            ret: (**ret).clone(),
+        };
+        if methods.insert(*method_id, contract).is_some() {
+            return Err(invariant(
+                binding.span,
+                format!("MethodId 重复 {method_id:?}"),
+            ));
         }
     }
     Ok(methods)
-}
-
-fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt) {
-    match stmt {
-        Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(HirValidationNode::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
-            stack.push(HirValidationNode::Expr(value));
-            stack.push(HirValidationNode::Expr(recv));
-        }
-        Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
-        Stmt::Return { value } => {
-            if let Some(value) = value {
-                stack.push(HirValidationNode::Expr(value));
-            }
-        }
-        Stmt::If {
-            branches,
-            else_body,
-        } => {
-            if let Some(body) = else_body {
-                for stmt in body.iter().rev() {
-                    stack.push(HirValidationNode::Stmt(stmt));
-                }
-            }
-            for (cond, body) in branches.iter().rev() {
-                for stmt in body.iter().rev() {
-                    stack.push(HirValidationNode::Stmt(stmt));
-                }
-                stack.push(HirValidationNode::Expr(cond));
-            }
-        }
-        Stmt::While { cond, body } => {
-            for stmt in body.iter().rev() {
-                stack.push(HirValidationNode::Stmt(stmt));
-            }
-            stack.push(HirValidationNode::Expr(cond));
-        }
-        Stmt::For { iterable, body, .. } => {
-            for stmt in body.iter().rev() {
-                stack.push(HirValidationNode::Stmt(stmt));
-            }
-            stack.push(HirValidationNode::Expr(iterable));
-        }
-        Stmt::Break | Stmt::Continue => {}
-    }
 }
 
 fn collect_function_locals(expr: &Expr) -> HashSet<BindingId> {
@@ -281,16 +324,200 @@ fn collect_function_locals(expr: &Expr) -> HashSet<BindingId> {
     locals
 }
 
+fn validate_call_target(
+    expr: &Expr,
+    callee: &Expr,
+    args: &[CallArg],
+    target: &CallTarget,
+    struct_fields: &HashMap<String, usize>,
+) -> AliasResult<()> {
+    match target {
+        CallTarget::FunctionValue => {
+            let Ty::Func { params, ret } = callee.ty() else {
+                return Err(invariant(
+                    callee.span(),
+                    "FunctionValue target 的 callee 不是完整函数类型",
+                ));
+            };
+            if params.len() != args.len() {
+                return Err(invariant(
+                    expr.span(),
+                    "FunctionValue target 的实参数量与签名不一致",
+                ));
+            }
+            for (arg, param) in args.iter().zip(params) {
+                if !types_match(param, arg.value.ty()) {
+                    return Err(invariant(
+                        arg.value.span(),
+                        "FunctionValue target 的实参类型与签名不一致",
+                    ));
+                }
+            }
+            if !types_match(ret, expr.ty()) {
+                return Err(invariant(
+                    expr.span(),
+                    "FunctionValue target 的结果类型与签名不一致",
+                ));
+            }
+        }
+        CallTarget::StructConstructor {
+            name,
+            arg_field_indices,
+        } => {
+            if !matches!(expr.ty(), Ty::Struct(actual) if actual == name) {
+                return Err(invariant(
+                    expr.span(),
+                    "结构体构造 target 与表达式结果类型不一致",
+                ));
+            }
+            let Some(field_count) = struct_fields.get(name) else {
+                return Err(invariant(
+                    expr.span(),
+                    format!("结构体构造 target 引用未知结构体 '{name}'"),
+                ));
+            };
+            if arg_field_indices.len() != args.len() {
+                return Err(invariant(
+                    expr.span(),
+                    "构造器实参与字段索引数量不一致",
+                ));
+            }
+            let mut seen = HashSet::new();
+            for index in arg_field_indices {
+                if *index >= *field_count || !seen.insert(*index) {
+                    return Err(invariant(
+                        expr.span(),
+                        "构造器字段索引越界或重复",
+                    ));
+                }
+            }
+        }
+        CallTarget::ResultConstructor(kind) => {
+            let [arg] = args else {
+                return Err(invariant(expr.span(), "result 构造 target 元数不是 1"));
+            };
+            let Ty::Result(ok, err) = expr.ty() else {
+                return Err(invariant(
+                    expr.span(),
+                    "result 构造 target 的结果类型不是 result",
+                ));
+            };
+            let payload = match kind {
+                CtorKind::Ok => ok.as_ref(),
+                CtorKind::Err => err.as_ref(),
+            };
+            if !types_match(payload, arg.value.ty()) {
+                return Err(invariant(
+                    arg.value.span(),
+                    "result 构造 target 的载荷类型与结果类型不一致",
+                ));
+            }
+        }
+        CallTarget::Builtin(builtin) => {
+            if args.len() != 1 || expr.ty() != &Ty::Unit {
+                return Err(invariant(
+                    expr.span(),
+                    "内建调用 target 的元数或 unit 结果不一致",
+                ));
+            }
+            if matches!(builtin, BuiltinCall::Increase | BuiltinCall::Decrease) {
+                let [arg] = args else { unreachable!() };
+                if !matches!(&arg.value, Expr::Ident(_, Some(_), ..))
+                    || !arg.value.ty().is_numeric()
+                {
+                    return Err(invariant(
+                        arg.value.span(),
+                        "increase/decrease target 未指向已解析数值绑定",
+                    ));
+                }
+            }
+        }
+    }
+    if !matches!(target, CallTarget::FunctionValue)
+        && !matches!(callee, Expr::Ident(..))
+    {
+        return Err(invariant(
+            callee.span(),
+            "builtin/constructor callee 非直接名字",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_user_method_target(
+    expr: &Expr,
+    recv: &Expr,
+    args: &[CallArg],
+    receiver: &Ty,
+    id: MethodId,
+    user_methods: &HashMap<MethodId, UserMethodContract>,
+) -> AliasResult<()> {
+    let Some(contract) = user_methods.get(&id) else {
+        return Err(invariant(
+            expr.span(),
+            format!("用户方法引用未知 MethodId {id:?}"),
+        ));
+    };
+    if &contract.receiver != receiver || recv.ty() != receiver {
+        return Err(invariant(
+            expr.span(),
+            format!("MethodId {id:?} 接收者与调用目标不一致"),
+        ));
+    }
+    if contract.params.len() != args.len() {
+        return Err(invariant(
+            expr.span(),
+            format!("MethodId {id:?} 实参数量与签名不一致"),
+        ));
+    }
+    for (arg, param) in args.iter().zip(&contract.params) {
+        if !types_match(param, arg.value.ty()) {
+            return Err(invariant(
+                arg.value.span(),
+                format!("MethodId {id:?} 实参类型与签名不一致"),
+            ));
+        }
+    }
+    if !types_match(&contract.ret, expr.ty()) {
+        return Err(invariant(
+            expr.span(),
+            format!("MethodId {id:?} 结果类型与签名不一致"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_field_index(
+    recv: &Expr,
+    field_index: usize,
+    struct_fields: &HashMap<String, usize>,
+    span: Span,
+) -> AliasResult<()> {
+    let Ty::Struct(name) = recv.ty() else {
+        return Err(invariant(span, "字段索引的接收者不是 struct"));
+    };
+    let Some(field_count) = struct_fields.get(name) else {
+        return Err(invariant(
+            span,
+            format!("字段索引引用未知结构体 '{name}'"),
+        ));
+    };
+    if field_index >= *field_count {
+        return Err(invariant(span, "已解析字段索引越界"));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
     // The source is untrusted and nesting is bounded but nontrivial; validation uses explicit
     // stacks so the final authority gate itself does not reintroduce host-recursion risk.
+    // This pass is also the last cross-reference gate before codegen: resolved IDs and field
+    // indices are checked against declarations here so the backend never has to rediscover them.
     let known_ids = collect_declared_ids(program);
+    let struct_fields = collect_struct_fields(program)?;
     let user_methods = collect_user_methods(program)?;
     if !known_ids.contains(&program.main_id) {
-        return Err(AliasError {
-            msg: "内部 sema 不变式被破坏: main BindingId 不存在".into(),
-            span: crate::Span::default(),
-        });
+        return Err(invariant(Span::default(), "main BindingId 不存在"));
     }
     let globals: HashSet<BindingId> = program
         .items
@@ -304,14 +531,16 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
     let mut stack = Vec::new();
     for item in program.items.iter().rev() {
         match item {
-            Item::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
+            Item::Binding(binding) => {
+                if binding.ty.contains_unknown() {
+                    return Err(invariant(binding.span, "绑定类型未确定"));
+                }
+                stack.push(HirValidationNode::Expr(&binding.value));
+            }
             Item::StructDef(def) => {
                 for field in def.fields.iter().rev() {
                     if field.ty.contains_unknown() {
-                        return Err(AliasError {
-                            msg: "内部 sema 不变式被破坏: 字段类型未确定".into(),
-                            span: field.span,
-                        });
+                        return Err(invariant(field.span, "字段类型未确定"));
                     }
                     if let Some(default) = &field.default {
                         stack.push(HirValidationNode::Expr(default));
@@ -325,35 +554,32 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
         match node {
             HirValidationNode::Expr(expr) => {
                 if expr.ty().contains_unknown() {
-                    return Err(AliasError {
-                        msg: format!(
-                            "内部 sema 不变式被破坏: HIR 仍含未确定类型 {}",
-                            expr.ty().name()
-                        ),
-                        span: expr.span(),
-                    });
+                    return Err(invariant(
+                        expr.span(),
+                        format!("HIR 仍含未确定类型 {}", expr.ty().name()),
+                    ));
                 }
                 match expr {
                     Expr::Ident(_, Some(id), ..) => {
                         if !known_ids.contains(id) {
-                            return Err(AliasError {
-                                msg: format!("内部 sema 不变式被破坏: Ident 引用未知 BindingId {id:?}"),
-                                span: expr.span(),
-                            });
+                            return Err(invariant(
+                                expr.span(),
+                                format!("Ident 引用未知 BindingId {id:?}"),
+                            ));
                         }
                     }
                     Expr::Ident(name, None, ..) => {
-                        return Err(AliasError {
-                            msg: format!("内部 sema 不变式被破坏: 可求值标识符 '{name}' 缺少 BindingId"),
-                            span: expr.span(),
-                        });
+                        return Err(invariant(
+                            expr.span(),
+                            format!("可求值标识符 '{name}' 缺少 BindingId"),
+                        ));
                     }
                     Expr::Typeof { type_name, .. } => {
-                        if expr.ty() != &Ty::Str || type_name.is_empty() {
-                            return Err(AliasError {
-                                msg: "内部 sema 不变式被破坏: typeof 未固化 string 类型名".into(),
-                                span: expr.span(),
-                            });
+                        if expr.ty() != &Ty::Str || type_name.is_empty() || type_name == "未知" {
+                            return Err(invariant(
+                                expr.span(),
+                                "typeof 未固化有效的 string 类型名",
+                            ));
                         }
                     }
                     Expr::Convert {
@@ -361,10 +587,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         mode: super::ResolvedConversion::Identity,
                         ..
                     } if inner.ty() != expr.ty() => {
-                        return Err(AliasError {
-                            msg: "内部 sema 不变式被破坏: Identity 转换改变了静态类型".into(),
-                            span: expr.span(),
-                        });
+                        return Err(invariant(expr.span(), "Identity 转换改变了静态类型"));
                     }
                     Expr::Call {
                         callee,
@@ -372,37 +595,9 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         target,
                         ..
                     } => {
-                        match target {
-                            CallTarget::FunctionValue => {
-                                if matches!(callee.as_ref(), Expr::Ident(_, None, ..)) {
-                                    return Err(AliasError {
-                                        msg: "内部 sema 不变式被破坏: 函数值 callee 缺少 BindingId"
-                                            .into(),
-                                        span: callee.span(),
-                                    });
-                                }
-                                stack.push(HirValidationNode::Expr(callee));
-                            }
-                            _ => {
-                                if !matches!(callee.as_ref(), Expr::Ident(..)) {
-                                    return Err(AliasError {
-                                        msg: "内部 sema 不变式被破坏: builtin/constructor callee 非直接名字".into(),
-                                        span: callee.span(),
-                                    });
-                                }
-                            }
-                        }
-                        if let CallTarget::StructConstructor {
-                            arg_field_indices, ..
-                        } = target
-                        {
-                            if arg_field_indices.len() != args.len() {
-                                return Err(AliasError {
-                                    msg: "内部 sema 不变式被破坏: 构造器实参与字段索引数量不一致"
-                                        .into(),
-                                    span: expr.span(),
-                                });
-                            }
+                        validate_call_target(expr, callee, args, target, &struct_fields)?;
+                        if matches!(target, CallTarget::FunctionValue) {
+                            stack.push(HirValidationNode::Expr(callee));
                         }
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
@@ -419,41 +614,48 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         let mut seen = HashSet::new();
                         for id in captures {
                             if !seen.insert(*id) {
-                                return Err(AliasError {
-                                    msg: format!("内部 sema 不变式被破坏: capture 重复 {id:?}"),
-                                    span: expr.span(),
-                                });
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("capture 重复 {id:?}"),
+                                ));
                             }
                             if !known_ids.contains(id) {
-                                return Err(AliasError {
-                                    msg: format!("内部 sema 不变式被破坏: capture 引用未知 BindingId {id:?}"),
-                                    span: expr.span(),
-                                });
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("capture 引用未知 BindingId {id:?}"),
+                                ));
                             }
                             if globals.contains(id) {
-                                return Err(AliasError {
-                                    msg: format!("内部 sema 不变式被破坏: 全局 BindingId {id:?} 不应进入 capture"),
-                                    span: expr.span(),
-                                });
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("全局 BindingId {id:?} 不应进入 capture"),
+                                ));
                             }
                             if locals.contains(id) {
-                                return Err(AliasError {
-                                    msg: format!("内部 sema 不变式被破坏: 函数自身 local {id:?} 不应进入 capture"),
-                                    span: expr.span(),
-                                });
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("函数自身 local {id:?} 不应进入 capture"),
+                                ));
                             }
                         }
                         let mut declared_here = HashSet::new();
-                        for id in params
-                            .iter()
-                            .map(|param| param.binding_id)
-                            .chain(implicit_bindings.iter().copied())
-                        {
-                            if !declared_here.insert(id) {
-                                return Err(AliasError {
-                                    msg: format!("内部 sema 不变式被破坏: 函数入口 BindingId 重复 {id:?}"),
-                                    span: expr.span(),
-                                });
+                        for param in params {
+                            if param.ty.contains_unknown() {
+                                return Err(invariant(expr.span(), "函数参数类型未确定"));
+                            }
+                            if !declared_here.insert(param.binding_id) {
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("函数入口 BindingId 重复 {:?}", param.binding_id),
+                                ));
+                            }
+                        }
+                        for id in implicit_bindings {
+                            if !declared_here.insert(*id) {
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("函数入口 BindingId 重复 {id:?}"),
+                                ));
                             }
                         }
                         push_validation_body(&mut stack, body);
@@ -491,29 +693,26 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         recv, args, target, ..
                     } => {
                         if let MethodTarget::User { receiver, id } = target {
-                            let Some(declared_receiver) = user_methods.get(id) else {
-                                return Err(AliasError {
-                                    msg: format!(
-                                        "内部 sema 不变式被破坏: 用户方法引用未知 MethodId {id:?}"
-                                    ),
-                                    span: expr.span(),
-                                });
-                            };
-                            if declared_receiver != receiver || recv.ty() != receiver {
-                                return Err(AliasError {
-                                    msg: format!(
-                                        "内部 sema 不变式被破坏: MethodId {id:?} 接收者与调用目标不一致"
-                                    ),
-                                    span: expr.span(),
-                                });
-                            }
+                            validate_user_method_target(
+                                expr,
+                                recv,
+                                args,
+                                receiver,
+                                *id,
+                                &user_methods,
+                            )?;
                         }
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
                         }
                         stack.push(HirValidationNode::Expr(recv));
                     }
-                    Expr::Field { recv, .. } => stack.push(HirValidationNode::Expr(recv)),
+                    Expr::Field {
+                        recv, field_index, ..
+                    } => {
+                        validate_field_index(recv, *field_index, &struct_fields, expr.span())?;
+                        stack.push(HirValidationNode::Expr(recv));
+                    }
                     Expr::Index { recv, idx, .. } => {
                         stack.push(HirValidationNode::Expr(idx));
                         stack.push(HirValidationNode::Expr(recv));
@@ -527,10 +726,10 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         for arm in arms.iter().rev() {
                             if let Some(id) = arm.binding_id {
                                 if !known_ids.contains(&id) {
-                                    return Err(AliasError {
-                                        msg: format!("内部 sema 不变式被破坏: Pattern 引用未知 BindingId {id:?}"),
-                                        span: arm.pattern.span(),
-                                    });
+                                    return Err(invariant(
+                                        arm.pattern.span(),
+                                        format!("Pattern 引用未知 BindingId {id:?}"),
+                                    ));
                                 }
                             }
                             match &arm.body {
@@ -550,17 +749,27 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                 }
             }
             HirValidationNode::Stmt(stmt) => match stmt {
-                Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
+                Stmt::Binding(binding) => {
+                    if binding.ty.contains_unknown() {
+                        return Err(invariant(binding.span, "局部绑定类型未确定"));
+                    }
+                    stack.push(HirValidationNode::Expr(&binding.value));
+                }
                 Stmt::Assign { target_id, value } => {
                     if !known_ids.contains(target_id) {
-                        return Err(AliasError {
-                            msg: format!("内部 sema 不变式被破坏: Assign 引用未知 BindingId {target_id:?}"),
-                            span: value.span(),
-                        });
+                        return Err(invariant(
+                            value.span(),
+                            format!("Assign 引用未知 BindingId {target_id:?}"),
+                        ));
                     }
                     stack.push(HirValidationNode::Expr(value));
                 }
-                Stmt::FieldAssign { recv, value, .. } => {
+                Stmt::FieldAssign {
+                    recv,
+                    field_index,
+                    value,
+                } => {
+                    validate_field_index(recv, *field_index, &struct_fields, value.span())?;
                     stack.push(HirValidationNode::Expr(value));
                     stack.push(HirValidationNode::Expr(recv));
                 }
@@ -600,10 +809,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     span,
                 } => {
                     if !known_ids.contains(binding_id) || ty.contains_unknown() {
-                        return Err(AliasError {
-                            msg: "内部 sema 不变式被破坏: for BindingId/类型未解析".into(),
-                            span: *span,
-                        });
+                        return Err(invariant(*span, "for BindingId/类型未解析"));
                     }
                     for stmt in body.iter().rev() {
                         stack.push(HirValidationNode::Stmt(stmt));
