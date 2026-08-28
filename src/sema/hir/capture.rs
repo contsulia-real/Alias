@@ -1,4 +1,4 @@
-use super::*;
+use super::{ArmBody, BindingId, Body, CheckedProgram, Expr, Item, MatchArm, Stmt, StrPart};
 use std::collections::HashSet;
 
 enum Node<'a> {
@@ -38,6 +38,7 @@ pub(super) fn populate_captures(program: &mut CheckedProgram) {
     let mut captures = collect_function_captures(program, &globals, &locals);
 
     // Pass 3: deterministic preorder writes each capture vector back to its FuncLit.
+    // The final HIR validator runs after this mutation and certifies these vectors.
     apply_captures(program, &mut captures);
 }
 
@@ -339,6 +340,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             }
         }
         Expr::Cast { expr, .. }
+        | Expr::Convert { expr, .. }
         | Expr::Neg { expr, .. }
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
@@ -381,6 +383,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { .. }
+        | Expr::Typeof { .. }
         | Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -475,6 +478,7 @@ fn push_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
             }
         }
         Expr::Cast { expr, .. }
+        | Expr::Convert { expr, .. }
         | Expr::Neg { expr, .. }
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
@@ -517,6 +521,7 @@ fn push_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
         }
         Expr::Match { subject, arms, .. } => push_match_children_mut(stack, subject, arms),
         Expr::FuncLit { .. }
+        | Expr::Typeof { .. }
         | Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
