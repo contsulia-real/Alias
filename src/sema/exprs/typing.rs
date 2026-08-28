@@ -3,7 +3,7 @@ use super::operators::{
     require_value,
 };
 use crate::ast::{CtorKind, Expr};
-use crate::builtins::is_result_constructor;
+use crate::builtins::{is_result_constructor, CallBuiltinName};
 use crate::sema::hir::{BindingId, ResolvedConversion};
 use crate::sema::types::{types_match, Ty};
 use crate::sema::{Checker, Env, LowerCallTarget, LowerExprInfo, Scope};
@@ -220,7 +220,7 @@ impl Checker {
                 })
             };
         }
-        if let Some((name, arg, span)) = contextual_conversion(e) {
+        if let Some((kind, arg, span)) = contextual_conversion(e) {
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
                 self.record_call_target(
@@ -229,7 +229,7 @@ impl Checker {
                 );
                 return Ok(expected.clone());
             }
-            if name == "from" {
+            if kind == CallBuiltinName::From {
                 return Err(AliasError {
                     msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
                     span,
@@ -384,7 +384,7 @@ impl Checker {
         if let Some(result) = literal_slot_unify(expected, e) {
             return result;
         }
-        if let Some((name, arg, span)) = contextual_conversion(e) {
+        if let Some((kind, arg, span)) = contextual_conversion(e) {
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
                 self.record_call_target(
@@ -393,7 +393,7 @@ impl Checker {
                 );
                 return Ok(expected.clone());
             }
-            if name == "from" {
+            if kind == CallBuiltinName::From {
                 return Err(AliasError {
                     msg: format!("from 不存在 {} → {} 转换", source.name(), expected.name()),
                     span,
