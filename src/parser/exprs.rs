@@ -2,11 +2,12 @@
 //!
 //! 优先级与原规则保持不变；实现按职责拆为 precedence / postfix / atoms。
 
-use super::{validate_nesting, Parser, MAX_EXPR_CHAIN};
+use super::{validate_nesting, Parser};
 use crate::ast::{
     ArmBody, BinOp, Body, CallArg, CtorKind, Expr, MatchArm, Param, Pattern, StrPartAst,
 };
 use crate::lexer::{StrPart, Tok, Token};
+use crate::limits::MAX_EXPR_CHAIN;
 use crate::{AliasError, AliasResult};
 
 mod atoms;
