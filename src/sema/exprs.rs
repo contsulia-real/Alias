@@ -1,6 +1,6 @@
 //! sema::exprs — 表达式静态语义。
 
-use super::hir::{BuiltinCall, CallTarget, ExprInfo, MethodTarget};
+use super::hir::{BindingId, BuiltinCall, CallTarget, ExprInfo, MethodTarget};
 use super::types::{
     check_value_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
     types_match, FloatW, IntW, Ty,
@@ -61,6 +61,10 @@ impl Checker {
         e as *const Expr as usize
     }
 
+    fn record_binding_ref(&mut self, e: &Expr, id: BindingId) {
+        self.expr_binding_ids.insert(Self::expr_key(e), id);
+    }
+
     pub(super) fn record_expr_type(&mut self, e: &Expr, ty: Ty) {
         self.expr_facts
             .entry(Self::expr_key(e))
@@ -68,6 +72,7 @@ impl Checker {
             .or_insert(ExprInfo {
                 ty,
                 call_target: None,
+                implicit_zero_callee: None,
             });
     }
 
@@ -86,6 +91,22 @@ impl Checker {
             .or_insert(ExprInfo {
                 ty: Ty::Unknown,
                 call_target: Some(target),
+                implicit_zero_callee: None,
+            });
+    }
+
+    fn record_implicit_zero_call(&mut self, e: &Expr, callee_ty: Ty, result_ty: Ty) {
+        self.expr_facts
+            .entry(Self::expr_key(e))
+            .and_modify(|info| {
+                info.ty = result_ty.clone();
+                info.call_target = Some(CallTarget::FunctionValue);
+                info.implicit_zero_callee = Some(callee_ty.clone());
+            })
+            .or_insert(ExprInfo {
+                ty: result_ty,
+                call_target: Some(CallTarget::FunctionValue),
+                implicit_zero_callee: Some(callee_ty),
             });
     }
 
@@ -116,11 +137,56 @@ impl Checker {
         );
     }
 
-    pub(super) fn record_params(&mut self, params: &[crate::ast::Param], types: &[Ty]) {
-        for (param, ty) in params.iter().zip(types) {
-            self.param_types
-                .insert(param as *const crate::ast::Param as usize, ty.clone());
+    pub(super) fn record_params(
+        &mut self,
+        params: &[crate::ast::Param],
+        types: &[Ty],
+        ids: &[BindingId],
+    ) {
+        assert_eq!(params.len(), types.len());
+        assert_eq!(params.len(), ids.len());
+        for ((param, ty), id) in params.iter().zip(types).zip(ids) {
+            let key = param as *const crate::ast::Param as usize;
+            self.param_types.insert(key, ty.clone());
+            self.param_ids.insert(key, *id);
         }
+    }
+
+    /// 取得一个直接函数值引用的原始类型，不触发“零参裸名调用”。显式调用的
+    /// callee、无括号两项邻接的 lhs、typeof 的直接绑定实参都必须走这里。
+    /// 普通 Ident 在这个第一次 Scope 命中点同时固化 BindingId。
+    fn expr_raw_callable(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
+        let ty = match e {
+            Expr::Ident(name, span) => {
+                let info = Scope::get(env, name).ok_or_else(|| AliasError {
+                    msg: format!("未定义的绑定 '{name}'"),
+                    span: *span,
+                })?;
+                self.record_binding_ref(e, info.id);
+                info.ty
+            }
+            Expr::This(span) => Scope::get(env, "this")
+                .map(|info| info.ty)
+                .ok_or_else(|| AliasError {
+                    msg: "this 只能出现在 func 体内".into(),
+                    span: *span,
+                })?,
+            _ => return self.expr(e, env),
+        };
+        self.record_expr_type(e, ty.clone());
+        Ok(ty)
+    }
+
+    fn maybe_implicit_zero_call(&mut self, e: &Expr, raw: Ty) -> Ty {
+        let Ty::Func { params, ret } = &raw else {
+            return raw;
+        };
+        if !params.is_empty() {
+            return raw;
+        }
+        let result = (**ret).clone();
+        self.record_implicit_zero_call(e, raw, result.clone());
+        result
     }
 
     /// 在已知目标类型语境中检查表达式。声明、赋值、参数、字段、三元与
@@ -139,6 +205,22 @@ impl Checker {
     }
 
     fn expr_expected_inner(&mut self, e: &Expr, env: &Env, expected: &Ty) -> ExprCheckResult<Ty> {
+        // 函数类型目标明确表示“我要函数值本身”。这是零参裸名自动调用的唯一
+        // 直接绑定豁免，从而函数值传递不会偷偷执行零参函数。
+        if matches!(expected, Ty::Func { .. } | Ty::FuncPoly)
+            && matches!(e, Expr::Ident(..) | Expr::This(..))
+        {
+            let got = require_value(self.expr_raw_callable(e, env)?, e.span())?;
+            return if types_match(expected, &got) {
+                Ok(expected.clone())
+            } else {
+                Err(ExprCheckError::Mismatch {
+                    expected: expected.clone(),
+                    actual: got,
+                    span: e.span(),
+                })
+            };
+        }
         if let Some((name, arg, span)) = contextual_conversion(e) {
             self.record_call_target(
                 e,
@@ -282,8 +364,6 @@ impl Checker {
     }
 
     /// 数值目标类型只负责给字面量提供声明宽度，不能把已有变量强行改型。
-    /// 这样 `u8 x = 1 + 2` 仍按 u8 检查，而 `u32 + i32` 会进入统一
-    /// 二元诊断并报告禁止隐式混算，而不是提前退化为“需要 u32”。
     fn expr_with_numeric_literal_context(
         &mut self,
         e: &Expr,
@@ -326,8 +406,6 @@ impl Checker {
                 }
                 .into());
             }
-            // try_from 不存在转换时把源类型交还给运算符，不能在子表达式层
-            // 抢先制造外层目标类型错误。
             return Ok(source);
         }
         let Expr::Binary { op, lhs, rhs, span } = e else {
@@ -348,7 +426,12 @@ impl Checker {
     }
 
     pub(super) fn expr(&mut self, e: &Expr, env: &Env) -> AliasResult<Ty> {
-        let ty = self.expr_inner(e, env)?;
+        let ty = if matches!(e, Expr::Ident(..) | Expr::This(..)) {
+            let raw = self.expr_raw_callable(e, env)?;
+            self.maybe_implicit_zero_call(e, raw)
+        } else {
+            self.expr_inner(e, env)?
+        };
         self.record_expr_type(e, ty.clone());
         self.record_resolved_callee(e, &ty);
         Ok(ty)
@@ -372,22 +455,7 @@ impl Checker {
                 }
                 Ok(Ty::Str)
             }
-            Expr::Ident(name, span) => {
-                Scope::get(env, name)
-                    .map(|info| info.ty)
-                    .ok_or_else(|| AliasError {
-                        msg: format!("未定义的绑定 '{name}'"),
-                        span: *span,
-                    })
-            }
-            Expr::This(span) => {
-                Scope::get(env, "this")
-                    .map(|info| info.ty)
-                    .ok_or_else(|| AliasError {
-                        msg: "this 只能出现在 func 体内".into(),
-                        span: *span,
-                    })
-            }
+            Expr::Ident(..) | Expr::This(..) => unreachable!("直接名字由 expr 统一处理"),
             Expr::Cast { target, expr, span } => {
                 let target_ty = check_value_type_slot(target, *span, &self.structs)?;
                 let source_ty = require_value(self.expr(expr, env)?, expr.span())?;
@@ -440,8 +508,6 @@ impl Checker {
             }
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.expr(lhs, env)?;
-                // 已知整数左操作数为 RHS 整数字面量提供目标槽类型。
-                // 仅字面量参与，不放宽变量/表达式之间的隐式混算。
                 let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
                     match literal_slot_unify(&l, rhs) {
                         Some(r) => {
@@ -482,6 +548,53 @@ impl Checker {
                 self.record_call_target(e, self.resolve_call_target(callee, env));
                 Ok(ty)
             }
+            Expr::Juxtapose { lhs, rhs, span } => {
+                let lhs_ty = self.expr_raw_callable(lhs, env)?;
+                match &lhs_ty {
+                    Ty::Func { params, ret } if params.len() == 1 => {
+                        match self.expr_expected(rhs, env, &params[0]) {
+                            Ok(_) => {}
+                            Err(ExprCheckError::Mismatch { actual, .. }) => {
+                                return Err(AliasError {
+                                    msg: format!(
+                                        "第 1 个实参需要 {}, 实际 {}",
+                                        params[0].name(),
+                                        actual.name()
+                                    ),
+                                    span: rhs.span(),
+                                });
+                            }
+                            Err(error) => return Err(error.into_alias()),
+                        }
+                        self.record_call_target(e, CallTarget::FunctionValue);
+                        Ok((**ret).clone())
+                    }
+                    Ty::FuncPoly | Ty::Unknown => {
+                        require_value(self.expr(rhs, env)?, rhs.span())?;
+                        self.record_call_target(e, CallTarget::FunctionValue);
+                        Ok(Ty::Unknown)
+                    }
+                    _ => {
+                        let Expr::Ident(name, _) = rhs.as_ref() else {
+                            return Err(AliasError {
+                                msg: format!("{} 不是可调用值", lhs_ty.name()),
+                                span: *span,
+                            });
+                        };
+                        let ty = self.method_call_with_receiver_ty(
+                            lhs,
+                            lhs_ty.clone(),
+                            name,
+                            &[],
+                            *span,
+                            env,
+                        )?;
+                        let target = resolve_method_target(self, &lhs_ty, name, *span)?;
+                        self.record_call_target(e, CallTarget::Method(target));
+                        Ok(ty)
+                    }
+                }
+            }
             Expr::MethodCall {
                 recv,
                 name,
@@ -490,10 +603,8 @@ impl Checker {
             } => {
                 let ty = self.method_call(recv, name, args, *span, env)?;
                 let recv_ty = self.expr_facts[&Self::expr_key(recv)].ty.clone();
-                self.record_call_target(
-                    e,
-                    CallTarget::Method(resolve_method_target(&recv_ty, name)),
-                );
+                let target = resolve_method_target(self, &recv_ty, name, *span)?;
+                self.record_call_target(e, CallTarget::Method(target));
                 Ok(ty)
             }
             Expr::Index { recv, idx, .. } => {
@@ -545,14 +656,20 @@ impl Checker {
                 match rt {
                     Ty::Struct(s) => {
                         let info = &self.structs[&s];
-                        info.fields
+                        let Some((index, field)) = info
+                            .fields
                             .iter()
-                            .find(|f| f.name == *name)
-                            .map(|f| f.ty.clone())
-                            .ok_or_else(|| AliasError {
+                            .enumerate()
+                            .find(|(_, field)| field.name == *name)
+                        else {
+                            return Err(AliasError {
                                 msg: format!("结构体 {s} 没有字段 '{name}'"),
                                 span: *span,
-                            })
+                            });
+                        };
+                        let ty = field.ty.clone();
+                        self.field_indices.insert(Self::expr_key(e), index);
+                        Ok(ty)
                     }
                     other => Err(AliasError {
                         msg: format!("{} 没有字段 '{}'", other.name(), name),
@@ -561,13 +678,13 @@ impl Checker {
                 }
             }
             Expr::FuncLit { params, body, span } => {
-                let ty = self.funclit(params, body, env, None, *span)?;
+                let (ty, param_ids) = self.funclit(params, body, env, None, *span)?;
                 if let Ty::Func {
                     params: param_types,
                     ..
                 } = &ty
                 {
-                    self.record_params(params, param_types);
+                    self.record_params(params, param_types, &param_ids);
                 }
                 Ok(ty)
             }
@@ -787,10 +904,14 @@ impl Checker {
     ) -> ExprCheckResult<Option<Ty>> {
         let local = Scope::child(env);
         if let Some((name, bind_ty)) = binding {
+            let id = self.fresh_binding_id();
+            self.match_binding_ids
+                .insert(arm as *const MatchArm as usize, id);
             Scope::insert(
                 &local,
                 name.clone(),
                 VarInfo {
+                    id,
                     ty: bind_ty.clone(),
                     mutable: false,
                 },
@@ -964,7 +1085,7 @@ impl Checker {
                         span,
                     });
                 };
-                let t = require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                let t = require_value(self.expr_raw_callable(&arg.value, env)?, arg.value.span())?;
                 if t.contains_unknown() {
                     return Err(AliasError {
                         msg: "typeof 无法确定实参的静态类型".into(),
@@ -974,7 +1095,7 @@ impl Checker {
                 return Ok(Ty::Str);
             }
         }
-        let ft = self.expr(callee, env)?;
+        let ft = self.expr_raw_callable(callee, env)?;
         match ft {
             Ty::Func { params, ret } => {
                 if args.len() != params.len() {
@@ -1075,6 +1196,8 @@ impl Checker {
                 });
             }
             covered[idx] = true;
+            self.ctor_arg_indices
+                .insert(a as *const CallArg as usize, idx);
             let want = &info.fields[idx].ty;
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
@@ -1162,6 +1285,7 @@ impl Checker {
             });
         }
         if info.ty.is_unknown() || info.ty.is_numeric() {
+            self.record_binding_ref(&arg.value, info.id);
             self.record_expr_type(&arg.value, info.ty.clone());
             Ok(Ty::Unit)
         } else {
@@ -1181,6 +1305,18 @@ impl Checker {
         env: &Env,
     ) -> AliasResult<Ty> {
         let rt = self.expr(recv, env)?;
+        self.method_call_with_receiver_ty(recv, rt, name, args, span, env)
+    }
+
+    fn method_call_with_receiver_ty(
+        &mut self,
+        _recv: &Expr,
+        rt: Ty,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<Ty> {
         if rt.is_unknown() {
             return Ok(Ty::Unknown);
         }
@@ -1193,7 +1329,6 @@ impl Checker {
             }
         }
 
-        // array 的固有方法优先；其他名字继续进入完整类型扩展方法表。
         if let Ty::Array(elem) = &rt {
             match name {
                 "len" => {
@@ -1284,7 +1419,12 @@ impl Checker {
     }
 }
 
-fn resolve_method_target(recv: &Ty, name: &str) -> MethodTarget {
+fn resolve_method_target(
+    checker: &Checker,
+    recv: &Ty,
+    name: &str,
+    span: Span,
+) -> AliasResult<MethodTarget> {
     if recv.is_numeric() {
         let op = match name {
             "plus" => Some(BinOp::Add),
@@ -1294,34 +1434,45 @@ fn resolve_method_target(recv: &Ty, name: &str) -> MethodTarget {
             _ => None,
         };
         if let Some(op) = op {
-            return MethodTarget::Numeric(op);
+            return Ok(MethodTarget::Numeric(op));
         }
     }
     if *recv == Ty::Bool && name == "not" {
-        return MethodTarget::BoolNot;
+        return Ok(MethodTarget::BoolNot);
     }
     if *recv == Ty::Str {
         match name {
-            "len" => return MethodTarget::StringLen,
-            "upper" => return MethodTarget::StringUpper,
-            "lower" => return MethodTarget::StringLower,
-            "trim" => return MethodTarget::StringTrim,
+            "len" => return Ok(MethodTarget::StringLen),
+            "upper" => return Ok(MethodTarget::StringUpper),
+            "lower" => return Ok(MethodTarget::StringLower),
+            "trim" => return Ok(MethodTarget::StringTrim),
             _ => {}
         }
     }
     if matches!(recv, Ty::Array(_)) {
         match name {
-            "len" => return MethodTarget::ArrayLen,
-            "push" => return MethodTarget::ArrayPush,
-            "pop" => return MethodTarget::ArrayPop,
-            "iterator" => return MethodTarget::ArrayIterator,
+            "len" => return Ok(MethodTarget::ArrayLen),
+            "push" => return Ok(MethodTarget::ArrayPush),
+            "pop" => return Ok(MethodTarget::ArrayPop),
+            "iterator" => return Ok(MethodTarget::ArrayIterator),
             _ => {}
         }
     }
-    MethodTarget::User {
+    let rname = recv.name();
+    let id = checker
+        .methods
+        .get(&rname)
+        .and_then(|table| table.get(name))
+        .and_then(|method| method.id)
+        .ok_or_else(|| AliasError {
+            msg: format!("内部 sema 不变式被破坏: 用户方法 {rname}.{name} 缺少 MethodId"),
+            span,
+        })?;
+    Ok(MethodTarget::User {
         receiver: recv.clone(),
         name: name.to_string(),
-    }
+        id: Some(id),
+    })
 }
 
 fn binary_flows_expected(op: BinOp, expected: &Ty) -> bool {

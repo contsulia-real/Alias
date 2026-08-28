@@ -109,7 +109,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         fid: FuncId,
         params: &[Param],
         body: &Body,
-        caps: Vec<(String, VTy)>,
+        caps: Vec<(BindingId, VTy)>,
         ret_vty: VTy,
     ) -> AliasResult<()> {
         let param_vtys: Vec<VTy> = params.iter().map(|p| self.vty(&p.ty)).collect();
@@ -128,11 +128,11 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.def_var(globals_v, bcx.block_params(entry)[0]);
         let env_v = bcx.declare_var(types::I64);
         bcx.def_var(env_v, bcx.block_params(entry)[1]);
-        let mut caps_map: HashMap<String, usize> = HashMap::new();
-        let mut caps_vty: HashMap<String, VTy> = HashMap::new();
-        for (i, (name, vty)) in caps.iter().enumerate() {
-            caps_map.insert(name.clone(), i);
-            caps_vty.insert(name.clone(), vty.clone());
+        let mut caps_map: HashMap<BindingId, usize> = HashMap::new();
+        let mut caps_vty: HashMap<BindingId, VTy> = HashMap::new();
+        for (i, (id, vty)) in caps.iter().enumerate() {
+            caps_map.insert(*id, i);
+            caps_vty.insert(*id, vty.clone());
         }
         let mut frame = Frame {
             scopes: vec![HashMap::new()],
@@ -153,7 +153,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             let raw = bcx.block_params(entry)[i + 2];
             let vty = self.vty(&p.ty);
             let word = norm_load(&mut bcx, raw, &vty);
-            emit_local_cell(self, &mut bcx, &mut frame, word, vty, &p.name)?;
+            emit_local_cell(self, &mut bcx, &mut frame, word, vty, p.binding_id)?;
         }
 
         let ret_block = bcx.create_block();
@@ -252,7 +252,13 @@ impl<'m, M: Module> Compiler<'m, M> {
             .enumerate()
         {
             let (v, svty) = if b.kind == BindKind::Func {
-                let Expr::FuncLit { params, body, .. } = &b.value else {
+                let Expr::FuncLit {
+                    params,
+                    body,
+                    captures,
+                    ..
+                } = &b.value
+                else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
                 let VTy::Func(param_vtys, ret_vty) = self.vty(&b.ty) else {
@@ -265,6 +271,7 @@ impl<'m, M: Module> Compiler<'m, M> {
                     &mut frame,
                     params,
                     body,
+                    captures,
                     ret_vty.clone(),
                 )?;
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
@@ -279,8 +286,8 @@ impl<'m, M: Module> Compiler<'m, M> {
             let sv = norm_store(&mut bcx, v, &svty);
             let base = bcx.use_var(frame.globals);
             bcx.ins().store(MemFlagsData::new(), sv, base, off as i32);
-            frame.scopes[0].insert(b.name.clone(), Slot::Global(off));
-            frame.locals_vty[0].insert(b.name.clone(), svty);
+            frame.scopes[0].insert(b.binding_id, Slot::Global(off));
+            frame.locals_vty[0].insert(b.binding_id, svty);
         }
 
         let clo = {
@@ -321,7 +328,7 @@ impl<'m, M: Module> Compiler<'m, M> {
 }
 
 // ---------------------------------------------------------------------------
-// 函数字面量: 捕获扫描 + 闭包对象创建
+// 函数字面量: HIR 捕获列表 + 闭包对象创建
 // ---------------------------------------------------------------------------
 
 pub(crate) fn emit_funclit_value<M: Module>(
@@ -330,13 +337,14 @@ pub(crate) fn emit_funclit_value<M: Module>(
     frame: &mut Frame,
     params: &[Param],
     body: &Body,
+    captures: &[BindingId],
     funclit_type: &Ty,
 ) -> AliasResult<Value> {
     let VTy::Func(_, ret_vty) = c.vty(funclit_type) else {
         invariant_violation("函数字面量携带完整函数类型")
     };
     let ret_vty = *ret_vty;
-    emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty)
+    emit_funclit_value_typed(c, bcx, frame, params, body, captures, ret_vty)
 }
 
 pub(crate) fn emit_funclit_value_typed<M: Module>(
@@ -345,18 +353,18 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     frame: &mut Frame,
     params: &[Param],
     body: &Body,
+    captures: &[BindingId],
     ret_vty: VTy,
 ) -> AliasResult<Value> {
-    let caps = scan_captures(c, params, body, frame);
     let param_vtys: Vec<VTy> = params.iter().map(|p| c.vty(&p.ty)).collect();
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
     c.fn_ids.push(fid);
     c.fn_rets.push(ret_vty.clone());
-    let cap_vtys: Vec<(String, VTy)> = caps
+    let cap_vtys: Vec<(BindingId, VTy)> = captures
         .iter()
-        .map(|n| (n.clone(), bound_vty(c, frame, n)))
+        .map(|id| (*id, bound_vty(c, frame, *id)))
         .collect();
     c.pending.push_back(PendingFn {
         fid,
@@ -366,17 +374,17 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         ret_vty,
     });
 
-    let env_word = if caps.is_empty() {
+    let env_word = if captures.is_empty() {
         bcx.ins().iconst(types::I64, 0)
     } else {
         let en = c.import_runtime("alias.env.new")?;
         let eref = c.module.declare_func_in_func(en, &mut bcx.func);
-        let len = bcx.ins().iconst(types::I32, caps.len() as i64);
+        let len = bcx.ins().iconst(types::I32, captures.len() as i64);
         let ecall = bcx.ins().call(eref, &[len]);
         first_result(bcx, ecall)
     };
-    for (i, name) in caps.iter().enumerate() {
-        let cellw = if let Some(idx) = frame.caps.get(name) {
+    for (i, id) in captures.iter().enumerate() {
+        let cellw = if let Some(idx) = frame.caps.get(id) {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
             bcx.ins().load(
                 types::I64,
@@ -387,12 +395,12 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         } else {
             let mut found: Option<Value> = None;
             for scope in frame.scopes.iter().rev() {
-                if let Some(Slot::Local(v)) = scope.get(name) {
+                if let Some(Slot::Local(v)) = scope.get(id) {
                     found = Some(bcx.use_var(*v));
                     break;
                 }
             }
-            found.unwrap_or_else(|| invariant_violation("捕获项解析"))
+            found.unwrap_or_else(|| invariant_violation("HIR 捕获 BindingId 必须解析到外层单元格"))
         };
         bcx.ins().store(
             MemFlagsData::new(),
@@ -408,233 +416,4 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let cnref = c.module.declare_func_in_func(cn, &mut bcx.func);
     let cncall = bcx.ins().call(cnref, &[code, env_word]);
     Ok(first_result(bcx, cncall))
-}
-
-pub(crate) fn scan_captures<M: Module>(
-    c: &Compiler<M>,
-    params: &[Param],
-    body: &Body,
-    frame: &Frame,
-) -> Vec<String> {
-    let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    let mut caps: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    scan_body(c, body, &mut locals, &mut caps, &mut seen, frame);
-    caps
-}
-
-pub(crate) fn scan_body<M: Module>(
-    c: &Compiler<M>,
-    body: &Body,
-    locals: &mut HashSet<String>,
-    caps: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    frame: &Frame,
-) {
-    match body {
-        Body::Single(stmt) => scan_stmt(c, stmt, locals, caps, seen, frame),
-        Body::Block(stmts) => {
-            for s in stmts {
-                scan_stmt(c, s, locals, caps, seen, frame);
-            }
-        }
-    }
-}
-
-pub(crate) fn record_cap(name: &str, caps: &mut Vec<String>, seen: &mut HashSet<String>) {
-    if seen.insert(name.to_string()) {
-        caps.push(name.to_string());
-    }
-}
-
-fn scan_scoped_stmts<M: Module>(
-    c: &Compiler<M>,
-    stmts: &[Stmt],
-    locals: &HashSet<String>,
-    caps: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    frame: &Frame,
-) {
-    let mut child_locals = locals.clone();
-    for s in stmts {
-        scan_stmt(c, s, &mut child_locals, caps, seen, frame);
-    }
-}
-
-pub(crate) fn scan_stmt<M: Module>(
-    c: &Compiler<M>,
-    s: &Stmt,
-    locals: &mut HashSet<String>,
-    caps: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    frame: &Frame,
-) {
-    match s {
-        Stmt::Binding(b) => {
-            scan_expr(c, &b.value, locals, caps, seen, frame);
-            locals.insert(b.name.clone());
-        }
-        Stmt::Assign { target, value, .. } => {
-            scan_expr(c, value, locals, caps, seen, frame);
-            ensure_scanned_name(target, locals, caps, seen, frame);
-        }
-        Stmt::FieldAssign { recv, value, .. } => {
-            scan_expr(c, value, locals, caps, seen, frame);
-            scan_expr(c, recv, locals, caps, seen, frame);
-        }
-        Stmt::ExprStmt { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                scan_expr(c, e, locals, caps, seen, frame);
-            }
-        }
-        Stmt::If {
-            branches,
-            else_body,
-            ..
-        } => {
-            for (cond, body) in branches {
-                scan_expr(c, cond, locals, caps, seen, frame);
-                scan_scoped_stmts(c, body, locals, caps, seen, frame);
-            }
-            if let Some(body) = else_body {
-                scan_scoped_stmts(c, body, locals, caps, seen, frame);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            scan_expr(c, cond, locals, caps, seen, frame);
-            scan_scoped_stmts(c, body, locals, caps, seen, frame);
-        }
-        Stmt::For {
-            name,
-            iterable,
-            body,
-            ..
-        } => {
-            scan_expr(c, iterable, locals, caps, seen, frame);
-            let mut child_locals = locals.clone();
-            child_locals.insert(name.clone());
-            for stmt in body {
-                scan_stmt(c, stmt, &mut child_locals, caps, seen, frame);
-            }
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
-    }
-}
-
-pub(crate) fn ensure_scanned_name(
-    name: &str,
-    locals: &mut HashSet<String>,
-    caps: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    frame: &Frame,
-) {
-    if locals.contains(name) || seen.contains(name) {
-        return;
-    }
-    let outer_local = frame.caps.contains_key(name)
-        || frame
-            .scopes
-            .iter()
-            .rev()
-            .any(|sc| matches!(sc.get(name), Some(Slot::Local(_))));
-    if outer_local {
-        record_cap(name, caps, seen);
-    }
-}
-
-pub(crate) fn scan_expr<M: Module>(
-    c: &Compiler<M>,
-    e: &Expr,
-    locals: &mut HashSet<String>,
-    caps: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    frame: &Frame,
-) {
-    match e {
-        Expr::Ident(name, ..) => ensure_scanned_name(name, locals, caps, seen, frame),
-        Expr::This(..) => {}
-        Expr::Neg { expr, .. }
-        | Expr::Not { expr, .. }
-        | Expr::BitNot { expr, .. }
-        | Expr::Cast { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
-        Expr::Binary { lhs, rhs, .. } => {
-            scan_expr(c, lhs, locals, caps, seen, frame);
-            scan_expr(c, rhs, locals, caps, seen, frame);
-        }
-        Expr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            scan_expr(c, cond, locals, caps, seen, frame);
-            scan_expr(c, then_expr, locals, caps, seen, frame);
-            scan_expr(c, else_expr, locals, caps, seen, frame);
-        }
-        Expr::Str(parts, ..) => {
-            for p in parts {
-                if let StrPart::Hole(h) = p {
-                    scan_expr(c, h, locals, caps, seen, frame);
-                }
-            }
-        }
-        Expr::Call { callee, args, .. } => {
-            scan_expr(c, callee, locals, caps, seen, frame);
-            for a in args {
-                scan_expr(c, &a.value, locals, caps, seen, frame);
-            }
-        }
-        Expr::Field { recv, .. } => scan_expr(c, recv, locals, caps, seen, frame),
-        Expr::MethodCall { recv, args, .. } => {
-            scan_expr(c, recv, locals, caps, seen, frame);
-            for a in args {
-                scan_expr(c, &a.value, locals, caps, seen, frame);
-            }
-        }
-        Expr::Index { recv, idx, .. } => {
-            scan_expr(c, recv, locals, caps, seen, frame);
-            scan_expr(c, idx, locals, caps, seen, frame);
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for el in elems {
-                scan_expr(c, el, locals, caps, seen, frame);
-            }
-        }
-        Expr::Propagate { expr, .. } => scan_expr(c, expr, locals, caps, seen, frame),
-        Expr::Match { subject, arms, .. } => {
-            scan_expr(c, subject, locals, caps, seen, frame);
-            for arm in arms {
-                let mut arm_locals = locals.clone();
-                match &arm.pattern {
-                    Pattern::Binding { name, .. }
-                    | Pattern::Constructor {
-                        binding: Some(name),
-                        ..
-                    } => {
-                        arm_locals.insert(name.clone());
-                    }
-                    _ => {}
-                }
-                match &arm.body {
-                    ArmBody::Block(stmts) => {
-                        for s in stmts {
-                            scan_stmt(c, s, &mut arm_locals, caps, seen, frame);
-                        }
-                    }
-                    ArmBody::Value(e) | ArmBody::Ret(e) => {
-                        scan_expr(c, e, &mut arm_locals, caps, seen, frame)
-                    }
-                }
-            }
-        }
-        Expr::FuncLit { params, body, .. } => {
-            let mut nested_locals = locals.clone();
-            for p in params {
-                nested_locals.insert(p.name.clone());
-            }
-            scan_body(c, body, &mut nested_locals, caps, seen, frame);
-        }
-        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) => {}
-    }
 }

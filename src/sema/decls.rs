@@ -1,18 +1,17 @@
 //! sema::decls — 顶层声明登记与校验。
 //!
-//! 拥有: struct 表构建 ([`Checker::struct_def`])、扩展方法签名注册
-//! ([`Checker::method_def`])、Q④ main 校验 ([`Checker::validate_main`])。
-//! 单一命名空间的重名拦截在此收口; 签名先入表后查体 — 方法可递归。
+//! 拥有: struct 表构建、扩展方法签名注册、main 校验。
+//! 单一命名空间的重名拦截在此收口；用户方法在第一次签名登记时同时分配 MethodId，
+//! 后续 HIR/codegen 不再按接收者名字 + 方法名字重新解析。
 
 use super::exprs::ExprCheckError;
+use super::hir::BindingId;
 use super::types::{check_return_type_slot, check_value_type_slot, IntW, Ty};
 use super::{Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
 use crate::ast::{Binding, Expr, Param, StructDef};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
-    // ---------- 结构体定义 (Phase 2a) ----------
-
     pub(super) fn struct_def(&mut self, sd: &StructDef, env: &Env) -> AliasResult<()> {
         if self.structs.contains_key(&sd.name) {
             return Err(AliasError {
@@ -63,12 +62,10 @@ impl Checker {
         Ok(())
     }
 
-    // ---------- 扩展函数定义 ----------
-
     /// 扩展函数定义: pub? func <Ret> <ReceiverType>.<name> = (params) -> 体。
-    /// 所有合法 Alias 值类型都可作为 receiver。
-    /// self 为隐式首参数 (val 语义, 类型 = 完整 receiver 类型)。
+    /// 签名第一次登记即固化 MethodId；self 第一次进入函数作用域即固化 BindingId。
     pub(super) fn method_def(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
+        let _binding_id = self.binding_id_for(b);
         let Some(recv_expr) = b.receiver.clone() else {
             return Err(AliasError {
                 msg: "内部: 无接收者的方法定义".into(),
@@ -96,6 +93,7 @@ impl Checker {
         for p in params {
             ptys.push(check_value_type_slot(&p.ty, p.span, &self.structs)?);
         }
+
         {
             let table = self.methods.entry(recv.clone()).or_default();
             if let Some(existing) = table.get(&mname) {
@@ -110,16 +108,20 @@ impl Checker {
                     span: b.span,
                 });
             }
-            table.insert(
-                mname.clone(),
-                MethodInfo {
-                    params: ptys,
-                    ret: declared.clone(),
-                    is_pub: b.is_pub,
-                    builtin: false,
-                },
-            );
         }
+        let method_id = self.fresh_method_id();
+        self.methods.entry(recv.clone()).or_default().insert(
+            mname.clone(),
+            MethodInfo {
+                id: Some(method_id),
+                params: ptys,
+                ret: declared.clone(),
+                is_pub: b.is_pub,
+                builtin: false,
+            },
+        );
+        self.method_ids
+            .insert(b as *const Binding as usize, method_id);
 
         let self_param = Param {
             ty: recv_expr,
@@ -129,7 +131,8 @@ impl Checker {
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
-        let method_ty = self.funclit(&all_params, body, env, Some(&declared), *fspan)?;
+        let (method_ty, all_param_ids) =
+            self.funclit(&all_params, body, env, Some(&declared), *fspan)?;
         let Ty::Func {
             params: all_param_types,
             ..
@@ -137,16 +140,21 @@ impl Checker {
         else {
             unreachable!("funclit 必须产生函数类型")
         };
-        self.record_params(params, &all_param_types[1..]);
+        let Some(self_id) = all_param_ids.first().copied() else {
+            unreachable!("方法至少包含隐式 self 参数")
+        };
+        self.method_self_ids
+            .insert(b as *const Binding as usize, self_id);
+        self.record_params(params, &all_param_types[1..], &all_param_ids[1..]);
         self.record_expr_type(&b.value, method_ty.clone());
         self.binding_types
             .insert(b as *const Binding as usize, method_ty);
         Ok(())
     }
 
-    /// Q④ main 校验: 存在 / 零参 / 返回必须为 i32。
-    pub(super) fn validate_main(&mut self) -> AliasResult<()> {
-        let Some((sig, bspan)) = self.main.take() else {
+    /// main 校验: 存在 / 零参 / 返回必须为 i32。成功后返回 sema 已固化的入口 BindingId。
+    pub(super) fn validate_main(&mut self) -> AliasResult<BindingId> {
+        let Some((main_id, sig, bspan)) = self.main.take() else {
             return Err(AliasError {
                 msg: "找不到顶层 func main".into(),
                 span: Span::default(),
@@ -161,7 +169,7 @@ impl Checker {
                     });
                 }
                 if matches!(*ret, Ty::Int(IntW::W32)) {
-                    Ok(())
+                    Ok(main_id)
                 } else {
                     Err(AliasError {
                         msg: format!("顶层 func main 返回类型必须是 i32, 实际 {}", ret.name()),

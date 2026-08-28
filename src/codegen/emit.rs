@@ -21,23 +21,23 @@ pub(crate) enum CellAddr {
     GlobalOff(usize),
 }
 
-pub(crate) fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> Option<CellAddr> {
+pub(crate) fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, id: BindingId) -> Option<CellAddr> {
     for scope in frame.scopes.iter().rev() {
-        if let Some(s) = scope.get(name) {
+        if let Some(s) = scope.get(&id) {
             return Some(match s {
                 Slot::Local(v) => CellAddr::Reg(*v),
                 Slot::Global(off) => CellAddr::GlobalOff(*off),
             });
         }
     }
-    if let Some(idx) = frame.caps.get(name) {
+    if let Some(idx) = frame.caps.get(&id) {
         return Some(CellAddr::EnvLoad(*idx));
     }
     if frame.init_ctx {
         return None;
     }
     c.globals_final
-        .get(name)
+        .get(&id)
         .map(|(off, _)| CellAddr::GlobalOff(*off))
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn emit_local_cell<M: Module>(
     frame: &mut Frame,
     word: Value,
     vty: VTy,
-    name: &str,
+    id: BindingId,
 ) -> AliasResult<Variable> {
     let (sz, _) = size_align(&vty);
     let szw = bcx.ins().iconst(types::I64, sz as i64);
@@ -120,12 +120,12 @@ pub(crate) fn emit_local_cell<M: Module>(
         .scopes
         .last_mut()
         .unwrap_or_else(|| invariant_violation("作用域栈非空"))
-        .insert(name.to_string(), Slot::Local(var));
+        .insert(id, Slot::Local(var));
     frame
         .locals_vty
         .last_mut()
         .unwrap_or_else(|| invariant_violation("作用域栈非空"))
-        .insert(name.to_string(), vty);
+        .insert(id, vty);
     Ok(var)
 }
 
@@ -164,15 +164,6 @@ fn pop_scope(frame: &mut Frame) {
 
 // ---------------------------------------------------------------------------
 // Array / iterator 表示
-//
-// array<T> 在 Alias 值层是 2-word wrapper:
-//   [0] raw array header (现有 alias.arr.* runtime ABI)
-//   [1] structural version
-// iterator<T> 是 3-word 对象:
-//   [0] array wrapper
-//   [1] cursor
-//   [2] expected version
-// 结构修改只需改 wrapper.version；所有别名共享 wrapper，因此必然失效。
 // ---------------------------------------------------------------------------
 
 fn array_raw(bcx: &mut FunctionBuilder, array: Value) -> Value {
@@ -217,8 +208,6 @@ fn make_iterator<M: Module>(
     Ok(iter)
 }
 
-/// iterator 失效是语言运行时错误。这里直接使用 Win32 stderr，避免为了一个
-/// 语义层错误改动已有 raw-array runtime ABI / 契约表。
 fn emit_iterator_abort<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -296,51 +285,73 @@ pub(crate) fn emit_stmt<M: Module>(
     match s {
         Stmt::Binding(b) => {
             if b.kind == BindKind::Func {
-                let Expr::FuncLit { params, body, .. } = &b.value else {
+                let Expr::FuncLit {
+                    params,
+                    body,
+                    captures,
+                    ..
+                } = &b.value
+                else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
                 let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
                     invariant_violation("局部 func 绑定携带完整函数类型")
                 };
                 let ret_vty = *ret_vty;
-                let v = emit_funclit_value_typed(c, bcx, frame, params, body, ret_vty.clone())?;
+                let v = emit_funclit_value_typed(
+                    c,
+                    bcx,
+                    frame,
+                    params,
+                    body,
+                    captures,
+                    ret_vty.clone(),
+                )?;
                 emit_local_cell(
                     c,
                     bcx,
                     frame,
                     v,
                     VTy::Func(param_vtys, Box::new(ret_vty)),
-                    &b.name,
+                    b.binding_id,
                 )?;
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr_expected(c, bcx, frame, &b.value, &vty)?;
-                emit_local_cell(c, bcx, frame, v, vty, &b.name)?;
+                emit_local_cell(c, bcx, frame, v, vty, b.binding_id)?;
             }
             Ok(())
         }
         Stmt::FieldAssign {
-            recv, field, value, ..
+            recv,
+            field_index,
+            value,
+            ..
         } => {
-            let fvty = field_vty(c, recv, field)?;
+            let fvty = field_vty(c, recv, *field_index)?;
             let v = emit_expr_expected(c, bcx, frame, value, &fvty)?;
             let p = emit_expr(c, bcx, frame, recv)?;
-            let off = field_offset(c, recv, field)?;
+            let off = field_offset(c, recv, *field_index)?;
             let sv = norm_store(bcx, v, &fvty);
             bcx.ins().store(MemFlagsData::new(), sv, p, off);
             Ok(())
         }
-        Stmt::Assign { target, value, .. } => {
-            let tvty = bound_vty(c, frame, target);
+        Stmt::Assign {
+            target,
+            target_id,
+            value,
+            ..
+        } => {
+            let tvty = bound_vty(c, frame, *target_id);
             let v = emit_expr_expected(c, bcx, frame, value, &tvty)?;
-            match cell_addr(c, frame, target) {
+            match cell_addr(c, frame, *target_id) {
                 Some(addr) => {
                     write_cell(bcx, frame, &addr, v, &tvty);
                     Ok(())
                 }
                 None => Err(native_err(
                     Span::default(),
-                    format!("赋值目标 '{target}' 未定义"),
+                    format!("内部: 赋值目标 '{target}' 的 BindingId 无存储"),
                 )),
             }
         }
@@ -378,15 +389,24 @@ pub(crate) fn emit_stmt<M: Module>(
         } => emit_if(c, bcx, frame, branches, else_body.as_deref(), ret_block),
         Stmt::While { cond, body, .. } => emit_while(c, bcx, frame, cond, body, ret_block),
         Stmt::For {
+            binding_id,
             ty,
             iterable,
-            name,
             body,
             span,
+            ..
         } => {
             let elem_vty = c.vty(ty);
             emit_for(
-                c, bcx, frame, iterable, name, body, &elem_vty, *span, ret_block,
+                c,
+                bcx,
+                frame,
+                iterable,
+                *binding_id,
+                body,
+                &elem_vty,
+                *span,
+                ret_block,
             )
         }
         Stmt::Break { .. } => {
@@ -538,7 +558,7 @@ fn emit_for<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     iterable: &Expr,
-    name: &str,
+    binding_id: BindingId,
     body: &[Stmt],
     elem_vty: &VTy,
     span: Span,
@@ -600,7 +620,7 @@ fn emit_for<M: Module>(
     bcx.ins().store(MemFlagsData::new(), next, iter, 8);
 
     push_scope(frame);
-    emit_local_cell(c, bcx, frame, elem, elem_vty.clone(), name)?;
+    emit_local_cell(c, bcx, frame, elem, elem_vty.clone(), binding_id)?;
     frame.loop_targets.push((end_b, header));
     for s in body {
         ensure_current(bcx, frame);
@@ -635,13 +655,18 @@ pub(crate) fn emit_expr<M: Module>(
         Expr::Float(v, ..) => Ok(bcx.ins().f64const(*v)),
         Expr::Bool(b, ..) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
         Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts),
-        Expr::Ident(name, span, _) => match cell_addr(c, frame, name) {
-            Some(addr) => {
-                let vty = bound_vty(c, frame, name);
-                Ok(read_cell(bcx, frame, &addr, &vty))
+        Expr::Ident(name, id, span, _) => {
+            let id = id.unwrap_or_else(|| {
+                panic!("内部代码生成不变式被破坏: 可求值标识符 '{name}' 缺少 BindingId")
+            });
+            match cell_addr(c, frame, id) {
+                Some(addr) => {
+                    let vty = bound_vty(c, frame, id);
+                    Ok(read_cell(bcx, frame, &addr, &vty))
+                }
+                None => Err(native_err(*span, format!("内部: BindingId {:?} 无存储", id))),
             }
-            None => Err(native_err(*span, format!("未定义的绑定 '{name}'"))),
-        },
+        }
         Expr::This(span, _) => {
             let fid = frame
                 .this_fid
@@ -742,10 +767,14 @@ pub(crate) fn emit_expr<M: Module>(
             };
             emit_method_call(c, bcx, frame, recv, args, target, *span)
         }
-        Expr::Field { recv, name, .. } => {
+        Expr::Field {
+            recv,
+            field_index,
+            ..
+        } => {
             let p = emit_expr(c, bcx, frame, recv)?;
-            let fvty = field_vty(c, recv, name)?;
-            let off = field_offset(c, recv, name)?;
+            let fvty = field_vty(c, recv, *field_index)?;
+            let off = field_offset(c, recv, *field_index)?;
             let raw = bcx.ins().load(cl_type(&fvty), MemFlagsData::new(), p, off);
             Ok(norm_load(bcx, raw, &fvty))
         }
@@ -782,9 +811,12 @@ pub(crate) fn emit_expr<M: Module>(
             };
             emit_array_lit_typed(c, bcx, frame, elems, &elem_vty)
         }
-        Expr::FuncLit { params, body, .. } => {
-            emit_funclit_value(c, bcx, frame, params, body, e.ty())
-        }
+        Expr::FuncLit {
+            params,
+            body,
+            captures,
+            ..
+        } => emit_funclit_value(c, bcx, frame, params, body, captures, e.ty()),
         Expr::Match { subject, arms, .. } => {
             let result_vty = c.vty(e.ty());
             emit_match_typed(c, bcx, frame, subject, arms, &result_vty)
@@ -941,7 +973,6 @@ fn emit_match_typed<M: Module>(
             bcx.seal_block(arm_b);
             bcx.seal_block(next_b);
         } else {
-            // sema 已证明穷尽；走到最后一臂时剩余值必然命中。
             bcx.ins().jump(arm_b, &[]);
             frame.terminated = true;
             bcx.seal_block(arm_b);
@@ -1385,17 +1416,18 @@ pub(crate) fn emit_match_arm<M: Module>(
 ) -> AliasResult<bool> {
     push_scope(frame);
 
-    match (&arm.pattern, subject_vty) {
-        (Pattern::Binding { name, .. }, _) => {
-            emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), name)?;
+    match (&arm.pattern, subject_vty, arm.binding_id) {
+        (Pattern::Binding { .. }, _, Some(binding_id)) => {
+            emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), binding_id)?;
         }
         (
             Pattern::Constructor {
                 ctor,
-                binding: Some(name),
+                binding: Some(_),
                 ..
             },
             VTy::Result(ok, err),
+            Some(binding_id),
         ) => {
             let bind_vty = match ctor {
                 CtorKind::Ok => (**ok).clone(),
@@ -1403,7 +1435,11 @@ pub(crate) fn emit_match_arm<M: Module>(
             };
             let raw = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 8);
             let payload = restore_word(bcx, raw, &bind_vty);
-            emit_local_cell(c, bcx, frame, payload, bind_vty, name)?;
+            emit_local_cell(c, bcx, frame, payload, bind_vty, binding_id)?;
+        }
+        (Pattern::Binding { .. }, _, None)
+        | (Pattern::Constructor { binding: Some(_), .. }, _, None) => {
+            invariant_violation("Pattern 绑定必须携带 BindingId")
         }
         _ => {}
     }
@@ -1984,21 +2020,24 @@ pub(crate) fn emit_method_call<M: Module>(
             };
             make_iterator(c, bcx, rv)
         }
-        MethodTarget::User { receiver, name } => {
+        MethodTarget::User {
+            receiver,
+            id: Some(method_id),
+            ..
+        } => {
             let receiver_vty = c.vty(receiver);
             if receiver_vty != svt {
                 invariant_violation("已解析方法接收者与表达式静态类型一致")
             }
-            let key = (receiver_vty.display_name(), name.clone());
             let (param_vtys, ret_vty) = c
                 .method_sigs
-                .get(&key)
+                .get(method_id)
                 .cloned()
-                .unwrap_or_else(|| invariant_violation("已解析用户方法必须存在于方法表"));
+                .unwrap_or_else(|| invariant_violation("MethodId 必须存在于方法签名表"));
             let fid = *c
                 .methods
-                .get(&key)
-                .unwrap_or_else(|| invariant_violation("已解析用户方法必须存在函数 ID"));
+                .get(method_id)
+                .unwrap_or_else(|| invariant_violation("MethodId 必须存在函数 ID"));
             let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
             let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
             words.push(bcx.use_var(frame.globals));
@@ -2015,30 +2054,41 @@ pub(crate) fn emit_method_call<M: Module>(
             let raw = first_result(bcx, inst);
             Ok(norm_load(bcx, raw, &ret_vty))
         }
+        MethodTarget::User { id: None, .. } => {
+            invariant_violation("用户方法调用必须在 HIR 中携带 MethodId")
+        }
     }
 }
 
 pub(crate) fn field_offset<M: Module>(
     c: &Compiler<M>,
     recv: &Expr,
-    field: &str,
+    field_index: usize,
 ) -> AliasResult<i32> {
-    Ok(field_entry(c, recv, field)?.1)
+    Ok(field_entry(c, recv, field_index)?.1)
 }
 
-pub(crate) fn field_vty<M: Module>(c: &Compiler<M>, recv: &Expr, field: &str) -> AliasResult<VTy> {
-    Ok(field_entry(c, recv, field)?.0)
+pub(crate) fn field_vty<M: Module>(
+    c: &Compiler<M>,
+    recv: &Expr,
+    field_index: usize,
+) -> AliasResult<VTy> {
+    Ok(field_entry(c, recv, field_index)?.0)
 }
 
-fn field_entry<M: Module>(c: &Compiler<M>, recv: &Expr, field: &str) -> AliasResult<(VTy, i32)> {
+fn field_entry<M: Module>(
+    c: &Compiler<M>,
+    recv: &Expr,
+    field_index: usize,
+) -> AliasResult<(VTy, i32)> {
     if let VTy::Struct(s) = c.vty(recv.ty()) {
         if let Some(layout) = c.struct_layouts.get(&s) {
-            if let Some(entry) = layout.fields.iter().find(|entry| entry.name == field) {
+            if let Some(entry) = layout.fields.get(field_index) {
                 return Ok((entry.vty.clone(), entry.offset));
             }
         }
     }
-    invariant_violation("字段访问目标为结构体实例 (sema 已校验)");
+    invariant_violation("字段访问索引必须由 sema/HIR 解析到结构体布局");
 }
 
 pub(crate) fn emit_incdec<M: Module>(
@@ -2052,13 +2102,16 @@ pub(crate) fn emit_incdec<M: Module>(
     let [arg] = args else {
         return Err(native_err(span, format!("{name} 恰好接受 1 个参数")));
     };
-    let Expr::Ident(target, tspan, _) = &arg.value else {
+    let Expr::Ident(target, Some(target_id), tspan, _) = &arg.value else {
         return Err(native_err(span, format!("{name} 的参数必须是可变绑定名")));
     };
-    let Some(addr) = cell_addr(c, frame, target) else {
-        return Err(native_err(*tspan, format!("'{target}' 未定义")));
+    let Some(addr) = cell_addr(c, frame, *target_id) else {
+        return Err(native_err(
+            *tspan,
+            format!("内部: '{target}' 的 BindingId 无存储"),
+        ));
     };
-    let vty = bound_vty(c, frame, target);
+    let vty = bound_vty(c, frame, *target_id);
     if !vty.is_numeric() {
         invariant_violation("increase/decrease 目标为数值绑定 (sema 已校验)");
     }

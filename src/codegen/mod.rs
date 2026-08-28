@@ -37,12 +37,12 @@ pub(crate) enum Slot {
 
 #[derive(Clone)]
 pub(crate) struct Frame {
-    pub(crate) scopes: Vec<HashMap<String, Slot>>,
-    pub(crate) locals_vty: Vec<HashMap<String, VTy>>,
+    pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
+    pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
     pub(crate) globals: Variable,
     pub(crate) env: Option<Variable>,
-    pub(crate) caps: HashMap<String, usize>,
-    pub(crate) caps_vty: HashMap<String, VTy>,
+    pub(crate) caps: HashMap<BindingId, usize>,
+    pub(crate) caps_vty: HashMap<BindingId, VTy>,
     pub(crate) this_fid: Option<FuncId>,
     pub(crate) terminated: bool,
     /// 当前函数内由内向外的循环目标：(break 目标, continue 目标)。
@@ -57,7 +57,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) module: &'m mut M,
     pub(crate) cc: cranelift_codegen::isa::CallConv,
     pub(crate) ptr_ty: cranelift_codegen::ir::Type,
-    pub(crate) globals_final: HashMap<String, (usize, VTy)>,
+    pub(crate) globals_final: HashMap<BindingId, (usize, VTy)>,
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
     pub(crate) next_fid: u32,
@@ -68,10 +68,10 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) span_table: Vec<(u32, u32)>,
     type_projections: ProjectionTable,
     struct_layouts: StructTable,
-    /// (完整接收者静态类型名, 方法名) → FuncId。
-    methods: HashMap<(String, String), FuncId>,
-    method_rets: HashMap<(String, String), VTy>,
-    method_sigs: HashMap<(String, String), (Vec<VTy>, VTy)>,
+    /// sema 已解析 MethodId → 原生函数/签名。codegen 禁止按 receiver/name 查方法。
+    methods: HashMap<MethodId, FuncId>,
+    method_rets: HashMap<MethodId, VTy>,
+    method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
     runtime_defined: HashSet<&'static str>,
 }
 
@@ -79,7 +79,7 @@ pub(crate) struct PendingFn {
     fid: FuncId,
     params: Vec<Param>,
     body: Body,
-    caps: Vec<(String, VTy)>,
+    caps: Vec<(BindingId, VTy)>,
     ret_vty: VTy,
 }
 
@@ -158,6 +158,9 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let Expr::FuncLit { .. } = &b.value else {
             return Err(native_err(b.span, "方法体必须是函数字面量"));
         };
+        let method_id = b
+            .method_id
+            .unwrap_or_else(|| invariant_violation("用户方法必须携带 MethodId"));
         let self_vty = c.vty(recv);
         let recv_name = self_vty.display_name();
         let mname = b.name.clone();
@@ -170,10 +173,10 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
         let ret_vty = *ret_vty;
         let fid =
             c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv_name}>{mname}"))?;
-        let key = (recv_name, mname);
-        c.methods.insert(key.clone(), fid);
-        c.method_rets.insert(key.clone(), ret_vty.clone());
-        c.method_sigs.insert(key, (param_vtys, ret_vty));
+        c.methods.insert(method_id, fid);
+        c.method_rets.insert(method_id, ret_vty.clone());
+        c.method_sigs
+            .insert(method_id, (param_vtys, ret_vty));
         pending_methods.push((fid, b));
     }
 
@@ -191,7 +194,7 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
             let slot = off;
             off += sz;
             c.top_slots.push(slot);
-            c.globals_final.insert(b.name.clone(), (slot, slot_vty));
+            c.globals_final.insert(b.binding_id, (slot, slot_vty));
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
@@ -215,9 +218,18 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
     }
 
     for (fid, _slot, b) in top_funcs {
-        let Expr::FuncLit { params, body, .. } = &b.value else {
+        let Expr::FuncLit {
+            params,
+            body,
+            captures,
+            ..
+        } = &b.value
+        else {
             unreachable!("pass 1 已确保 func 绑定初始化为函数字面量");
         };
+        if !captures.is_empty() {
+            invariant_violation("顶层函数不应捕获局部绑定")
+        }
         let VTy::Func(_, ret_vty) = c.vty(&b.ty) else {
             invariant_violation("func 绑定携带完整函数类型")
         };
@@ -225,13 +237,25 @@ fn compile_program<M: Module>(c: &mut Compiler<'_, M>, items: &[Item]) -> AliasR
     }
 
     for (fid, b) in pending_methods {
-        let Expr::FuncLit { params, body, .. } = &b.value else {
+        let Expr::FuncLit {
+            params,
+            body,
+            captures,
+            ..
+        } = &b.value
+        else {
             unreachable!("方法登记已确保函数字面量");
         };
+        if !captures.is_empty() {
+            invariant_violation("顶层方法不应捕获局部绑定")
+        }
         let Some(recv) = &b.receiver else {
             unreachable!("pending_methods 只收带接收者的绑定");
         };
         let self_param = Param {
+            binding_id: b
+                .self_id
+                .unwrap_or_else(|| invariant_violation("方法 self 必须携带 BindingId")),
             ty: recv.clone(),
             name: "self".into(),
             span: b.span,
@@ -272,17 +296,17 @@ impl<M: Module> Compiler<'_, M> {
     }
 }
 
-pub(crate) fn bound_vty<M: Module>(c: &Compiler<M>, frame: &Frame, name: &str) -> VTy {
+pub(crate) fn bound_vty<M: Module>(c: &Compiler<M>, frame: &Frame, id: BindingId) -> VTy {
     for vtys in frame.locals_vty.iter().rev() {
-        if let Some(vty) = vtys.get(name) {
+        if let Some(vty) = vtys.get(&id) {
             return vty.clone();
         }
     }
-    if let Some(vty) = frame.caps_vty.get(name) {
+    if let Some(vty) = frame.caps_vty.get(&id) {
         return vty.clone();
     }
     c.globals_final
-        .get(name)
+        .get(&id)
         .map(|(_, vty)| vty.clone())
-        .unwrap_or_else(|| invariant_violation("标识符必须在 sema 后解析到绑定"))
+        .unwrap_or_else(|| invariant_violation("BindingId 必须在 sema 后解析到存储"))
 }

@@ -78,8 +78,10 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// 无括号方法中缀：`a plus b` ≡ `a.plus(b)`，`s shout` ≡ `s.shout()`。
-    /// 普通无括号调用仍只允许一个参数。函数值作为参数须显式 f(g)。
+    /// 无括号调用与方法中缀共享这一边界，但 parser 只做 token 形状能确定的裁决：
+    /// - `a XXX b` 明确是 `a.XXX(b)`；
+    /// - `f x` / `value method` 两项邻接保留为 Juxtapose，交给 sema 根据 lhs 静态类型裁决；
+    /// - 非标识符实参的 `f 1`、`f 'x'` 等直接是单参函数调用。
     fn parse_no_paren(&mut self) -> AliasResult<Expr> {
         let mut lhs = self.parse_bit_or()?;
         let mut chain = 0usize;
@@ -124,26 +126,30 @@ impl Parser {
                         }
                         continue;
                     }
-                    let has_arg = self.starts_unary_at(1);
-                    self.bump();
-                    let args = if has_arg {
+                    if self.starts_unary_at(1) {
+                        self.bump();
                         let a = self.parse_unary()?;
                         let a_span = a.span();
-                        vec![CallArg {
-                            label: None,
-                            value: a,
-                            span: a_span,
-                        }]
+                        let span = lhs.span();
+                        lhs = Expr::MethodCall {
+                            recv: Box::new(lhs),
+                            name: m,
+                            args: vec![CallArg {
+                                label: None,
+                                value: a,
+                                span: a_span,
+                            }],
+                            span,
+                        };
                     } else {
-                        Vec::new()
-                    };
-                    let span = lhs.span();
-                    lhs = Expr::MethodCall {
-                        recv: Box::new(lhs),
-                        name: m,
-                        args,
-                        span,
-                    };
+                        let rhs = self.parse_unary()?;
+                        let span = lhs.span();
+                        lhs = Expr::Juxtapose {
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                            span,
+                        };
+                    }
                 }
                 Some(t)
                     if matches!(

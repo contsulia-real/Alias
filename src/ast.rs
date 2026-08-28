@@ -258,6 +258,13 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// 两项无括号邻接。parser 不在这里猜 `f x` 是单参函数调用还是
+    /// `value method` 的零参方法中缀；该裁决必须由 sema 基于 lhs 静态类型完成。
+    Juxtapose {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
     MethodCall {
         recv: Box<Expr>,
         name: String,
@@ -357,6 +364,7 @@ impl Expr {
             | Expr::BitNot { span, .. }
             | Expr::Ternary { span, .. }
             | Expr::Call { span, .. }
+            | Expr::Juxtapose { span, .. }
             | Expr::MethodCall { span, .. }
             | Expr::Field { span, .. }
             | Expr::Index { span, .. }

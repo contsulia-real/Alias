@@ -1,7 +1,7 @@
 //! sema::stmts — 语句、函数体与控制流检查。
 
 use super::exprs::{require_value, ExprCheckError};
-use super::hir::{BuiltinCall, CallTarget};
+use super::hir::{BindingId, BuiltinCall, CallTarget};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
@@ -21,6 +21,7 @@ impl Checker {
                 span: b.span,
             });
         }
+        let binding_id = self.binding_id_for(b);
         let declared = if b.kind == BindKind::Func {
             check_return_type_slot(&b.ty, b.span, &self.structs)?
         } else {
@@ -33,13 +34,13 @@ impl Checker {
                     span: b.value.span(),
                 });
             };
-            let init_ty = self.funclit(params, body, env, Some(&declared), *span)?;
+            let (init_ty, param_ids) = self.funclit(params, body, env, Some(&declared), *span)?;
             if let Ty::Func {
                 params: param_types,
                 ..
             } = &init_ty
             {
-                self.record_params(params, param_types);
+                self.record_params(params, param_types, &param_ids);
             }
             self.record_expr_type(&b.value, init_ty.clone());
             self.binding_types
@@ -50,40 +51,42 @@ impl Checker {
                 }
             }
             if b.name == "main" && !init_ty.is_unknown() {
-                self.main = Some((init_ty.clone(), b.span));
+                self.main = Some((binding_id, init_ty.clone(), b.span));
             }
             Scope::insert(
                 env,
                 b.name.clone(),
                 VarInfo {
+                    id: binding_id,
                     ty: init_ty,
                     mutable: false,
                 },
             );
         } else {
-            let init_ty =
-                self.expr_expected(&b.value, env, &declared)
-                    .map_err(|error| match error {
-                        literal @ ExprCheckError::LiteralOutOfRange { .. } => literal.into_alias(),
-                        other => {
-                            let error = other.into_alias();
-                            AliasError {
-                                msg: format!(
-                                    "绑定 '{}' 声明类型为 {}: {}",
-                                    b.name,
-                                    declared.name(),
-                                    error.msg
-                                ),
-                                span: error.span,
-                            }
+            let init_ty = self
+                .expr_expected(&b.value, env, &declared)
+                .map_err(|error| match error {
+                    literal @ ExprCheckError::LiteralOutOfRange { .. } => literal.into_alias(),
+                    other => {
+                        let error = other.into_alias();
+                        AliasError {
+                            msg: format!(
+                                "绑定 '{}' 声明类型为 {}: {}",
+                                b.name,
+                                declared.name(),
+                                error.msg
+                            ),
+                            span: error.span,
                         }
-                    })?;
+                    }
+                })?;
             self.binding_types
                 .insert(b as *const Binding as usize, declared.clone());
             Scope::insert(
                 env,
                 b.name.clone(),
                 VarInfo {
+                    id: binding_id,
                     ty: init_ty,
                     mutable: b.kind == BindKind::Var,
                 },
@@ -92,6 +95,7 @@ impl Checker {
         Ok(())
     }
 
+    /// 检查函数字面量并在第一次建立参数作用域时分配稳定 BindingId。
     pub(super) fn funclit(
         &mut self,
         params: &[Param],
@@ -99,16 +103,20 @@ impl Checker {
         env: &Env,
         expected: Option<&Ty>,
         fspan: Span,
-    ) -> AliasResult<Ty> {
+    ) -> AliasResult<(Ty, Vec<BindingId>)> {
         let local = Scope::child(env);
         let mut param_tys = Vec::with_capacity(params.len());
+        let mut param_ids = Vec::with_capacity(params.len());
         for p in params {
             let pt = check_value_type_slot(&p.ty, p.span, &self.structs)?;
+            let id = self.fresh_binding_id();
             param_tys.push(pt.clone());
+            param_ids.push(id);
             Scope::insert(
                 &local,
                 p.name.clone(),
                 VarInfo {
+                    id,
                     ty: pt,
                     mutable: false,
                 },
@@ -116,10 +124,13 @@ impl Checker {
         }
 
         let ret_ty = expected.cloned().unwrap_or(Ty::Unknown);
+        // `this` 是特殊当前函数引用，不进入普通 HIR BindingId 存储模型。
+        let this_scope_id = self.fresh_binding_id();
         Scope::insert(
             &local,
             "this".into(),
             VarInfo {
+                id: this_scope_id,
                 ty: Ty::Func {
                     params: param_tys.clone(),
                     ret: Box::new(ret_ty.clone()),
@@ -177,10 +188,13 @@ impl Checker {
                 Ty::Unit
             }
         });
-        Ok(Ty::Func {
-            params: param_tys,
-            ret: Box::new(inferred_ret),
-        })
+        Ok((
+            Ty::Func {
+                params: param_tys,
+                ret: Box::new(inferred_ret),
+            },
+            param_ids,
+        ))
     }
 
     pub(super) fn check_return_value(
@@ -240,8 +254,6 @@ impl Checker {
                 value,
                 span,
             } => {
-                // sema 先解析目标的静态类型，再用它检查 RHS；这只决定类型上下文，
-                // 不改变 codegen 中 RHS 的运行时求值顺序。
                 let Some(info) = Scope::get(env, target) else {
                     return Err(AliasError {
                         msg: format!("赋值目标 '{target}' 未定义"),
@@ -254,6 +266,8 @@ impl Checker {
                         span: *span,
                     });
                 }
+                self.assign_target_ids
+                    .insert(s as *const Stmt as usize, info.id);
                 self.expr_expected(value, env, &info.ty).map_err(|error| {
                     let error = error.into_alias();
                     AliasError {
@@ -269,22 +283,27 @@ impl Checker {
                 value,
                 span,
             } => {
-                // 字段类型是 RHS 的目标上下文，必须在检查 from/try_from 前解析。
                 let rt = self.expr(recv, env)?;
                 if rt.is_unknown() {
                     self.expr(value, env)?;
                     return Ok(None);
                 }
-                let Ty::Struct(s) = rt else {
+                let Ty::Struct(struct_name) = rt else {
                     return Err(AliasError {
                         msg: format!("{} 没有字段 '{}'", rt.name(), field),
                         span: *span,
                     });
                 };
-                let info = &self.structs[&s];
-                let Some(f) = info.fields.iter().find(|fi| fi.name == *field).cloned() else {
+                let info = &self.structs[&struct_name];
+                let Some((field_index, f)) = info
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, fi)| fi.name == *field)
+                    .map(|(index, field)| (index, field.clone()))
+                else {
                     return Err(AliasError {
-                        msg: format!("结构体 {s} 没有字段 '{field}'"),
+                        msg: format!("结构体 {struct_name} 没有字段 '{field}'"),
                         span: *span,
                     });
                 };
@@ -294,6 +313,8 @@ impl Checker {
                         span: *span,
                     });
                 }
+                self.field_assign_indices
+                    .insert(s as *const Stmt as usize, field_index);
                 self.expr_expected(value, env, &f.ty).map_err(|error| {
                     let error = error.into_alias();
                     AliasError {
@@ -398,11 +419,14 @@ impl Checker {
                         span: *span,
                     });
                 }
+                let id = self.fresh_binding_id();
+                self.for_ids.insert(s as *const Stmt as usize, id);
                 let child = Scope::child(env);
                 Scope::insert(
                     &child,
                     name.clone(),
                     VarInfo {
+                        id,
                         ty: declared,
                         mutable: false,
                     },

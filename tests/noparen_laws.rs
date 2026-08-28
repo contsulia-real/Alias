@@ -1,5 +1,6 @@
-//! Phase 2e 无括号文法泛化 — 正负向矩阵。
-//! 优先级铁律: 无括号绑定紧于一切二元运算 (spec-notes 附录八)。
+//! 无括号函数调用 / 方法中缀语法法律。
+//! 方法中缀是任意 `a.XXX(b)` → `a XXX b` / `a.XXX()` → `a XXX` 的糖；
+//! parser 不得把任意两项 `IDENT IDENT` 预先解释成零参方法。
 
 use alias::run;
 
@@ -16,12 +17,16 @@ fn err(src: &str) -> String {
 
 const COMBINE: &str = "pub func i32 i32.combine = (i32 other) -> return self + other\n";
 
-// ---------- 正向: 表达式位置吞参 ----------
-
 #[test]
 fn expr_pos_swallow_int() {
     let src = "func i32 dup = (i32 x) -> return x * 2\nfunc i32 main = () -> {\n    val i32 a = dup 5\n    return a\n}\n";
     assert_eq!(ok(src), 10);
+}
+
+#[test]
+fn identifier_argument_is_single_arg_function_call() {
+    let src = "func u32 id = (u32 x) -> return x\nfunc i32 main = () -> {\n    val u32 x = 7\n    val u32 y = id x\n    if y == 7 { return 0 }\n    return 1\n}\n";
+    assert_eq!(ok(src), 0);
 }
 
 #[test]
@@ -38,12 +43,9 @@ fn expr_pos_swallow_paren_group() {
 
 #[test]
 fn explicit_parens_allow_binop_after() {
-    // 铁律对照: 显式括号后二元运算合法
     let src = "func i32 dup = (i32 x) -> return x * 2\nfunc i32 main = () -> {\n    val i32 a = dup 5\n    return (dup 3) + a\n}\n";
-    assert_eq!(ok(src), 16); // (dup 3)=6, a=10, 6+10=16
+    assert_eq!(ok(src), 16);
 }
-
-// ---------- 正向: 方法中缀 ----------
 
 #[test]
 fn method_infix_two_arg() {
@@ -61,7 +63,6 @@ fn method_infix_zero_arg() {
 
 #[test]
 fn method_infix_left_assoc_chain() {
-    // 左结合: (1 combine 2) combine 3 = 6
     let src = format!("{COMBINE}func i32 main = () -> {{\n    return 1 combine 2 combine 3\n}}\n");
     assert_eq!(ok(&src), 6);
 }
@@ -72,11 +73,8 @@ fn method_infix_on_struct() {
     assert_eq!(ok(src), 5);
 }
 
-// ---------- 负向 ----------
-
 #[test]
 fn dangling_binop_after_swallow_rejected() {
-    // 铁律: 吞参后二元运算符悬空 → 编译错误
     let src = "func i32 dup = (i32 x) -> return x * 2\nfunc i32 main = () -> {\n    val i32 a = dup 5 + 1\n    return a\n}\n";
     let msg = err(src);
     assert!(
@@ -94,15 +92,18 @@ fn unknown_method_infix_rejected() {
 
 #[test]
 fn bare_builtin_still_works_stmt_pos() {
-    // 回归锚: 语句级内建吞参不受 P2e 影响
     let src = "func i32 main = () -> {\n    var i32 n = 0;\n    increase n\n    println n\n    return n\n}\n";
     assert_eq!(ok(src), 1);
 }
 
 #[test]
-fn zero_arg_requires_parens() {
-    // 零参裸名 = 函数值引用 (一等公民): 打印 <func> 而非调用;
-    // 调用须显式括号 five()
-    let src = "func i32 five = () -> return 5\nfunc i32 main = () -> {\n    println five\n    println five()\n    return five()\n}\n";
+fn zero_arg_function_may_omit_parens() {
+    let src = "func i32 five = () -> return 5\nfunc i32 main = () -> {\n    val i32 a = five\n    return a\n}\n";
+    assert_eq!(ok(src), 5);
+}
+
+#[test]
+fn explicit_zero_arg_call_remains_valid() {
+    let src = "func i32 five = () -> return 5\nfunc i32 main = () -> return five()\n";
     assert_eq!(ok(src), 5);
 }

@@ -7,7 +7,7 @@ mod stmts;
 pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
-use crate::sema::hir::ExprInfo;
+use crate::sema::hir::{BindingId, ExprInfo, MethodId};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,6 +17,7 @@ use types::{FloatW, IntW, Ty, UIntW};
 
 #[derive(Clone)]
 struct VarInfo {
+    id: BindingId,
     ty: Ty,
     mutable: bool,
 }
@@ -36,6 +37,8 @@ pub(crate) struct StructInfo {
 
 #[derive(Clone)]
 struct MethodInfo {
+    /// 只有用户方法携带稳定 MethodId；内建方法由专用 MethodTarget 表示。
+    id: Option<MethodId>,
     params: Vec<Ty>,
     ret: Ty,
     #[allow(dead_code)]
@@ -85,15 +88,60 @@ struct Checker {
     fn_ret: Vec<Ty>,
     /// 只记录当前函数体内的循环深度；进入新的函数字面量会临时清零。
     loop_depth: usize,
-    main: Option<(Ty, Span)>,
+    main: Option<(BindingId, Ty, Span)>,
     structs: HashMap<String, StructInfo>,
     methods: HashMap<String, HashMap<String, MethodInfo>>,
+
+    next_binding_id: u32,
+    next_method_id: u32,
+
     expr_facts: HashMap<usize, ExprInfo>,
     binding_types: HashMap<usize, Ty>,
+    binding_ids: HashMap<usize, BindingId>,
     receiver_types: HashMap<usize, Ty>,
+    method_ids: HashMap<usize, MethodId>,
+    method_self_ids: HashMap<usize, BindingId>,
     field_types: HashMap<usize, Ty>,
+    field_indices: HashMap<usize, usize>,
+    field_assign_indices: HashMap<usize, usize>,
+    ctor_arg_indices: HashMap<usize, usize>,
     param_types: HashMap<usize, Ty>,
+    param_ids: HashMap<usize, BindingId>,
     for_types: HashMap<usize, Ty>,
+    for_ids: HashMap<usize, BindingId>,
+    assign_target_ids: HashMap<usize, BindingId>,
+    match_binding_ids: HashMap<usize, BindingId>,
+    expr_binding_ids: HashMap<usize, BindingId>,
+}
+
+impl Checker {
+    fn fresh_binding_id(&mut self) -> BindingId {
+        let id = BindingId(self.next_binding_id);
+        self.next_binding_id = self
+            .next_binding_id
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: BindingId 耗尽"));
+        id
+    }
+
+    fn fresh_method_id(&mut self) -> MethodId {
+        let id = MethodId(self.next_method_id);
+        self.next_method_id = self
+            .next_method_id
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: MethodId 耗尽"));
+        id
+    }
+
+    fn binding_id_for(&mut self, binding: &Binding) -> BindingId {
+        let key = binding as *const Binding as usize;
+        if let Some(id) = self.binding_ids.get(&key) {
+            return *id;
+        }
+        let id = self.fresh_binding_id();
+        self.binding_ids.insert(key, id);
+        id
+    }
 }
 
 pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
@@ -103,12 +151,25 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         main: None,
         structs: HashMap::new(),
         methods: builtin_methods(),
+        next_binding_id: 0,
+        next_method_id: 0,
         expr_facts: HashMap::new(),
         binding_types: HashMap::new(),
+        binding_ids: HashMap::new(),
         receiver_types: HashMap::new(),
+        method_ids: HashMap::new(),
+        method_self_ids: HashMap::new(),
         field_types: HashMap::new(),
+        field_indices: HashMap::new(),
+        field_assign_indices: HashMap::new(),
+        ctor_arg_indices: HashMap::new(),
         param_types: HashMap::new(),
+        param_ids: HashMap::new(),
         for_types: HashMap::new(),
+        for_ids: HashMap::new(),
+        assign_target_ids: HashMap::new(),
+        match_binding_ids: HashMap::new(),
+        expr_binding_ids: HashMap::new(),
     };
     let top = Scope::root();
     for item in &program.items {
@@ -117,8 +178,6 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                 if b.receiver.is_some() {
                     ck.method_def(b, &top)?;
                 } else {
-                    // 顶层命名函数在检查自己的函数体之前先登记完整签名。
-                    // 只让“当前函数自引用”提前可见，不开启后续声明的前向引用。
                     if b.kind == BindKind::Func {
                         if let Expr::FuncLit { params, .. } = &b.value {
                             let ret = types::check_return_type_slot(&b.ty, b.span, &ck.structs)?;
@@ -130,10 +189,12 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                                     &ck.structs,
                                 )?);
                             }
+                            let id = ck.binding_id_for(b);
                             Scope::insert(
                                 &top,
                                 b.name.clone(),
                                 VarInfo {
+                                    id,
                                     ty: Ty::Func {
                                         params: ptys,
                                         ret: Box::new(ret),
@@ -149,22 +210,30 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
             Item::StructDef(sd) => ck.struct_def(sd, &top)?,
         }
     }
-    ck.validate_main()?;
+    let _main_id = ck.validate_main()?;
     hir::lower(
         program,
         hir::LowerFacts {
             exprs: ck.expr_facts,
             bindings: ck.binding_types,
+            binding_ids: ck.binding_ids,
             receivers: ck.receiver_types,
+            method_ids: ck.method_ids,
+            method_self_ids: ck.method_self_ids,
             fields: ck.field_types,
+            field_indices: ck.field_indices,
+            field_assign_indices: ck.field_assign_indices,
             params: ck.param_types,
+            param_ids: ck.param_ids,
             fors: ck.for_types,
+            for_ids: ck.for_ids,
+            assign_target_ids: ck.assign_target_ids,
+            match_binding_ids: ck.match_binding_ids,
+            expr_binding_ids: ck.expr_binding_ids,
         },
     )
 }
 
-/// 编译器内建扩展函数。运算名字和符号运算共享同一静态类型规则；
-/// 原生后端按接收者静态类型把它们发射到同一运算指令路径。
 fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     let mut methods: HashMap<String, HashMap<String, MethodInfo>> = HashMap::new();
 
@@ -179,6 +248,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
         strings.insert(
             name.to_string(),
             MethodInfo {
+                id: None,
                 params,
                 ret,
                 is_pub: true,
@@ -206,6 +276,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
             table.insert(
                 name.to_string(),
                 MethodInfo {
+                    id: None,
                     params: vec![ty.clone()],
                     ret: ty.clone(),
                     is_pub: true,
@@ -218,6 +289,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     methods.entry("bool".into()).or_default().insert(
         "not".into(),
         MethodInfo {
+            id: None,
             params: vec![],
             ret: Ty::Bool,
             is_pub: true,
