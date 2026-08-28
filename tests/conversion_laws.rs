@@ -4,12 +4,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CASE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+fn next_case_seq() -> usize {
+    // 只为同一测试进程生成互不相同的临时目录后缀，不承担状态发布或 happens-before；
+    // Relaxed 已提供所需的唯一原子递增语义。
+    CASE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 fn fail(src: &str) -> AliasError {
     run(src).expect_err("该程序应在编译期失败")
 }
 
 fn run_cli(src: &str) -> std::process::Output {
-    let seq = CASE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let seq = next_case_seq();
     let dir = std::env::temp_dir().join(format!("alias-conversion-{}-{seq}", std::process::id()));
     std::fs::create_dir(&dir).expect("创建临时目录失败");
     let source = dir.join("case.as");
@@ -284,7 +290,7 @@ func i32 main = () -> {
 }
 
 #[test]
-fn retired_to_builtins_have_no_compatibility_alias() {
+fn to_i32_is_not_a_predefined_name() {
     let error = fail("func i32 main = () -> return to_i32(1)\n");
     assert_eq!(error.msg, "return 需要 i32: 未定义的绑定 'to_i32'");
 }
