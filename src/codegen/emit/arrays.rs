@@ -33,7 +33,7 @@ pub(crate) fn array_version(bcx: &mut FunctionBuilder, array: Value) -> Value {
 
 pub(crate) fn bump_array_version(bcx: &mut FunctionBuilder, array: Value) {
     let old = array_version(bcx, array);
-    let next = bcx.ins().iadd_imm(old, 1);
+    let next = bcx.ins().iadd_imm_s(old, 1);
     bcx.ins().store(
         MemFlagsData::new(),
         next,
@@ -125,7 +125,7 @@ pub(crate) fn emit_array_lit<M: Module>(
             raw,
             ARRAY_DATA_OFFSET,
         );
-        let addr = bcx.ins().iadd_imm(dp, (i as i64) * VALUE_WORD_BYTES);
+        let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * VALUE_WORD_BYTES);
         let sv = storage_word(bcx, v, elem_vty);
         store_elem(bcx, sv, addr, elem_vty);
     }
