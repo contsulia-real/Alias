@@ -66,31 +66,34 @@ fn create_temp_object(bytes: &[u8]) -> AliasResult<TempObject> {
 
 /// SDK 导入库搜索路径发现:
 /// 1) %WindowsSdkDir% + %WindowsSdkVersion% → Lib\{ver}\um\x64
-/// 2) 兜底: 各固定盘 \Windows Kits\10\Lib\*\um\x64 取最新 (本机 SDK 在 D:)
+/// 2) 兜底: %ProgramFiles(x86)%\Windows Kits\10\Lib\*\um\x64 取最新。
 fn sdk_um_x64() -> Option<std::path::PathBuf> {
     if let (Ok(dir), Ok(ver)) = (
         std::env::var("WindowsSdkDir"),
         std::env::var("WindowsSdkVersion"),
     ) {
-        let p = std::path::PathBuf::from(dir.trim_end_matches('\\'))
+        let p = std::path::PathBuf::from(dir.trim_end_matches(['\\', '/']))
             .join("Lib")
-            .join(ver)
+            .join(ver.trim_end_matches(['\\', '/']))
             .join("um")
             .join("x64");
         if p.join("kernel32.Lib").exists() || p.join("kernel32.lib").exists() {
             return Some(p);
         }
     }
+    let program_files = std::env::var_os("ProgramFiles(x86)")?;
+    let kits = std::path::PathBuf::from(program_files)
+        .join("Windows Kits")
+        .join("10")
+        .join("Lib");
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    for drive in ["C:", "D:", "E:"].iter() {
-        let kits = format!("{drive}\\Windows Kits\\10\\Lib");
-        if let Ok(entries) = std::fs::read_dir(&kits) {
-            for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                candidates.push(e.path().join("um").join("x64"));
-            }
+    if let Ok(entries) = std::fs::read_dir(kits) {
+        for entry in entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+        {
+            candidates.push(entry.path().join("um").join("x64"));
         }
-        let pf = std::env::var("ProgramFiles(x86)").ok()?;
-        let _ = pf;
     }
     candidates.sort_by(|a, b| b.cmp(a));
     candidates

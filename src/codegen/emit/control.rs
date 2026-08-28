@@ -1,3 +1,9 @@
+use super::arrays::{array_raw, array_version, emit_iterator_abort, make_iterator};
+use super::calls::{field_offset, field_vty};
+use super::cells::{
+    cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, write_cell,
+};
+use super::expr::{emit_expr, emit_expr_expected};
 use super::*;
 
 pub(crate) fn emit_body<M: Module>(
@@ -81,10 +87,7 @@ pub(crate) fn emit_stmt<M: Module>(
             Ok(())
         }
         Stmt::Assign {
-            target,
-            target_id,
-            value,
-            ..
+            target_id, value, ..
         } => {
             let tvty = bound_vty(c, frame, *target_id);
             let v = emit_expr_expected(c, bcx, frame, value, &tvty)?;
@@ -95,11 +98,11 @@ pub(crate) fn emit_stmt<M: Module>(
                 }
                 None => Err(native_err(
                     Span::default(),
-                    format!("内部: 赋值目标 '{target}' 的 BindingId 无存储"),
+                    "内部: 赋值目标 BindingId 无存储",
                 )),
             }
         }
-        Stmt::ExprStmt { expr, .. } => {
+        Stmt::Expr { expr, .. } => {
             emit_expr(c, bcx, frame, expr)?;
             Ok(())
         }
@@ -113,14 +116,13 @@ pub(crate) fn emit_stmt<M: Module>(
                 frame.terminated = true;
                 return Ok(());
             }
-            let v = match value {
-                Some(e) => emit_expr_expected(c, bcx, frame, e, &expected)?,
-                None => match cl_type(&expected) {
-                    types::F32 => bcx.ins().f32const(0.0),
-                    types::F64 => bcx.ins().f64const(0.0),
-                    ty => bcx.ins().iconst(ty, 0),
-                },
+            let Some(value) = value else {
+                return Err(native_err(
+                    Span::default(),
+                    "内部: 非 unit return 缺少返回值，sema 返回值不变式被破坏",
+                ));
             };
+            let v = emit_expr_expected(c, bcx, frame, value, &expected)?;
             let v = coerce_ret(bcx, frame, v);
             bcx.ins().jump(ret_block, &[BlockArg::Value(v)]);
             frame.terminated = true;
@@ -145,15 +147,10 @@ pub(crate) fn emit_stmt<M: Module>(
                 c,
                 bcx,
                 frame,
-                iterable,
-                *binding_id,
-                body,
-                &elem_vty,
-                *span,
-                ret_block,
+                (iterable, *binding_id, body, &elem_vty, *span, ret_block),
             )
         }
-        Stmt::Break { .. } => {
+        Stmt::Break => {
             let Some((break_b, _)) = frame.loop_targets.last().copied() else {
                 return Err(native_err(Span::default(), "break 缺少循环目标"));
             };
@@ -161,7 +158,7 @@ pub(crate) fn emit_stmt<M: Module>(
             frame.terminated = true;
             Ok(())
         }
-        Stmt::Continue { .. } => {
+        Stmt::Continue => {
             let Some((_, continue_b)) = frame.loop_targets.last().copied() else {
                 return Err(native_err(Span::default(), "continue 缺少循环目标"));
             };
@@ -301,13 +298,9 @@ fn emit_for<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    iterable: &Expr,
-    binding_id: BindingId,
-    body: &[Stmt],
-    elem_vty: &VTy,
-    span: Span,
-    ret_block: Block,
+    input: (&Expr, BindingId, &[Stmt], &VTy, Span, Block),
 ) -> AliasResult<()> {
+    let (iterable, binding_id, body, elem_vty, span, ret_block) = input;
     ensure_current(bcx, frame);
     let source_vty = c.vty(iterable.ty());
     let source = emit_expr(c, bcx, frame, iterable)?;
@@ -328,7 +321,9 @@ fn emit_for<M: Module>(
     bcx.switch_to_block(header);
     frame.terminated = false;
     let array = bcx.ins().load(types::I64, MemFlagsData::new(), iter, 0);
-    let expected = bcx.ins().load(types::I64, MemFlagsData::new(), iter, 16);
+    let expected = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), iter, value_word_offset(2));
     let actual = array_version(bcx, array);
     let invalid = bcx.ins().icmp(IntCC::NotEqual, actual, expected);
     bcx.ins().brif(invalid, invalid_b, &[], valid_b, &[]);
@@ -342,9 +337,13 @@ fn emit_for<M: Module>(
 
     bcx.switch_to_block(valid_b);
     frame.terminated = false;
-    let cursor = bcx.ins().load(types::I64, MemFlagsData::new(), iter, 8);
+    let cursor = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), iter, value_word_offset(1));
     let raw = array_raw(bcx, array);
-    let len = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 8);
+    let len = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), raw, value_word_offset(1));
     let more = bcx.ins().icmp(IntCC::UnsignedLessThan, cursor, len);
     bcx.ins().brif(more, body_b, &[], end_b, &[]);
     frame.terminated = true;
@@ -354,14 +353,15 @@ fn emit_for<M: Module>(
     frame.terminated = false;
     let raw = array_raw(bcx, array);
     let data = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 0);
-    let off = bcx.ins().imul_imm_s(cursor, 8);
+    let off = bcx.ins().imul_imm_s(cursor, VALUE_WORD_BYTES);
     let addr = bcx.ins().iadd(data, off);
     let raw_elem = bcx
         .ins()
         .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
     let elem = norm_load(bcx, raw_elem, elem_vty);
     let next = bcx.ins().iadd_imm_s(cursor, 1);
-    bcx.ins().store(MemFlagsData::new(), next, iter, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), next, iter, value_word_offset(1));
 
     push_scope(frame);
     emit_local_cell(c, bcx, frame, elem, elem_vty.clone(), binding_id)?;

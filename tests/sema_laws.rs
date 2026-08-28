@@ -1,4 +1,4 @@
-//! Phase 1 sema 法律测试 — 每项检查一条负向用例, 断言精确中文消息 + 行:列。
+//! sema 当前法律测试 — 每项检查一条负向用例，断言精确中文消息 + 行:列。
 //!
 //! 消息逐字节对齐两个来源:
 //! - 运行时搬家项: interp.rs 原报错文本 (D4 律: 迁移消息字节精确)
@@ -9,10 +9,36 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e,
         Ok(_) => panic!("应当报错"),
     }
+}
+
+#[test]
+fn duplicate_binding_in_same_lexical_scope_is_rejected() {
+    let error =
+        fail("func i32 main = () -> {\n    val i32 x = 1\n    val i32 x = 2\n    return 0\n}\n");
+    assert!(error.msg.contains("同一词法作用域不能重复声明绑定 'x'"));
+}
+
+#[test]
+fn duplicate_parameter_name_is_rejected() {
+    let error = fail("func i32 bad = (i32 x, i32 x) -> return x\nfunc i32 main = () -> return 0\n");
+    assert!(error.msg.contains("同一参数列表不能重复参数名 'x'"));
+}
+
+#[test]
+fn duplicate_top_level_binding_or_function_name_is_rejected() {
+    let error =
+        fail("val i32 item = 1\nfunc i32 item = () -> return 2\nfunc i32 main = () -> return 0\n");
+    assert!(error.msg.contains("同一顶层作用域不能重复声明绑定 'item'"));
+}
+
+#[test]
+fn main_must_be_unique() {
+    let error = fail("func i32 main = () -> return 0\nfunc i32 main = () -> return 1\n");
+    assert!(error.msg.contains("同一顶层作用域不能重复声明绑定 'main'"));
 }
 
 fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
@@ -210,10 +236,10 @@ fn return_expr_vs_declared_mismatch() {
 
 #[test]
 fn generic_type_shape_rejected() {
-    // 例证原为 array<string>, Phase 2d 落地后轮换为 sender<string> — M35
+    // sender<string> 代表当前未实现的一般泛型。
     assert_law(
         "\nfunc i32 main = () -> {\n    val sender<string> a = 1\n    return 0\n}\n",
-        "泛型类型 sender<string> 尚未实现 (Phase 5+)",
+        "泛型类型 sender<string> 尚未实现",
         3,
         4,
     );
@@ -248,14 +274,14 @@ fn tightened_q1_ordered_comparison_on_bool() {
 #[test]
 fn q1_bool_equality_still_legal() {
     let src = "\nfunc i32 main = () -> {\n    val bool ok = true == true\n    while ok == false { return 1 }\n    return 0\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 /// Q① 正向控制: string 有序比较合法 (运行时字典序语义不变)。
 #[test]
 fn q1_string_ordering_still_legal() {
     let src = "\nfunc i32 main = () -> {\n    val bool ok = 'a' < 'b'\n    while ok == false { return 1 }\n    return 0\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 /// Q③ 裁决(严格版终裁): 声明返回非 unit 的块体落空曾静默得 Unit
@@ -338,5 +364,5 @@ fn tightened_q2_param_assignment_rejected() {
 #[test]
 fn audit_count_to_ten_passes_sema() {
     let src = include_str!("../demos/count_to_ten.as");
-    assert_eq!(run("count_to_ten.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }

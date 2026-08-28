@@ -1,9 +1,9 @@
 //! sema::stmts — 语句、函数体与控制流检查。
 
 use super::exprs::{require_value, ExprCheckError};
-use super::hir::{BindingId, BuiltinCall, CallTarget};
+use super::hir::{BindingId, BuiltinCall};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
-use super::{decl_mismatch, Checker, Env, Scope, VarInfo};
+use super::{decl_mismatch, Checker, Env, LowerCallTarget, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
 use crate::{AliasError, AliasResult, Span};
 
@@ -22,6 +22,12 @@ impl Checker {
             });
         }
         let binding_id = self.binding_id_for(b);
+        if Scope::get_here(env, &b.name).is_some_and(|existing| existing.id != binding_id) {
+            return Err(AliasError {
+                msg: format!("同一词法作用域不能重复声明绑定 '{}'", b.name),
+                span: b.span,
+            });
+        }
         let declared = if b.kind == BindKind::Func {
             check_return_type_slot(&b.ty, b.span, &self.structs)?
         } else {
@@ -63,23 +69,23 @@ impl Checker {
                 },
             );
         } else {
-            let init_ty = self
-                .expr_expected(&b.value, env, &declared)
-                .map_err(|error| match error {
-                    literal @ ExprCheckError::LiteralOutOfRange { .. } => literal.into_alias(),
-                    other => {
-                        let error = other.into_alias();
-                        AliasError {
-                            msg: format!(
-                                "绑定 '{}' 声明类型为 {}: {}",
-                                b.name,
-                                declared.name(),
-                                error.msg
-                            ),
-                            span: error.span,
+            let init_ty =
+                self.expr_expected(&b.value, env, &declared)
+                    .map_err(|error| match error {
+                        literal @ ExprCheckError::LiteralOutOfRange { .. } => literal.into_alias(),
+                        other => {
+                            let error = other.into_alias();
+                            AliasError {
+                                msg: format!(
+                                    "绑定 '{}' 声明类型为 {}: {}",
+                                    b.name,
+                                    declared.name(),
+                                    error.msg
+                                ),
+                                span: error.span,
+                            }
                         }
-                    }
-                })?;
+                    })?;
             self.binding_types
                 .insert(b as *const Binding as usize, declared.clone());
             Scope::insert(
@@ -108,6 +114,12 @@ impl Checker {
         let mut param_tys = Vec::with_capacity(params.len());
         let mut param_ids = Vec::with_capacity(params.len());
         for p in params {
+            if Scope::get_here(&local, &p.name).is_some() {
+                return Err(AliasError {
+                    msg: format!("同一参数列表不能重复参数名 '{}'", p.name),
+                    span: p.span,
+                });
+            }
             let pt = check_value_type_slot(&p.ty, p.span, &self.structs)?;
             let id = self.fresh_binding_id();
             param_tys.push(pt.clone());
@@ -126,6 +138,12 @@ impl Checker {
         let ret_ty = expected.cloned().unwrap_or(Ty::Unknown);
         // `this` 是特殊当前函数引用，不进入普通 HIR BindingId 存储模型。
         let this_scope_id = self.fresh_binding_id();
+        if Scope::get_here(&local, "this").is_some() {
+            return Err(AliasError {
+                msg: "参数名不能使用函数内保留名 'this'".into(),
+                span: fspan,
+            });
+        }
         Scope::insert(
             &local,
             "this".into(),
@@ -324,7 +342,7 @@ impl Checker {
                 })?;
                 Ok(None)
             }
-            Stmt::ExprStmt { expr, .. } => {
+            Stmt::Expr { expr, .. } => {
                 if let Expr::Call { callee, args, span } = expr {
                     if let Expr::Ident(name, _) = callee.as_ref() {
                         if name == "increase" || name == "decrease" {
@@ -332,7 +350,7 @@ impl Checker {
                             self.record_expr_type(expr, Ty::Unit);
                             self.record_call_target(
                                 expr,
-                                CallTarget::Builtin(if name == "increase" {
+                                LowerCallTarget::Builtin(if name == "increase" {
                                     BuiltinCall::Increase
                                 } else {
                                     BuiltinCall::Decrease
@@ -508,7 +526,7 @@ fn stmt_guarantees_return(stmt: &Stmt) -> bool {
                 .all(|(_, b)| block_terminates_with_return(b))
                 && block_terminates_with_return(else_body)
         }
-        Stmt::ExprStmt { expr, .. } => expr_all_arms_never(expr),
+        Stmt::Expr { expr, .. } => expr_all_arms_never(expr),
         _ => false,
     }
 }

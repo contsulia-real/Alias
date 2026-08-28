@@ -17,7 +17,7 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     let value = bcx.block_params(entry)[0];
 
     let alloc = c.import_runtime("rt.heap.alloc")?;
-    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
     let sz32 = bcx.ins().iconst(types::I64, 32);
     let buf_call = bcx.ins().call(alloc_ref, &[sz32]);
     let buf = first_result(&bcx, buf_call);
@@ -92,7 +92,5 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     bcx.ins().return_(&[blk]);
 
     bcx.finalize(c.module.target_config());
-    c.module
-        .define_function(fid, &mut ctx)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+    c.define_verified_function(fid, &mut ctx, name)
 }

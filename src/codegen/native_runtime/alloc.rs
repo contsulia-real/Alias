@@ -33,9 +33,7 @@ pub(super) fn emit_alloc_runtime<M: Module>(
         bcx.seal_block(ok_b);
         bcx.switch_to_block(fail_b);
         let one = bcx.ins().iconst(types::I32, 1);
-        let ep = c
-            .module
-            .declare_func_in_func(ext.exit_process, &mut bcx.func);
+        let ep = c.module.declare_func_in_func(ext.exit_process, bcx.func);
         bcx.ins().call(ep, &[one]);
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
         bcx.switch_to_block(ok_b);
@@ -50,7 +48,7 @@ pub(super) fn emit_alloc_runtime<M: Module>(
     });
     shim!(c, "alias.env.new", |bcx, a| {
         let n64 = bcx.ins().sextend(types::I64, a[0]);
-        let bytes = bcx.ins().imul_imm_s(n64, 8);
+        let bytes = bcx.ins().imul_imm_s(n64, VALUE_WORD_BYTES);
         let p = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
         bcx.ins().return_(&[p]);
         true
@@ -61,10 +59,11 @@ pub(super) fn emit_alloc_runtime<M: Module>(
         true
     });
     shim!(c, "alias.closure.new", |bcx, a| {
-        let sz = bcx.ins().iconst(types::I64, 16);
+        let sz = bcx.ins().iconst(types::I64, 2 * VALUE_WORD_BYTES);
         let p = call_rt_m!(bcx, "rt.heap.alloc", vec![sz]);
         bcx.ins().store(MemFlagsData::new(), a[0], p, 0);
-        bcx.ins().store(MemFlagsData::new(), a[1], p, 8);
+        bcx.ins()
+            .store(MemFlagsData::new(), a[1], p, value_word_offset(1));
         bcx.ins().return_(&[p]);
         true
     });

@@ -11,9 +11,9 @@ fn static_string_block<M: Module>(
         .module
         .declare_data(data_name, Linkage::Local, false, false)
         .map_err(|e| native_err(Span::default(), format!("内部: 数据声明失败 {e}")))?;
-    let gv = c.module.declare_data_in_func(id, &mut bcx.func);
+    let gv = c.module.declare_data_in_func(id, bcx.func);
     let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
-    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
     let sz = bcx.ins().iconst(types::I64, 16);
     let call = bcx.ins().call(alloc_ref, &[sz]);
     let blk = first_result(bcx, call);
@@ -158,7 +158,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let ev1 = bcx.ins().iadd_imm_s(ev, 1);
     let final_exp = bcx.ins().select(carry, ev1, ev);
 
-    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
     let cap = bcx.ins().iconst(types::I64, 64);
     let buf_call = bcx.ins().call(alloc_ref, &[cap]);
     let buf = first_result(&bcx, buf_call);
@@ -177,7 +177,8 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let p0 = bcx.use_var(pos);
     let first_addr = bcx.ins().iadd(buf, p0);
     let first_byte = bcx.ins().ireduce(types::I8, first_ch);
-    bcx.ins().store(MemFlagsData::new(), first_byte, first_addr, 0);
+    bcx.ins()
+        .store(MemFlagsData::new(), first_byte, first_addr, 0);
     let p1 = bcx.ins().iadd_imm_s(p0, 1);
     bcx.def_var(pos, p1);
     let frac = bcx.declare_var(types::I64);
@@ -237,7 +238,8 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let last = bcx.ins().load(types::I8, MemFlagsData::new(), last_addr, 0);
     let is_zero_digit = bcx.ins().icmp_imm_s(IntCC::Equal, last, b'0' as i64);
     let trim_body = bcx.create_block();
-    bcx.ins().brif(is_zero_digit, trim_body, &[], exponent_b, &[]);
+    bcx.ins()
+        .brif(is_zero_digit, trim_body, &[], exponent_b, &[]);
     bcx.seal_block(trim_body);
     bcx.switch_to_block(trim_body);
     bcx.def_var(pos, last_pos);
@@ -273,7 +275,8 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let has_hundreds = bcx.ins().icmp_imm_s(IntCC::NotEqual, hundreds, 0);
     let hundred_b = bcx.create_block();
     let tens_check_b = bcx.create_block();
-    bcx.ins().brif(has_hundreds, hundred_b, &[], tens_check_b, &[]);
+    bcx.ins()
+        .brif(has_hundreds, hundred_b, &[], tens_check_b, &[]);
     bcx.seal_block(hundred_b);
     bcx.switch_to_block(hundred_b);
     let p = bcx.use_var(pos);
@@ -314,7 +317,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let byte = bcx.ins().ireduce(types::I8, ch);
     bcx.ins().store(MemFlagsData::new(), byte, addr, 0);
     let final_len = bcx.ins().iadd_imm_s(p, 1);
-    let alloc_ref = c.module.declare_func_in_func(alloc, &mut bcx.func);
+    let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
     let sz = bcx.ins().iconst(types::I64, 16);
     let blk_call = bcx.ins().call(alloc_ref, &[sz]);
     let blk = first_result(&bcx, blk_call);
@@ -323,7 +326,5 @@ pub(super) fn emit_float_display_shim<M: Module>(
     bcx.ins().return_(&[blk]);
 
     bcx.finalize(c.module.target_config());
-    c.module
-        .define_function(fid, &mut ctx)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+    c.define_verified_function(fid, &mut ctx, name)
 }

@@ -1,13 +1,13 @@
-//! Phase 1 语义冒烟测试 — 每条用例对应一条宪法裁决的可执行验证。
+//! 当前语义冒烟测试 — 每条用例对应一条已冻结语言法律。
 
 use alias::run;
 
 fn ok(src: &str) -> i32 {
-    run("test.as", src).unwrap_or_else(|e| panic!("应当通过, 实际: {e}"))
+    run(src).unwrap_or_else(|e| panic!("应当通过, 实际: {e}"))
 }
 
 fn should_fail(src: &str) -> String {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e.msg,
         Ok(_) => panic!("应当报错"),
     }
@@ -16,7 +16,7 @@ fn should_fail(src: &str) -> String {
 #[test]
 fn count_to_ten_demo() {
     let src = include_str!("../demos/count_to_ten.as");
-    assert_eq!(run("count_to_ten.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
@@ -60,7 +60,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("t.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]

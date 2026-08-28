@@ -59,7 +59,7 @@ impl Checker {
         self.expr_facts
             .entry(Self::expr_key(e))
             .and_modify(|info| info.ty = ty.clone())
-            .or_insert(ExprInfo {
+            .or_insert(LowerExprInfo {
                 ty,
                 call_target: None,
                 implicit_zero_callee: None,
@@ -74,11 +74,11 @@ impl Checker {
         }
     }
 
-    pub(in crate::sema) fn record_call_target(&mut self, e: &Expr, target: CallTarget) {
+    pub(in crate::sema) fn record_call_target(&mut self, e: &Expr, target: LowerCallTarget) {
         self.expr_facts
             .entry(Self::expr_key(e))
             .and_modify(|info| info.call_target = Some(target.clone()))
-            .or_insert(ExprInfo {
+            .or_insert(LowerExprInfo {
                 ty: Ty::Unknown,
                 call_target: Some(target),
                 implicit_zero_callee: None,
@@ -90,12 +90,12 @@ impl Checker {
             .entry(Self::expr_key(e))
             .and_modify(|info| {
                 info.ty = result_ty.clone();
-                info.call_target = Some(CallTarget::FunctionValue);
+                info.call_target = Some(LowerCallTarget::FunctionValue);
                 info.implicit_zero_callee = Some(callee_ty.clone());
             })
-            .or_insert(ExprInfo {
+            .or_insert(LowerExprInfo {
                 ty: result_ty,
-                call_target: Some(CallTarget::FunctionValue),
+                call_target: Some(LowerCallTarget::FunctionValue),
                 implicit_zero_callee: Some(callee_ty),
             });
     }
@@ -111,7 +111,7 @@ impl Checker {
         else {
             return;
         };
-        if *target == CallTarget::FunctionValue {
+        if *target == LowerCallTarget::FunctionValue {
             return;
         }
         let params = args
@@ -153,12 +153,14 @@ impl Checker {
                 self.record_binding_ref(e, info.id);
                 info.ty
             }
-            Expr::This(span) => Scope::get(env, "this")
-                .map(|info| info.ty)
-                .ok_or_else(|| AliasError {
-                    msg: "this 只能出现在 func 体内".into(),
-                    span: *span,
-                })?,
+            Expr::This(span) => {
+                Scope::get(env, "this")
+                    .map(|info| info.ty)
+                    .ok_or_else(|| AliasError {
+                        msg: "this 只能出现在 func 体内".into(),
+                        span: *span,
+                    })?
+            }
             _ => return self.expr(e, env),
         };
         self.record_expr_type(e, ty.clone());
@@ -208,7 +210,7 @@ impl Checker {
         if let Some((name, arg, span)) = contextual_conversion(e) {
             self.record_call_target(
                 e,
-                CallTarget::Builtin(if name == "from" {
+                LowerCallTarget::Builtin(if name == "from" {
                     BuiltinCall::From
                 } else {
                     BuiltinCall::TryFrom
@@ -294,7 +296,7 @@ impl Checker {
                     if Scope::get(env, name).is_none() && (name == "ok" || name == "err") {
                         self.record_call_target(
                             e,
-                            CallTarget::ResultConstructor(if name == "ok" {
+                            LowerCallTarget::ResultConstructor(if name == "ok" {
                                 CtorKind::Ok
                             } else {
                                 CtorKind::Err
@@ -372,7 +374,7 @@ impl Checker {
         if let Some((name, arg, span)) = contextual_conversion(e) {
             self.record_call_target(
                 e,
-                CallTarget::Builtin(if name == "from" {
+                LowerCallTarget::Builtin(if name == "from" {
                     BuiltinCall::From
                 } else {
                     BuiltinCall::TryFrom

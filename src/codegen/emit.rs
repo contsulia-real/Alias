@@ -9,18 +9,10 @@ use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{Linkage, Module};
 
-mod arrays;
-mod calls;
-mod cells;
-mod control;
-mod expr;
-mod ops;
-mod strings;
-
-pub(crate) use arrays::*;
-pub(crate) use calls::*;
-pub(crate) use cells::*;
-pub(crate) use control::*;
-pub(crate) use expr::*;
-pub(crate) use ops::*;
-pub(crate) use strings::*;
+pub(super) mod arrays;
+pub(super) mod calls;
+pub(super) mod cells;
+pub(super) mod control;
+pub(super) mod expr;
+pub(super) mod ops;
+pub(super) mod strings;

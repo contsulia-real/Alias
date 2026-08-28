@@ -1,5 +1,3 @@
-import { string.moreRespectful } from './helper.as'
-
 func i32 main = () -> {
     var i32 i = 0;
 

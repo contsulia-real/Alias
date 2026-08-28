@@ -5,7 +5,7 @@
 use alias::run;
 
 fn err(src: &str) -> String {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e.msg,
         Ok(_) => panic!("应当报错"),
     }
@@ -14,13 +14,13 @@ fn err(src: &str) -> String {
 #[test]
 fn pub_u32_named_recursion_and_nested_print_call_run() {
     let src = "pub func u32 fact_while = (u32 x) -> {\n    if x == 0 {\n        return 1\n    }\n    return fact_while (x-1);\n}\nfunc i32 main = () -> {\n    println fact_while 3;\n    println fact_while 0;\n    return 0;\n}\n";
-    assert_eq!(run("test.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
 fn rhs_integer_literal_adopts_established_left_integer_type() {
     let src = "func i32 main = () -> {\n    val u32 x = 3\n    if x == 0 { return 1 }\n    val u32 y = x - 1\n    if y != 2 { return 2 }\n    return 0\n}\n";
-    assert_eq!(run("test.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]

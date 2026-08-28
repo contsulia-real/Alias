@@ -130,12 +130,12 @@ impl Checker {
                             }
                             Err(error) => return Err(error.into_alias()),
                         }
-                        self.record_call_target(e, CallTarget::FunctionValue);
+                        self.record_call_target(e, LowerCallTarget::FunctionValue);
                         Ok((**ret).clone())
                     }
                     Ty::FuncPoly | Ty::Unknown => {
                         require_value(self.expr(rhs, env)?, rhs.span())?;
-                        self.record_call_target(e, CallTarget::FunctionValue);
+                        self.record_call_target(e, LowerCallTarget::FunctionValue);
                         Ok(Ty::Unknown)
                     }
                     _ => {
@@ -154,7 +154,7 @@ impl Checker {
                             env,
                         )?;
                         let target = resolve_method_target(self, &lhs_ty, name, *span)?;
-                        self.record_call_target(e, CallTarget::Method(target));
+                        self.record_call_target(e, LowerCallTarget::Method(target));
                         Ok(ty)
                     }
                 }
@@ -168,7 +168,7 @@ impl Checker {
                 let ty = self.method_call(recv, name, args, *span, env)?;
                 let recv_ty = self.expr_facts[&Self::expr_key(recv)].ty.clone();
                 let target = resolve_method_target(self, &recv_ty, name, *span)?;
-                self.record_call_target(e, CallTarget::Method(target));
+                self.record_call_target(e, LowerCallTarget::Method(target));
                 Ok(ty)
             }
             Expr::Index { recv, idx, .. } => {

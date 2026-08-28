@@ -1,4 +1,4 @@
-//! Phase 2d array<T> 法律测试 — 正负矩阵, 负向断言精确中文消息 + 行:列。
+//! array<T> 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
 //! 语义锚点 (用户批准设计, spec-notes 附录六):
 //! - 字面量 [e1, e2, ...] 元素类型一致; 类型槽 array<T> 恰一参
@@ -16,7 +16,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e,
         Ok(_) => panic!("应当报错"),
     }
@@ -47,7 +47,7 @@ fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
 #[test]
 fn literal_index_roundtrip() {
     let src = "func i32 main = () -> {\n    val array<i32> xs = [3, 14, 15]\n    return xs[0] + xs[1] + xs[2]\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 32);
+    assert_eq!(run(src).unwrap(), 32);
 }
 
 /// push 越初始容量增长: 初始 len=cap=1, 推到 6 必经换缓冲复制路径,
@@ -55,7 +55,7 @@ fn literal_index_roundtrip() {
 #[test]
 fn push_grows_across_capacity_boundary() {
     let src = "func i32 main = () -> {\n    var array<i32> a = [7]\n    a.push(1)\n    a.push(2)\n    a.push(3)\n    a.push(4)\n    a.push(5)\n    val i32 sum = a[0] + a[1] + a[2] + a[3] + a[4] + a[5]\n    while a.len() != 6 {\n        return 9\n    }\n    return sum\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 22);
+    assert_eq!(run(src).unwrap(), 22);
 }
 
 /// pop LIFO: 后进先出; 空字面量 [] 从 cap=0 起步增长 (cap 0→1→2 路径)。
@@ -63,21 +63,21 @@ fn push_grows_across_capacity_boundary() {
 fn pop_lifo_order() {
     let src = "func i32 main = () -> {\n    var array<i32> a = []\n    a.push(1)\n    a.push(2)\n    a.push(3)\n    val i32 p1 = a.pop()\n    val i32 p2 = a.pop()\n    return p1 * 10 + p2 + a.len()\n}\n";
     // p1=3, p2=2, len=1 → 30+2+1
-    assert_eq!(run("t.as", src).unwrap(), 33);
+    assert_eq!(run(src).unwrap(), 33);
 }
 
 /// 嵌套数组: 外层元素仍是数组, 双重下标与内层 len 均可达。
 #[test]
 fn nested_arrays() {
     let src = "func i32 main = () -> {\n    val array<array<i32>> g = [[1, 2], [3, 4, 5]]\n    val i32 deep = g[1][2]\n    val i32 inner_len = g[0].len()\n    return deep * 10 + inner_len\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 52);
+    assert_eq!(run(src).unwrap(), 52);
 }
 
 /// 数组元素为结构体: 经下标的 var 字段写落在实例上, 别名立即可见。
 #[test]
 fn array_of_struct_field_access() {
     let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val array<cell> cs = [cell(), cell(v = 5)]\n    cs[1].v = 50\n    val cell alias = cs[1]\n    alias.v = alias.v + 1\n    return cs[1].v + cs[0].v\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 51);
+    assert_eq!(run(src).unwrap(), 51);
 }
 
 /// 引用别名: 两个绑定一个实例 — 任一名字 push/pop 对另一名字可见。
@@ -85,7 +85,7 @@ fn array_of_struct_field_access() {
 fn alias_shares_instance() {
     let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    val array<i32> b = a\n    b.push(9)\n    a.push(8)\n    return a.len() * 10 + b.len() + a[1] + b[2]\n}\n";
     // len 均 3 → 30+3; a[1]=9, b[2]=8
-    assert_eq!(run("t.as", src).unwrap(), 50);
+    assert_eq!(run(src).unwrap(), 50);
 }
 
 /// val 绑定上的 push 合法 (变异在实例不在绑定); 字符串元素 +
@@ -94,21 +94,21 @@ fn alias_shares_instance() {
 fn string_elements_and_val_binding_push() {
     let src = "func i32 main = () -> {\n    val array<string> w = ['ab', 'c']\n    w.push('忠犬')\n    return w.len() * 100 + w[2].len()\n}\n";
     // 忠犬 = 6 字节
-    assert_eq!(run("t.as", src).unwrap(), 306);
+    assert_eq!(run(src).unwrap(), 306);
 }
 
 /// 闭包引用捕获数组绑定: 捕获后 push, 闭包内读到最新长度 (引用捕获)。
 #[test]
 fn closure_captures_array_by_reference() {
     let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    func i32 reader = () -> return a.len() * 10 + a[0]\n    a.push(5)\n    return reader()\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 21);
+    assert_eq!(run(src).unwrap(), 21);
 }
 
 /// 插值洞内的下标表达式同通道。
 #[test]
 fn index_inside_interpolation_hole() {
     let src = "func i32 main = () -> {\n    val array<i32> xs = [4, 9]\n    while '${xs[1]}' != '9' {\n        return 1\n    }\n    return xs[0]\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 4);
+    assert_eq!(run(src).unwrap(), 4);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 use super::*;
-use crate::codegen::{project_ty, projected_ty, VTy};
+use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
 fn checked_hir_has_exact_types_and_stable_targets() {
@@ -39,13 +39,17 @@ func i32 main = () -> {
         match node {
             TestNode::Expr(expr) => match expr {
                 Expr::Ident(_, id, ..) => assert!(id.is_some(), "可求值 ident 必须有 BindingId"),
-                Expr::Field { recv, field_index, .. } => {
+                Expr::Field {
+                    recv, field_index, ..
+                } => {
                     saw_field = true;
                     assert_eq!(*field_index, 0);
                     stack.push(TestNode::Expr(recv));
                 }
-                Expr::MethodCall { recv, args, info, .. } => {
-                    if matches!(info.call_target, Some(CallTarget::Method(MethodTarget::User { id: Some(_), .. }))) {
+                Expr::MethodCall {
+                    recv, args, target, ..
+                } => {
+                    if matches!(target, MethodTarget::User { .. }) {
                         saw_method = true;
                     }
                     for arg in args.iter().rev() {
@@ -133,13 +137,17 @@ fn push_stmt<'a>(stack: &mut Vec<TestNode<'a>>, stmt: &'a Stmt) {
             stack.push(TestNode::Expr(value));
             stack.push(TestNode::Expr(recv));
         }
-        Stmt::ExprStmt { expr, .. } => stack.push(TestNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(TestNode::Expr(expr)),
         Stmt::Return { value, .. } => {
             if let Some(value) = value {
                 stack.push(TestNode::Expr(value));
             }
         }
-        Stmt::If { branches, else_body, .. } => {
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
             if let Some(body) = else_body {
                 for stmt in body.iter().rev() {
                     stack.push(TestNode::Stmt(stmt));
@@ -164,7 +172,7 @@ fn push_stmt<'a>(stack: &mut Vec<TestNode<'a>>, stmt: &'a Stmt) {
             }
             stack.push(TestNode::Expr(iterable));
         }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Break | Stmt::Continue => {}
     }
 }
 
@@ -186,16 +194,28 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             stack.push(TestNode::Expr(rhs));
             stack.push(TestNode::Expr(lhs));
         }
-        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
             stack.push(TestNode::Expr(else_expr));
             stack.push(TestNode::Expr(then_expr));
             stack.push(TestNode::Expr(cond));
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            target,
+            ..
+        } => {
             for arg in args.iter().rev() {
                 stack.push(TestNode::Expr(&arg.value));
             }
-            stack.push(TestNode::Expr(callee));
+            if *target == CallTarget::FunctionValue {
+                stack.push(TestNode::Expr(callee));
+            }
         }
         Expr::MethodCall { recv, args, .. } => {
             for arg in args.iter().rev() {
@@ -222,7 +242,9 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
                             stack.push(TestNode::Stmt(stmt));
                         }
                     }
-                    ArmBody::Value(value) | ArmBody::Ret(value) => stack.push(TestNode::Expr(value)),
+                    ArmBody::Value(value) | ArmBody::Ret(value) => {
+                        stack.push(TestNode::Expr(value))
+                    }
                 }
             }
             stack.push(TestNode::Expr(subject));

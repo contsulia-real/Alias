@@ -2,8 +2,8 @@
 
 **状态：** 规范性文档  
 **同步日期：** 2026-08-28  
-**实现基线：** `main@a54ad7b0800cafb861e189630898006a30357df1`  
-**当前架构里程碑：** M69 — `CheckedProgram` typed HIR + `Ty → VTy` 单次投影
+**实现基线：** 当前 `main` HEAD
+**当前架构里程碑：** M75 — resolved HIR / fail-closed 后端 / 当前语法收口
 
 > 本文只描述 Alias **当前有效语义**。历史阶段、已删除语法、旧后端和被后续裁决覆盖的行为只在 `MIGRATION.md` 中保留为历史记录，不得用历史条目覆盖本文。
 
@@ -33,7 +33,7 @@ alias run <source.as>      # 临时 exe，执行后清理
 alias build <source.as>    # 同目录同名 .exe，成功静默
 ```
 
-`build` 只接受 `.as` 输入。当前链接实现固定使用 Windows SDK `kernel32.lib` 和 `x86_64-pc-windows-msvc` 工具链中的 `rust-lld.exe`；无 CRT，当前平台边界为 Windows x64。
+`alias <source.as>` 与 `alias run <source.as>` 是两个正式的一等 CLI 入口，不是兼容别名。`build` 只接受 `.as` 输入。当前对象 ISA、链接器和 SDK 均显式固定到 `x86_64-pc-windows-msvc`：Cranelift 不使用宿主 ISA 探测，链接使用 Windows SDK `kernel32.lib` 和对应目标工具链中的 `rust-lld.exe`；无 CRT，当前平台边界为 Windows x64。
 
 ## 2. 前端、typed HIR 与后端边界
 
@@ -48,6 +48,8 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - 每个 HIR 表达式携带最终 `Ty`；
 - `Call` 携带已解析 `CallTarget`；
 - `MethodCall` 携带已解析 `MethodTarget`；
+- `CheckedProgram.main_id` 携带 sema 已解析的入口 `BindingId`；
+- 结构体构造实参与字段索引的对应关系已经固化，不把 label/name 带到后端重新查找；
 - 函数字面量返回类型在 sema 合并完成；
 - 名字解析、目标类型传播、Pattern 合法性与覆盖、调用目标解析均在进入后端前完成。
 
@@ -64,6 +66,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - `codegen/abi.rs` 是值物理表示、存储宽度、对齐、用户函数签名、结构体布局和载荷字编码的唯一来源；
 - `codegen/runtime.rs::RUNTIME_CONTRACTS` 是所有 `alias.*` / `rt.*` runtime 符号参数、返回值和可空性的唯一机器契约；
 - `native_runtime.rs` 实际定义集合必须与契约表精确一致。
+- 每个函数必须在 `define_function` 前无条件执行 `Context::verify`；禁止使用受 flag 控制、可能跳过检查的 `verify_if`。verifier 失败必须把错误与 IR 作为内部编译错误返回；有返回值函数或 runtime shim 若未显式终止，也必须作为不变式失败，禁止补零返回。
 
 ---
 
@@ -108,6 +111,14 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - 函数参数是隐式不可变绑定。
 
 类型槽必须显式书写。Alias 不提供一般声明类型推断。
+
+名字唯一性规则：
+
+- 不同 lexical scope 允许 shadow；
+- 同一 lexical scope 禁止重复声明同名 binding；
+- 同一参数列表禁止重复参数名；
+- 顶层普通 binding 与命名 func 共享名字空间，禁止重名；
+- `main` 必须且只能声明一次。
 
 当前 `func` 绑定 RHS 必须直接是函数字面量；不能用既有函数值初始化另一个 `func` 绑定。
 
@@ -187,7 +198,7 @@ pub func Ret Receiver.method = (Args...) -> body
 - `self` 是方法体内隐式不可变接收者，不写入显式参数列表；
 - 方法按完整接收者静态类型分派；
 - 同一接收者类型内方法名唯一；
-- 单编译单元内 `pub` 不改变可调用性，未来模块/import 语义使用该标志；
+- 当前是单编译单元；`pub` 是顶层声明修饰语，不改变单元内可调用性；
 - `pub` 只允许顶层；
 - `public` 已物理退役，不是关键字、别名或兼容语法。
 
@@ -450,7 +461,7 @@ println fact 0
 
 关键规则：
 
-- 零参数调用必须写括号：`five()`；
+- 静态签名为零参数函数的直接标识符或 `this` 可省略调用括号，例如 `val i32 n = five`；`five()` 仍合法；
 - 函数值作为值传递时使用显式括号，例如 `f(g)`；
 - `dup 5 + 1` 不解释为 `(dup 5) + 1`，需要显式写 `(dup 5) + 1`；
 - `println f 0` / `print f 0` 允许其唯一输出实参本身为普通单参数无括号调用。
@@ -488,7 +499,7 @@ println fact 0
 
 ## 15. main、顶层初始化与进程退出
 
-- 必须存在顶层 `func main`；
+- 必须存在且只能存在一个顶层 `func main`；
 - `main` 必须零参数；
 - `main` 唯一合法返回类型为 `i32`；
 - 顶层绑定按源码顺序初始化，并在 `main` 之前执行；
@@ -504,13 +515,9 @@ println fact 0
 
 ---
 
-## 16. import / module 当前边界
+## 16. module 当前边界
 
-`import` 目前只被 lexer/parser 接受，不执行真正模块解析、文件加载或标准库导入。
-
-当前编译产物会针对已解析 import 输出“标准库尚未接入”的注意信息。`pub` 已记录在绑定/方法元数据中，但真正跨模块可见性尚未落地。
-
-不得把尚未实现的模块语义提前塞入 parser、sema 或兼容层。
+当前语言没有 `import` 语法、模块加载或标准库导入。源码中的 `import` 按普通未定义语法拒绝；parser AST、sema 和 codegen 均不保留 no-op import 状态。模块能力真正立案前，不得预埋公开语法、静默丢弃插值或在编译时打印阶段提示后继续执行。
 
 ---
 
@@ -536,7 +543,7 @@ line / col / len
 
 文档和测试不得把该现状简写为“列从 0 开始”或“列从 1 开始”；若未来要正规化坐标系，属于独立可观察行为变更，必须同步实现、黄金记录、规范和迁移记录。
 
-`Span::default()` 的 `0:0:0` 只作为无具体源码位置的哨兵。普通错误显示：
+`Span::default()` 的 `0:0:0` 只作为无具体源码位置的哨兵。parser 的 EOF 诊断使用由最后一个 token 推导出的真实 EOF span，不得退回默认 span。普通错误显示：
 
 ```text
 错误 @ {line}:{col} — {message}
@@ -558,6 +565,8 @@ line / col / len
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或所有权系统。
 
 当前字符串空值、数组空缓冲等可空边由 `RUNTIME_CONTRACTS` 显式规定；调用点不得自行扩大 nullable 范围。
+
+所有运行时中止，包括 iterator fail-fast，统一进入 `RUNTIME_CONTRACTS` 与 native runtime owner；普通 HIR emitter 不直接导入 Windows IO/进程 API。错误消息字节与长度来自同一静态数据表。runtime abort 调用后还会发射 trap，确保错误函数意外返回时仍 fail closed。
 
 ---
 

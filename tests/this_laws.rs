@@ -1,7 +1,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    run("this-law.as", src).expect_err("该程序应在编译期失败")
+    run(src).expect_err("该程序应在编译期失败")
 }
 
 #[test]
@@ -13,7 +13,7 @@ func i32 factorial_with_any_name = (i32 n) -> {
 }
 func i32 main = () -> return factorial_with_any_name(5)
 "#;
-    assert_eq!(run("this-recursion.as", src).unwrap(), 120);
+    assert_eq!(run(src).unwrap(), 120);
 }
 
 #[test]
@@ -28,7 +28,7 @@ func i32 outer = (i32 n) -> {
 }
 func i32 main = () -> return outer(7)
 "#;
-    assert_eq!(run("nested-this.as", src).unwrap(), 7);
+    assert_eq!(run(src).unwrap(), 7);
 }
 
 #[test]

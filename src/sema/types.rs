@@ -202,7 +202,7 @@ pub(crate) fn check_type_slot(
                 "array" | "iterator" => 1,
                 _ => {
                     return Err(AliasError {
-                        msg: format!("泛型类型 {} 尚未实现 (Phase 5+)", te.display()),
+                        msg: format!("泛型类型 {} 尚未实现", te.display()),
                         span,
                     })
                 }

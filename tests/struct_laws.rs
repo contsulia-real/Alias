@@ -1,4 +1,4 @@
-//! Phase 2a struct 法律测试 — 正负矩阵, 负向断言精确中文消息 + 行:列。
+//! struct 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
 //! 语义锚点 (用户批准设计, spec-notes 附录三):
 //! - 引用语义: 实例 = 泄漏堆块, 变量持指针 — 别名/传参/闭包捕获共享实例
@@ -13,7 +13,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e,
         Ok(_) => panic!("应当报错"),
     }
@@ -206,28 +206,28 @@ fn forward_struct_reference_rejected() {
 #[test]
 fn reference_aliasing_two_names_one_instance() {
     let src = "struct box {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val box a = box()\n    val box b = a\n    b.v = 42\n    return a.v\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 42);
+    assert_eq!(run(src).unwrap(), 42);
 }
 
 /// 全默认构造 + 嵌套读取。
 #[test]
 fn all_default_construction_and_read() {
     let src = "struct point {\n    val i32 x = 3\n    val i32 y = 4\n}\nfunc i32 main = () -> {\n    val point p = point()\n    return p.x * p.y\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 12);
+    assert_eq!(run(src).unwrap(), 12);
 }
 
 /// 乱序命名构造 + 显式覆盖默认 + var 字段变异 (val 绑定上)。
 #[test]
 fn out_of_order_ctor_and_var_field_mutation() {
     let src = "struct inner {\n    val i32 k = 7\n}\nstruct outer {\n    val inner i = inner(k = 9)\n    var i32 m\n}\nfunc i32 main = () -> {\n    val outer o = outer(m = 1)\n    o.m = o.i.k + 30\n    return o.m\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 39);
+    assert_eq!(run(src).unwrap(), 39);
 }
 
 /// 传参即共享: 函数内字段改动调用方可见 (值语义下返回 0)。
 #[test]
 fn param_passing_shares_instance() {
     let src = "struct bag {\n    var i32 n = 0\n}\nfunc i32 touch = (bag b) -> {\n    b.n = b.n + 5\n    return b.n\n}\nfunc i32 main = () -> {\n    val bag x = bag()\n    val i32 r = touch(x)\n    return x.n\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 5);
+    assert_eq!(run(src).unwrap(), 5);
 }
 
 /// 闭包引用捕获结构体: 每次调用读到累积最新值 (second - first = 30;
@@ -235,12 +235,12 @@ fn param_passing_shares_instance() {
 #[test]
 fn closure_capture_reads_latest_field_value() {
     let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val cell c = cell()\n    func i32 bump = () -> {\n        c.v = c.v + 30\n        return c.v\n    }\n    val i32 first = bump()\n    val i32 second = bump()\n    val cell alias = c\n    alias.v = 100\n    return second - first + c.v - 100\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 30);
+    assert_eq!(run(src).unwrap(), 30);
 }
 
 /// func 绑定类型槽 = 结构体名; 返回结构体的函数。
 #[test]
 fn struct_returning_function() {
     let src = "struct pair {\n    val i32 a = 0\n    val i32 b = 0\n}\nfunc pair mk = (i32 v) -> return pair(a = v, b = v * 2)\nfunc i32 main = () -> {\n    val pair p = mk(21)\n    return p.a + p.b\n}\n";
-    assert_eq!(run("t.as", src).unwrap(), 63);
+    assert_eq!(run(src).unwrap(), 63);
 }

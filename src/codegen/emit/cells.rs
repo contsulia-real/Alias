@@ -6,7 +6,11 @@ pub(crate) enum CellAddr {
     GlobalOff(usize),
 }
 
-pub(crate) fn cell_addr<M: Module>(c: &Compiler<M>, frame: &Frame, id: BindingId) -> Option<CellAddr> {
+pub(crate) fn cell_addr<M: Module>(
+    c: &Compiler<M>,
+    frame: &Frame,
+    id: BindingId,
+) -> Option<CellAddr> {
     for scope in frame.scopes.iter().rev() {
         if let Some(s) = scope.get(&id) {
             return Some(match s {
@@ -40,12 +44,9 @@ pub(crate) fn read_cell(
         }
         CellAddr::EnvLoad(i) => {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            let cell = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                base,
-                ((*i as i64) * 8) as i32,
-            );
+            let cell = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i));
             bcx.ins().load(t, MemFlagsData::new(), cell, 0)
         }
         CellAddr::GlobalOff(off) => {
@@ -71,12 +72,9 @@ pub(crate) fn write_cell(
         }
         CellAddr::EnvLoad(i) => {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            let cell = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                base,
-                ((*i as i64) * 8) as i32,
-            );
+            let cell = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i));
             bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
         }
         CellAddr::GlobalOff(off) => {

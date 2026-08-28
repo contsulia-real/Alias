@@ -1,7 +1,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    run("law.as", src).expect_err("该程序应在编译期失败")
+    run(src).expect_err("该程序应在编译期失败")
 }
 
 #[test]
@@ -13,7 +13,7 @@ func i32 main = () -> {
     return a.plus(b).minus(3).times(4).div(6)
 }
 "#;
-    assert_eq!(run("operator-methods.as", src).unwrap(), 6);
+    assert_eq!(run(src).unwrap(), 6);
 }
 
 #[test]
@@ -25,7 +25,7 @@ func i32 main = () -> {
     return a plus b
 }
 "#;
-    assert_eq!(run("operator-noparen.as", src).unwrap(), 12);
+    assert_eq!(run(src).unwrap(), 12);
 }
 
 #[test]
@@ -37,7 +37,7 @@ func i32 main = () -> {
     return (a == !true) && (b == !false) ? 0 : 1
 }
 "#;
-    assert_eq!(run("not-method.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
@@ -50,7 +50,7 @@ func i32 main = () -> {
     return (i32) c
 }
 "#;
-    assert_eq!(run("operator-width.as", src).unwrap(), 10);
+    assert_eq!(run(src).unwrap(), 10);
 }
 
 #[test]
@@ -114,7 +114,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("incdec-numeric.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
@@ -163,7 +163,7 @@ func i32 main = () -> {
     return a.plus(b)
 }
 "#;
-    assert_eq!(run("custom-plus.as", src).unwrap(), 7);
+    assert_eq!(run(src).unwrap(), 7);
 }
 
 #[test]
@@ -213,7 +213,7 @@ func i32 main = () -> {
     return hits
 }
 "#;
-    assert_eq!(run("short-circuit.as", src).unwrap(), 1);
+    assert_eq!(run(src).unwrap(), 1);
 }
 
 #[test]
@@ -229,7 +229,7 @@ func i32 main = () -> {
     return sum
 }
 "#;
-    assert_eq!(run("for-array.as", array_src).unwrap(), 4);
+    assert_eq!(run(array_src).unwrap(), 4);
 
     let iterator_src = r#"
 func i32 main = () -> {
@@ -242,7 +242,7 @@ func i32 main = () -> {
     return sum
 }
 "#;
-    assert_eq!(run("for-iterator.as", iterator_src).unwrap(), 6);
+    assert_eq!(run(iterator_src).unwrap(), 6);
 }
 
 #[test]
@@ -257,7 +257,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("iterator-invalidation.as", src).unwrap(), 1);
+    assert_eq!(run(src).unwrap(), 1);
 }
 
 #[test]
@@ -270,5 +270,5 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert!(run("old-for.as", src).is_err());
+    assert!(run(src).is_err());
 }

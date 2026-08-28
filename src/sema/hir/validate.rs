@@ -51,7 +51,11 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     });
                 }
                 match expr {
-                    Expr::Ident(..) | Expr::This(..) | Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) => {}
+                    Expr::Ident(..)
+                    | Expr::This(..)
+                    | Expr::Int(..)
+                    | Expr::Float(..)
+                    | Expr::Bool(..) => {}
                     Expr::Str(parts, ..) => {
                         for part in parts.iter().rev() {
                             if let StrPart::Hole(hole) = part {
@@ -83,20 +87,15 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Call {
                         callee,
                         args,
-                        info,
+                        target,
                         ..
                     } => {
-                        let Some(target) = info.call_target.as_ref() else {
-                            return Err(AliasError {
-                                msg: "内部 sema 不变式被破坏: HIR Call 缺少 target".into(),
-                                span: expr.span(),
-                            });
-                        };
                         match target {
                             CallTarget::FunctionValue => {
                                 if matches!(callee.as_ref(), Expr::Ident(_, None, ..)) {
                                     return Err(AliasError {
-                                        msg: "内部 sema 不变式被破坏: 函数值 callee 缺少 BindingId".into(),
+                                        msg: "内部 sema 不变式被破坏: 函数值 callee 缺少 BindingId"
+                                            .into(),
                                         span: callee.span(),
                                     });
                                 }
@@ -111,22 +110,23 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                                 }
                             }
                         }
+                        if let CallTarget::StructConstructor {
+                            arg_field_indices, ..
+                        } = target
+                        {
+                            if arg_field_indices.len() != args.len() {
+                                return Err(AliasError {
+                                    msg: "内部 sema 不变式被破坏: 构造器实参与字段索引数量不一致"
+                                        .into(),
+                                    span: expr.span(),
+                                });
+                            }
+                        }
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
                         }
                     }
-                    Expr::MethodCall {
-                        recv, args, info, ..
-                    } => {
-                        if matches!(
-                            info.call_target,
-                            Some(CallTarget::Method(MethodTarget::User { id: None, .. }))
-                        ) {
-                            return Err(AliasError {
-                                msg: "内部 sema 不变式被破坏: HIR 用户方法缺少 MethodId".into(),
-                                span: expr.span(),
-                            });
-                        }
+                    Expr::MethodCall { recv, args, .. } => {
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
                         }
@@ -167,7 +167,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     stack.push(HirValidationNode::Expr(value));
                     stack.push(HirValidationNode::Expr(recv));
                 }
-                Stmt::ExprStmt { expr, .. } => stack.push(HirValidationNode::Expr(expr)),
+                Stmt::Expr { expr, .. } => stack.push(HirValidationNode::Expr(expr)),
                 Stmt::Return { value, .. } => {
                     if let Some(value) = value {
                         stack.push(HirValidationNode::Expr(value));
@@ -202,7 +202,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     }
                     stack.push(HirValidationNode::Expr(iterable));
                 }
-                Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                Stmt::Break | Stmt::Continue => {}
             },
         }
     }

@@ -181,7 +181,9 @@ impl Checker {
         if let Some(want) = expected {
             Ok(want.clone())
         } else {
-            Ok(common.unwrap_or(Ty::Unknown))
+            // 没有任何产值臂意味着所有臂都显式终止控制流；最终 HIR 用 unit
+            // 表示“该语句不产值”，不能把 lowering 临时 Unknown 泄漏到后端。
+            Ok(common.unwrap_or(Ty::Unit))
         }
     }
 
@@ -224,7 +226,7 @@ impl Checker {
                     return Ok(None);
                 }
                 match stmts.last() {
-                    Some(Stmt::ExprStmt { expr, .. }) => Ok(Some(match expected {
+                    Some(Stmt::Expr { expr, .. }) => Ok(Some(match expected {
                         Some(w) => self.expr_expected(expr, &local, w)?,
                         None => self.expr(expr, &local)?,
                     })),

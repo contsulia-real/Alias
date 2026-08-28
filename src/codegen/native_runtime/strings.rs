@@ -48,7 +48,7 @@ fn emit_case_shim<M: Module>(
     {
         let alloc_f = c.import_runtime("rt.heap.alloc")?;
         let out = {
-            let r = c.module.declare_func_in_func(alloc_f, &mut bcx.func);
+            let r = c.module.declare_func_in_func(alloc_f, bcx.func);
             let inst = bcx.ins().call(r, &[la]);
             first_result(&bcx, inst)
         };
@@ -84,7 +84,7 @@ fn emit_case_shim<M: Module>(
         bcx.seal_block(done_b);
         bcx.switch_to_block(done_b);
         let blk = {
-            let r = c.module.declare_func_in_func(alloc_f, &mut bcx.func);
+            let r = c.module.declare_func_in_func(alloc_f, bcx.func);
             let sz = bcx.ins().iconst(types::I64, 16);
             let inst = bcx.ins().call(r, &[sz]);
             first_result(&bcx, inst)
@@ -98,7 +98,7 @@ fn emit_case_shim<M: Module>(
         let zero = bcx.ins().iconst(types::I64, 0);
         let blk = {
             let f = c.import_runtime("rt.heap.alloc")?;
-            let r = c.module.declare_func_in_func(f, &mut bcx.func);
+            let r = c.module.declare_func_in_func(f, bcx.func);
             let sz = bcx.ins().iconst(types::I64, 16);
             let inst = bcx.ins().call(r, &[sz]);
             first_result(&bcx, inst)
@@ -111,9 +111,7 @@ fn emit_case_shim<M: Module>(
     bcx.seal_block(end_b);
     bcx.ins().return_(&[jv]);
     bcx.finalize(c.module.target_config());
-    c.module
-        .define_function(fid, &mut ctx)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+    c.define_verified_function(fid, &mut ctx, "字符串大小写 runtime")
 }
 
 pub(super) fn emit_string_runtime<M: Module>(
@@ -140,9 +138,7 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.switch_to_block(then_b);
         {
             let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![len64]);
-            let mv = c
-                .module
-                .declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let mv = c.module.declare_func_in_func(rtl_move_memory, bcx.func);
             bcx.ins().call(mv, &[buf, a[0], len64]);
             bcx.ins().store(MemFlagsData::new(), buf, blk, 0);
             bcx.ins().jump(end_b, &[]);
@@ -189,9 +185,7 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.ins().brif(has_a, copy_a_b, &[], after_a_b, &[]);
         bcx.seal_block(copy_a_b);
         bcx.switch_to_block(copy_a_b);
-        let mv = c
-            .module
-            .declare_func_in_func(rtl_move_memory, &mut bcx.func);
+        let mv = c.module.declare_func_in_func(rtl_move_memory, bcx.func);
         bcx.ins().call(mv, &[out_word, pa, la]);
         bcx.ins().jump(after_a_b, &[]);
         bcx.switch_to_block(after_a_b);
@@ -220,7 +214,7 @@ pub(super) fn emit_string_runtime<M: Module>(
         let la = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
         let pb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 0);
         let lb = bcx.ins().load(types::I64, MemFlagsData::new(), a[1], 8);
-        let min_len = bcx.ins().smin(la.clone(), lb.clone());
+        let min_len = bcx.ins().smin(la, lb);
         let i = bcx.declare_var(types::I64);
         let i0 = bcx.ins().iconst(types::I64, 0);
         bcx.def_var(i, i0);
@@ -232,7 +226,7 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.switch_to_block(loop_b);
         {
             let iv = bcx.use_var(i);
-            let in_range = bcx.ins().icmp(IntCC::UnsignedLessThan, iv, min_len.clone());
+            let in_range = bcx.ins().icmp(IntCC::UnsignedLessThan, iv, min_len);
             let cmp_body = bcx.create_block();
             let by_len = bcx.create_block();
             bcx.ins().brif(in_range, cmp_body, &[], by_len, &[]);
@@ -245,7 +239,7 @@ pub(super) fn emit_string_runtime<M: Module>(
                 let b_addr = bcx.ins().iadd(pb, iv2);
                 let b_a = bcx.ins().load(types::I8, mflags, a_addr, 0);
                 let b_b = bcx.ins().load(types::I8, mflags, b_addr, 0);
-                let same = bcx.ins().icmp(IntCC::Equal, b_a.clone(), b_b.clone());
+                let same = bcx.ins().icmp(IntCC::Equal, b_a, b_b);
                 let ne_body = bcx.create_block();
                 let one = bcx.ins().iconst(types::I64, 1);
                 let inc = bcx.ins().iadd(iv2, one);
@@ -359,9 +353,7 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.switch_to_block(then_b);
         {
             let out = call_rt_m!(bcx, "rt.heap.alloc", vec![n]);
-            let mv = c
-                .module
-                .declare_func_in_func(rtl_move_memory, &mut bcx.func);
+            let mv = c.module.declare_func_in_func(rtl_move_memory, bcx.func);
             let stv3 = bcx.use_var(st);
             let src = bcx.ins().iadd(pa, stv3);
             bcx.ins().call(mv, &[out, src, n]);

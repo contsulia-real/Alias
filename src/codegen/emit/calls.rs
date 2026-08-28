@@ -1,3 +1,8 @@
+use super::arrays::{array_raw, bump_array_version, make_iterator};
+use super::cells::{cell_addr, first_result, read_cell, write_cell};
+use super::expr::{emit_expr, emit_expr_expected};
+use super::ops::{emit_binary_values, new_span_id};
+use super::strings::{display_word, str_literal_handle};
 use super::*;
 
 pub(crate) fn emit_call<M: Module>(
@@ -30,7 +35,10 @@ pub(crate) fn emit_call<M: Module>(
         CallTarget::Builtin(BuiltinCall::From | BuiltinCall::TryFrom) => {
             invariant_violation("上下文转换必须由带目标类型的发射入口处理")
         }
-        CallTarget::StructConstructor(name) => emit_construct(c, bcx, frame, name, args),
+        CallTarget::StructConstructor {
+            name,
+            arg_field_indices,
+        } => emit_construct(c, bcx, frame, name, args, arg_field_indices),
         CallTarget::ResultConstructor(kind) => emit_result_ctor(c, bcx, frame, *kind, args),
         CallTarget::FunctionValue => {
             let callee_vty = c.vty(callee.ty());
@@ -40,7 +48,6 @@ pub(crate) fn emit_call<M: Module>(
             let clo = emit_expr(c, bcx, frame, callee)?;
             call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
         }
-        CallTarget::Method(_) => invariant_violation("普通调用不能携带方法目标"),
     }
 }
 
@@ -59,7 +66,9 @@ fn call_closure<M: Module>(
         words.push(norm_store(bcx, v, pt));
     }
     let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
-    let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
+    let env = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), clo, value_word_offset(1));
     words.insert(0, env);
     words.insert(0, bcx.use_var(frame.globals));
     let sig = user_signature(c.cc, param_vtys, ret_vty);
@@ -78,15 +87,20 @@ pub(crate) fn emit_construct<M: Module>(
     frame: &mut Frame,
     name: &str,
     args: &[CallArg],
+    arg_field_indices: &[usize],
 ) -> AliasResult<Value> {
     let layout = c.struct_layouts[name].clone();
     let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
     let ptr = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
-    for field in &layout.fields {
+    if args.len() != arg_field_indices.len() {
+        invariant_violation("构造器实参与字段索引必须一一对应")
+    }
+    for (field_index, field) in layout.fields.iter().enumerate() {
         let expr = args
             .iter()
-            .find(|a| a.label.as_deref() == Some(field.name.as_str()))
-            .map(|a| &a.value)
+            .zip(arg_field_indices)
+            .find(|(_, index)| **index == field_index)
+            .map(|(arg, _)| &arg.value)
             .or(field.default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
         let v = emit_expr_expected(c, bcx, frame, expr, &field.vty)?;
@@ -131,7 +145,8 @@ pub(crate) fn emit_result_ctor_typed<M: Module>(
     };
     let tagw = bcx.ins().iconst(types::I64, tag);
     bcx.ins().store(MemFlagsData::new(), tagw, blk, 0);
-    bcx.ins().store(MemFlagsData::new(), pw, blk, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), pw, blk, value_word_offset(1));
     Ok(blk)
 }
 
@@ -153,7 +168,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
             };
             let r = emit_expr_expected(c, bcx, frame, &arg.value, &svt)?;
-            emit_binary_values(c, bcx, frame, *op, &svt, rv, r, span)
+            emit_binary_values(c, bcx, frame, (*op, &svt, rv, r, span))
         }
         MethodTarget::BoolNot => {
             if !args.is_empty() {
@@ -187,7 +202,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let value = emit_expr_expected(c, bcx, frame, &arg.value, elem)?;
             let word = storage_word(bcx, value, elem);
             let raw = array_raw(bcx, rv);
-            c.call_rt(bcx, "alias.arr.push", &[raw, word])?;
+            c.call_rt_void(bcx, "alias.arr.push", &[raw, word])?;
             bump_array_version(bcx, rv);
             Ok(bcx.ins().iconst(types::I64, 0))
         }
@@ -196,7 +211,9 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("array.pop 目标必须保留数组类型")
             };
             let raw = array_raw(bcx, rv);
-            let len = bcx.ins().load(types::I64, MemFlagsData::new(), raw, 8);
+            let len = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), raw, value_word_offset(1));
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let span_id = new_span_id(c, span);
             let abort_b = bcx.create_block();
@@ -206,8 +223,8 @@ pub(crate) fn emit_method_call<M: Module>(
             bcx.seal_block(ok_b);
             bcx.switch_to_block(abort_b);
             let aid = bcx.ins().iconst(types::I32, span_id as i64);
-            c.call_rt(bcx, "alias.abort_pop", &[aid])?;
-            jump_zero_return(bcx, frame);
+            c.call_rt_void(bcx, "alias.abort_pop", &[aid])?;
+            bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
             bcx.switch_to_block(ok_b);
             let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
             bump_array_version(bcx, rv);
@@ -221,8 +238,7 @@ pub(crate) fn emit_method_call<M: Module>(
         }
         MethodTarget::User {
             receiver,
-            id: Some(method_id),
-            ..
+            id: method_id,
         } => {
             let receiver_vty = c.vty(receiver);
             if receiver_vty != svt {
@@ -237,7 +253,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 .methods
                 .get(method_id)
                 .unwrap_or_else(|| invariant_violation("MethodId 必须存在函数 ID"));
-            let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
+            let fref = c.module.declare_func_in_func(fid, bcx.func);
             let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
             words.push(bcx.use_var(frame.globals));
             words.push(bcx.ins().iconst(types::I64, 0));
@@ -252,9 +268,6 @@ pub(crate) fn emit_method_call<M: Module>(
             }
             let raw = first_result(bcx, inst);
             Ok(norm_load(bcx, raw, &ret_vty))
-        }
-        MethodTarget::User { id: None, .. } => {
-            invariant_violation("用户方法调用必须在 HIR 中携带 MethodId")
         }
     }
 }
@@ -325,7 +338,7 @@ pub(crate) fn emit_incdec<M: Module>(
     } else {
         BinOp::Sub
     };
-    let next = emit_binary_values(c, bcx, frame, op, &vty, cur, one, span)?;
+    let next = emit_binary_values(c, bcx, frame, (op, &vty, cur, one, span))?;
     write_cell(bcx, frame, &addr, next, &vty);
     Ok(bcx.ins().iconst(types::I64, 0))
 }
@@ -350,7 +363,7 @@ pub(crate) fn emit_print<M: Module>(
             } else {
                 "alias.print.i32"
             };
-            c.call_rt(bcx, h, &[t])?;
+            c.call_rt_void(bcx, h, &[t])?;
         }
         _ => {
             let s = display_word(c, bcx, &arg.value, v)?;
@@ -359,7 +372,7 @@ pub(crate) fn emit_print<M: Module>(
             } else {
                 "alias.print.str"
             };
-            c.call_rt(bcx, h, &[s])?;
+            c.call_rt_void(bcx, h, &[s])?;
         }
     }
     Ok(bcx.ins().iconst(types::I64, 0))

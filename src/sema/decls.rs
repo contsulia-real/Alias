@@ -97,7 +97,7 @@ impl Checker {
         {
             let table = self.methods.entry(recv.clone()).or_default();
             if let Some(existing) = table.get(&mname) {
-                if existing.builtin {
+                if matches!(existing, MethodInfo::Builtin { .. }) {
                     return Err(AliasError {
                         msg: format!("内建方法不可覆盖: {recv}.{mname}"),
                         span: b.span,
@@ -112,12 +112,10 @@ impl Checker {
         let method_id = self.fresh_method_id();
         self.methods.entry(recv.clone()).or_default().insert(
             mname.clone(),
-            MethodInfo {
-                id: Some(method_id),
+            MethodInfo::User {
+                id: method_id,
                 params: ptys,
                 ret: declared.clone(),
-                is_pub: b.is_pub,
-                builtin: false,
             },
         );
         self.method_ids

@@ -2,7 +2,7 @@
 
 **同步日期：** 2026-08-28  
 **基线分支：** `main`  
-**实现基线提交：** `a54ad7b0800cafb861e189630898006a30357df1`（typed HIR 单次类型投影）
+**实现基线：** 当前 `main` HEAD（M75 resolved HIR / fail-closed 后端收口）
 
 > 本文件只描述 Alias **当前状态**。历史阶段、已删除实现和旧裁决仅记录在 `MIGRATION.md`，不得从历史条目反推当前行为。
 
@@ -27,7 +27,7 @@ source.as
 
 不存在解释器、JIT、宿主函数执行后端或进程内调用生成机器码的路径。`run` 也必须先完成完整编译和链接，再启动临时 exe；`build` 输出持久 exe。
 
-当前链接路径是 **x86_64 Windows MSVC**：`src/linker.rs` 固定定位 `x86_64-pc-windows-msvc/bin/rust-lld.exe`，链接 `kernel32.lib`，无 CRT。当前还不是跨平台编译器。
+当前目标路径是 **x86_64 Windows MSVC**：Cranelift 显式 lookup `x86_64-pc-windows-msvc`，`src/linker.rs` 固定定位对应目标的 `rust-lld.exe` 并链接 `kernel32.lib`，无 CRT。不得用宿主 ISA 探测替代目标选择；当前还不是跨平台编译器。
 
 ## 2. 当前源码结构
 
@@ -46,16 +46,16 @@ src/
 │   ├── mod.rs              # check(Program) -> CheckedProgram
 │   ├── decls.rs
 │   ├── stmts.rs
-│   ├── exprs.rs
+│   ├── exprs.rs + exprs/  # 表达式检查、调用与目标类型
 │   ├── types.rs            # Ty 与类型槽检查
-│   └── hir.rs              # typed HIR + resolved call targets
+│   └── hir.rs + hir/       # typed HIR、lower/validate/capture/visit
 ├── codegen/
 │   ├── mod.rs              # compile_to_object(CheckedProgram)
 │   ├── abi.rs              # Ty→VTy 投影、ValueAbi、结构体布局
-│   ├── emit.rs             # HIR 表达式/语句发射
+│   ├── emit.rs + emit/     # 显式依赖的发射子模块；禁止 wildcard barrel
 │   ├── funcgen.rs          # 用户函数/闭包函数生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 唯一机器契约表
-│   └── native_runtime.rs   # 原生产物内 runtime 实现
+│   └── native_runtime.rs + native_runtime/ # 原生产物内 runtime 实现
 └── linker.rs               # COFF → exe 的唯一链接拥有者
 ```
 
@@ -74,6 +74,8 @@ src/
 - 每个 HIR 表达式携带最终静态 `Ty`；
 - 普通调用携带已解析 `CallTarget`；
 - 方法调用携带已解析 `MethodTarget`；
+- `main` 入口携带 sema 已解析 `BindingId`；
+- 构造器实参与字段索引的对应关系由 sema 固化；
 - 匿名函数字面量的返回类型在 sema 完成合并；
 - 目标类型传播、名字解析、调用归属、Pattern coverage 等都必须在这里完成。
 
@@ -90,6 +92,7 @@ src/
 - `codegen/abi.rs`：寄存器表示、存储宽度、对齐、参数/返回 ABI、结构体字段布局和 result/array 载荷字编码的唯一真相源；
 - `codegen/runtime.rs::RUNTIME_CONTRACTS`：所有 `alias.*` / `rt.*` runtime 符号签名及可空性的唯一机器契约；
 - `native_runtime.rs` 的实际定义集合必须与契约表精确一致。
+- 每个 Cranelift 函数在定义前无条件执行 `Context::verify`；禁止改用可能受 flag 跳过的 `verify_if`。verifier 失败、有返回值函数落空、有返回值 return 缺值、带返回值 runtime shim 未终止均属于不变式失败；禁止补零或继续定义函数。
 
 ## 4. 当前类型系统
 
@@ -121,6 +124,7 @@ src/
 - `val`：不可重新绑定；
 - `var`：可重新绑定；
 - 参数是隐式不可变绑定；
+- 不同 lexical scope 允许 shadow；同一 lexical scope、同一参数列表和顶层名字空间禁止重复声明；`main` 必须且只能有一个；
 - 所有类型槽显式，不存在一般的声明类型推断；
 - `func T name = (...) -> ...` 中 `T` 是函数返回类型；当前 `func` RHS 必须直接是函数字面量；
 - 顶层命名函数在检查自身函数体前登记自己的完整签名，因此可以按名字递归；这不开放后续声明的前向引用；
@@ -261,7 +265,7 @@ pub func Ret Receiver.method = (...) -> ...
 
 当前 `Span` 只包含 `line / col / len`，尚不包含源文件路径。行号从 1 开始。列坐标必须按 **当前 lexer 的实际算法**理解：内部 `col` 游标从 1 开始，但 token 起点在消费前通过 `span_here(1)` 计算，即 `col.saturating_sub(1).max(1)`；因此非首列 token 通常表现为视觉列减 1，而最小列仍为 1。这不是标准的纯 0-based 或纯 1-based 坐标系，文档和测试不得把它简化成其中任一种。当前黄金锚点包括：`return 1 / 0` 中的 `1` 为 `2:11`，四格缩进后的赋值目标 `a` 为 `3:4`。
 
-`Span::default()` 的全零值只作为无具体源码位置的哨兵，例如缺少顶层 `main`，此时 `AliasError::Display` 省略 `错误 @ line:col —` 前缀。
+`Span::default()` 的全零值只作为无具体源码位置的哨兵，例如缺少顶层 `main`，此时 `AliasError::Display` 省略 `错误 @ line:col —` 前缀。parser EOF 必须使用真实 EOF span，不得用默认值。
 
 运行时错误由已编译产物根据内嵌 span 数据输出；编译器进程不执行语言 runtime。
 
@@ -276,7 +280,7 @@ alias build <source.as>    # 输出同目录同名 .exe
 - `build` 输入必须为 `.as`；
 - `main` 必须存在、零参数、返回 `i32`；
 - CLI 最终退出码把 main/子进程退出码 clamp 到 0–255；
-- import 当前只解析，不执行模块加载；标准库尚未接入；
+- 当前没有 import/module 语法；未实现前不得保留 no-op import；
 - 当前链接器、SDK 探测和产物格式只支持 Windows x64。
 
 ## 15. 输入健壮性边界

@@ -3,7 +3,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    match run("unit-law.as", src) {
+    match run(src) {
         Err(error) => error,
         Ok(_) => panic!("应当报错"),
     }
@@ -24,7 +24,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("unit-law.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]

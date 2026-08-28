@@ -280,11 +280,7 @@ fn run_matches_build_artifact_for_deep_transitive_closure_chain() {
 
 #[test]
 fn run_and_build_demo_corpus_match() {
-    // 机械枚举 demos/ 下可运行语料，两条 CLI 工作流三元组逐字节一致。
-    // forward-spec demos (recursion/file_wc/producer_consumer/helper)
-    // 在 sema 处以相同错误拒绝, 天然满足 parity — 但 build 的错误
-    // 报告发生在编译器进程而非产物, 故此处仅校验 count_to_ten 与
-    // hello_native 两个 Phase-1 可运行程序 + 内联片段用例。
+    // demos/ 只保留当前语言可运行语料；机械枚举并逐字节比较两条 CLI 工作流。
     let entries = std::fs::read_dir("demos").expect("枚举 demos 失败");
     let mut runnable = 0;
     for e in entries.filter_map(|e| e.ok()) {

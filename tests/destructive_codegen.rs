@@ -48,7 +48,7 @@ fn deterministic_random_ast_corpus_matches_checked_i32_model() {
         ));
     }
     src.push_str("    return 0\n}\n");
-    assert_eq!(run("random-ast.as", &src).unwrap(), 0);
+    assert_eq!(run(&src).unwrap(), 0);
 }
 
 #[test]
@@ -94,7 +94,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("boundaries.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 fn nested_closure_source(depth: usize) -> String {
@@ -129,8 +129,8 @@ fn deep_transitive_closure_capture_chain_is_stable() {
     let depth = 32;
     let expected = 7 + (1..=depth as i32).sum::<i32>();
     let src = nested_closure_source(depth);
-    let actual = run("deep-closures.as", &src)
-        .unwrap_or_else(|error| panic!("深层闭包失败: {error}\n--- source ---\n{src}"));
+    let actual =
+        run(&src).unwrap_or_else(|error| panic!("深层闭包失败: {error}\n--- source ---\n{src}"));
     assert_eq!(actual, expected);
 }
 
@@ -141,7 +141,7 @@ fn concurrent_native_runs_keep_values_isolated() {
             std::thread::spawn(move || {
                 let expected = id * 17 + 3;
                 let src = format!("func i32 main = () -> {{ val i32 x = {expected} return x }}\n");
-                run("concurrent-success.as", &src).unwrap()
+                run(&src).unwrap()
             })
         })
         .collect::<Vec<_>>();

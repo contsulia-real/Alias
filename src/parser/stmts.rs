@@ -113,7 +113,7 @@ impl Parser {
                 let outer_name = self.expect_ident()?;
                 let inner = self.parse_expr()?;
                 let inner_span = inner.span();
-                Ok(Stmt::ExprStmt {
+                Ok(Stmt::Expr {
                     expr: Expr::Call {
                         callee: Box::new(Expr::Ident(outer_name, span)),
                         args: vec![CallArg {
@@ -123,7 +123,6 @@ impl Parser {
                         }],
                         span,
                     },
-                    span,
                 })
             }
             Some(_) => {
@@ -143,7 +142,7 @@ impl Parser {
                     if !at_boundary {
                         let arg = self.parse_unary()?;
                         let arg_span = arg.span();
-                        return Ok(Stmt::ExprStmt {
+                        return Ok(Stmt::Expr {
                             expr: Expr::Call {
                                 callee: Box::new(Expr::Ident(name, id_span)),
                                 args: vec![CallArg {
@@ -153,18 +152,16 @@ impl Parser {
                                 }],
                                 span,
                             },
-                            span,
                         });
                     }
                 }
-                Ok(Stmt::ExprStmt { expr, span })
+                Ok(Stmt::Expr { expr })
             }
             None => Err(self.err_here("意外的文件结尾")),
         }
     }
 
     fn parse_if_stmt(&mut self) -> AliasResult<Stmt> {
-        let span = self.span();
         self.expect(&Tok::If)?;
         let first_cond = self.parse_expr()?;
         let first_body = self.parse_block()?;
@@ -189,7 +186,6 @@ impl Parser {
         Ok(Stmt::If {
             branches,
             else_body,
-            span,
         })
     }
 
@@ -225,7 +221,7 @@ impl Parser {
     // 扩展函数: (pub)? func <返回类型> <完整接收者类型>.<名字> = <函数字面量>
     pub(super) fn parse_binding(&mut self) -> AliasResult<Binding> {
         let span = self.span();
-        let is_pub = self.eat(&Tok::Pub);
+        self.eat(&Tok::Pub);
         let kind = match self.peek() {
             Some(Tok::Val) => {
                 self.bump();
@@ -294,7 +290,6 @@ impl Parser {
         }
 
         Ok(Binding {
-            is_pub,
             kind,
             ty,
             name,

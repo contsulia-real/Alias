@@ -10,10 +10,7 @@ use crate::{AliasError, AliasResult, Span};
 
 pub fn parse(tokens: Vec<Token>) -> AliasResult<Program> {
     validate_nesting(&tokens)?;
-    let mut p = Parser {
-        toks: tokens,
-        pos: 0,
-    };
+    let mut p = Parser::new(tokens);
     p.parse_program()
 }
 
@@ -41,9 +38,31 @@ fn validate_nesting(tokens: &[Token]) -> AliasResult<()> {
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// EOF 仍是具体源码位置。全零 Span 只留给没有源码位置的诊断。
+    eof_span: Span,
 }
 
 impl Parser {
+    fn new(toks: Vec<Token>) -> Self {
+        let eof_span = toks.last().map_or(
+            Span {
+                line: 1,
+                col: 1,
+                len: 0,
+            },
+            |token| Span {
+                line: token.span.line,
+                col: token.span.col.saturating_add(token.span.len),
+                len: 0,
+            },
+        );
+        Self {
+            toks,
+            pos: 0,
+            eof_span,
+        }
+    }
+
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos).map(|t| &t.tok)
     }
@@ -53,7 +72,10 @@ impl Parser {
     }
 
     fn span(&self) -> Span {
-        self.toks.get(self.pos).map(|t| t.span).unwrap_or_default()
+        self.toks
+            .get(self.pos)
+            .map(|t| t.span)
+            .unwrap_or(self.eof_span)
     }
 
     fn bump(&mut self) -> Token {

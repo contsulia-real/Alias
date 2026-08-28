@@ -28,10 +28,7 @@ impl Parser {
                                 .map(|(tok, sp)| Token { tok, span: sp })
                                 .collect();
                             validate_nesting(&sub_toks)?;
-                            let mut sub = Parser {
-                                toks: sub_toks,
-                                pos: 0,
-                            };
+                            let mut sub = Parser::new(sub_toks);
                             let e = sub.parse_expr().map_err(|e| AliasError {
                                 msg: format!("插值内表达式错误: {}", e.msg),
                                 span: e.span,

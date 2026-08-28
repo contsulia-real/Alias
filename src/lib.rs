@@ -1,12 +1,12 @@
 //! Alias 语言实现库: lexer → parser → sema → Cranelift 原生代码生成。
-//! 二进制入口在 main.rs, 本 crate 暴露可编程接口供测试与工具使用。
+//! 二进制入口在 main.rs；公开接口只保留完整 build/run 管线与诊断类型。
 
-pub mod ast;
-pub mod codegen;
-pub mod lexer;
-pub mod linker;
-pub mod parser;
-pub mod sema;
+mod ast;
+mod codegen;
+mod lexer;
+mod linker;
+mod parser;
+mod sema;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -29,10 +29,8 @@ pub struct Span {
 
 impl fmt::Display for AliasError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Q⑤ 裁决: Span 为 default (全零) 时省略位置前缀。
-        // 不变式: 真实 span 的 line>=1 且 col>=1 (lexer.rs 初始化 line:1
-        // col:1 且 span_here 强制 col>=1), 全零只可能来自 Span::default()
-        // 哨兵 — 当前唯一产生点是「找不到顶层 func main」。
+        // 全零 Span 表示诊断没有对应的源码位置（例如缺少 main 或工具链错误）。
+        // parser 的 EOF 也必须计算具体位置，不能借用这个哨兵隐藏源码坐标。
         if self.span == Span::default() {
             write!(f, "{}", self.msg)
         } else {
@@ -97,9 +95,9 @@ impl Drop for TempExecutable {
 
 /// 编译并运行：完整执行 lex → parse → sema → COFF → rust-lld → 临时 exe，
 /// 随后启动该原生进程。不存在 AST 求值或进程内机器码执行路径。
-pub fn run(path: &str, src: &str) -> AliasResult<i32> {
+pub fn run(src: &str) -> AliasResult<i32> {
     let executable = TempExecutable::create()?;
-    build(path, src, &executable.path)?;
+    build(src, &executable.path)?;
     let status = std::process::Command::new(&executable.path)
         .status()
         .map_err(|e| AliasError {
@@ -114,7 +112,7 @@ pub fn run(path: &str, src: &str) -> AliasResult<i32> {
 }
 
 /// 唯一编译管线：前端 → COFF 目标文件 → rust-lld → 独立原生可执行文件。
-pub fn build(_path: &str, src: &str, out_exe: &Path) -> AliasResult<()> {
+pub fn build(src: &str, out_exe: &Path) -> AliasResult<()> {
     let tokens = lexer::lex(src)?;
     let program = parser::parse(tokens)?;
     let checked = sema::check(program)?;

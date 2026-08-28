@@ -40,12 +40,11 @@ fn golden_table() -> Vec<Golden> {
     vec![
         // ---- demos/count_to_ten.as: 已知良好的 demo 夹具 ----
         // 循环体先 increase i 再 println i, 故打印 1..10 (非 0..9);
-        // import 触发标准库尚未接入通知，文本逐字节冻结。
         Golden {
             name: "count_to_ten_demo",
             input: Input::Demo("demos/count_to_ten.as"),
             stdout: b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
-            stderr: "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
+            stderr: b"",
             exit: 0,
         },
         // ---- 退出码 = main 返回值 (i32) ----
@@ -102,7 +101,7 @@ fn golden_table() -> Vec<Golden> {
         Golden {
             name: "display_func",
             input: Input::Inline(
-                "func i32 main = () -> {\n    func i32 f = () -> return 5\n    println f\n    return 0\n}\n",
+                "func i32 main = () -> {\n    func i32 f = (i32 x) -> return x\n    println(f)\n    return 0\n}\n",
             ),
             stdout: "<func>\n".as_bytes(),
             stderr: b"",

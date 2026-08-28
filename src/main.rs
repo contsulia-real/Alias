@@ -5,7 +5,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // 子命令形态: run|build <source.as>; 裸单参保持向后兼容 (= run)
+    // `alias <file>` 与 `alias run <file>` 都是当前正式的一等入口。
     let (cmd, path) = match args.as_slice() {
         [p] => ("run", p.clone()),
         [c, p] if c == "run" || c == "build" => (c.as_str(), p.clone()),
@@ -43,7 +43,7 @@ fn main() -> ExitCode {
         // 产物与源文件同目录同名 .exe; 成功静默
         let source_path = std::path::Path::new(&path);
         let out = source_path.with_extension("exe");
-        return match build(&path, &src, &out) {
+        return match build(&src, &out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match run(&path, &src) {
+    match run(&src) {
         // 退出码在进程边界 clamp — 编译执行的原生返回值同规约
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(e) => {

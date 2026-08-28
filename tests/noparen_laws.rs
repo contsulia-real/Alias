@@ -5,11 +5,11 @@
 use alias::run;
 
 fn ok(src: &str) -> i32 {
-    run("test.as", src).unwrap_or_else(|e| panic!("应当通过, 实际: {e}"))
+    run(src).unwrap_or_else(|e| panic!("应当通过, 实际: {e}"))
 }
 
 fn err(src: &str) -> String {
-    match run("test.as", src) {
+    match run(src) {
         Err(e) => e.msg,
         Ok(_) => panic!("应当报错"),
     }

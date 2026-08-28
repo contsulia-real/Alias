@@ -1,5 +1,4 @@
 //! typed HIR facade: model, lowering, validation, capture analysis and type traversal.
-#![allow(dead_code)]
 
 mod capture;
 mod lower;
@@ -10,11 +9,16 @@ mod visit;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use model::*;
+pub(crate) use model::{
+    ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
+    CallTarget, CheckedProgram, CtorKind, Expr, ExprInfo, Item, LowerFacts, MatchArm, MethodId,
+    MethodTarget, Param, Pattern, Stmt, StrPart, StructDef, StructField,
+};
 
 pub(super) fn lower(
     program: crate::ast::Program,
     facts: LowerFacts,
+    main_id: BindingId,
 ) -> crate::AliasResult<CheckedProgram> {
-    lower::lower(program, facts)
+    lower::lower(program, facts, main_id)
 }

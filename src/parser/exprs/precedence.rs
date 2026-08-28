@@ -140,17 +140,14 @@ impl Parser {
                         };
                     }
                 }
-                Some(t)
-                    if matches!(
-                        t,
-                        Tok::Int(_)
-                            | Tok::Float(_)
-                            | Tok::Bool(_)
-                            | Tok::Str(_)
-                            | Tok::LParen
-                            | Tok::LBracket
-                    ) =>
-                {
+                Some(
+                    Tok::Int(_)
+                    | Tok::Float(_)
+                    | Tok::Bool(_)
+                    | Tok::Str(_)
+                    | Tok::LParen
+                    | Tok::LBracket,
+                ) => {
                     chain += 1;
                     if chain > MAX_EXPR_CHAIN {
                         return Err(self.err_here(format!("表达式链超过 {MAX_EXPR_CHAIN} 项上限")));

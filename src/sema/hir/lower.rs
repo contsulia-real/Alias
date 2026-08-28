@@ -1,13 +1,15 @@
 use super::*;
+use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
 
 pub(super) fn lower(
     program: crate::ast::Program,
     mut facts: LowerFacts,
+    main_id: BindingId,
 ) -> AliasResult<CheckedProgram> {
     let mut checked = CheckedProgram {
-        imports: program.imports.clone(),
+        main_id,
         items: program
             .items
             .iter()
@@ -31,6 +33,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("结构体字段", facts.fields.len()),
         ("字段索引", facts.field_indices.len()),
         ("字段赋值索引", facts.field_assign_indices.len()),
+        ("构造器实参字段索引", facts.ctor_arg_indices.len()),
         ("函数参数类型", facts.params.len()),
         ("函数参数 BindingId", facts.param_ids.len()),
         ("for 循环变量类型", facts.fors.len()),
@@ -71,8 +74,6 @@ fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<It
                 .map(|field| {
                     let key = field as *const crate::ast::StructField as usize;
                     Ok(StructField {
-                        name: field.name.clone(),
-                        mutable: field.mutable,
                         ty: facts.fields.remove(&key).ok_or_else(|| AliasError {
                             msg: "内部 sema 不变式被破坏: 结构体字段缺少静态类型".into(),
                             span: field.span,
@@ -86,7 +87,6 @@ fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<It
                     })
                 })
                 .collect::<AliasResult<Vec<_>>>()?,
-            span: def.span,
         }),
     })
 }
@@ -101,14 +101,22 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
     let receiver = facts.receivers.remove(&key);
     let method_id = facts.method_ids.remove(&key);
     let self_id = facts.method_self_ids.remove(&key);
-    if receiver.is_some() != method_id.is_some() || receiver.is_some() != self_id.is_some() {
-        return Err(AliasError {
-            msg: "内部 sema 不变式被破坏: 方法绑定缺少 MethodId/self BindingId".into(),
-            span: binding.span,
-        });
-    }
+    let owner = match (receiver, method_id, self_id) {
+        (None, None, None) => BindingOwner::Ordinary,
+        (Some(receiver), Some(method_id), Some(self_id)) => BindingOwner::Method {
+            method_id,
+            self_id,
+            receiver,
+        },
+        _ => {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 方法绑定缺少 MethodId/self BindingId".into(),
+                span: binding.span,
+            })
+        }
+    };
     let mut value = lower_expr(&binding.value, facts)?;
-    if let Some(id) = self_id {
+    if let BindingOwner::Method { self_id, .. } = &owner {
         let Expr::FuncLit {
             implicit_bindings, ..
         } = &mut value
@@ -118,17 +126,14 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
                 span: binding.span,
             });
         };
-        implicit_bindings.push(id);
+        implicit_bindings.push(*self_id);
     }
     Ok(Binding {
         binding_id,
-        method_id,
-        self_id,
-        is_pub: binding.is_pub,
+        owner,
         kind: binding.kind,
         ty,
         name: binding.name.clone(),
-        receiver,
         value,
         span: binding.span,
     })
@@ -150,8 +155,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
     let key = stmt as *const crate::ast::Stmt as usize;
     Ok(match stmt {
         crate::ast::Stmt::Binding(binding) => Stmt::Binding(lower_binding(binding, facts)?),
-        crate::ast::Stmt::Assign { target, value, span } => Stmt::Assign {
-            target: target.clone(),
+        crate::ast::Stmt::Assign { value, span, .. } => Stmt::Assign {
             target_id: take_required(
                 &mut facts.assign_target_ids,
                 key,
@@ -159,16 +163,11 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 "赋值目标 BindingId",
             )?,
             value: lower_expr(value, facts)?,
-            span: *span,
         },
         crate::ast::Stmt::FieldAssign {
-            recv,
-            field,
-            value,
-            span,
+            recv, value, span, ..
         } => Stmt::FieldAssign {
             recv: Box::new(lower_expr(recv, facts)?),
-            field: field.clone(),
             field_index: take_required(
                 &mut facts.field_assign_indices,
                 key,
@@ -176,23 +175,20 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 "字段赋值索引",
             )?,
             value: lower_expr(value, facts)?,
-            span: *span,
         },
-        crate::ast::Stmt::ExprStmt { expr, span } => Stmt::ExprStmt {
+        crate::ast::Stmt::Expr { expr, .. } => Stmt::Expr {
             expr: lower_expr(expr, facts)?,
-            span: *span,
         },
-        crate::ast::Stmt::Return { value, span } => Stmt::Return {
+        crate::ast::Stmt::Return { value, .. } => Stmt::Return {
             value: value
                 .as_ref()
                 .map(|expr| lower_expr(expr, facts))
                 .transpose()?,
-            span: *span,
         },
         crate::ast::Stmt::If {
             branches,
             else_body,
-            span,
+            ..
         } => Stmt::If {
             branches: branches
                 .iter()
@@ -213,18 +209,15 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                         .collect::<AliasResult<Vec<_>>>()
                 })
                 .transpose()?,
-            span: *span,
         },
-        crate::ast::Stmt::While { cond, body, span } => Stmt::While {
+        crate::ast::Stmt::While { cond, body, .. } => Stmt::While {
             cond: lower_expr(cond, facts)?,
             body: body
                 .iter()
                 .map(|stmt| lower_stmt(stmt, facts))
                 .collect::<AliasResult<Vec<_>>>()?,
-            span: *span,
         },
         crate::ast::Stmt::For {
-            name,
             iterable,
             body,
             span,
@@ -235,7 +228,6 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 msg: "内部 sema 不变式被破坏: for 循环变量缺少静态类型".into(),
                 span: *span,
             })?,
-            name: name.clone(),
             iterable: lower_expr(iterable, facts)?,
             body: body
                 .iter()
@@ -243,32 +235,28 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 .collect::<AliasResult<Vec<_>>>()?,
             span: *span,
         },
-        crate::ast::Stmt::Break { span } => Stmt::Break { span: *span },
-        crate::ast::Stmt::Continue { span } => Stmt::Continue { span: *span },
+        crate::ast::Stmt::Break { .. } => Stmt::Break,
+        crate::ast::Stmt::Continue { .. } => Stmt::Continue,
     })
 }
 
 fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Expr> {
     let key = expr as *const crate::ast::Expr as usize;
-    let Some(mut info) = facts.exprs.remove(&key) else {
+    let Some(mut lower_info) = facts.exprs.remove(&key) else {
         return Err(AliasError {
             msg: "内部 sema 不变式被破坏: 表达式缺少静态类型".into(),
             span: expr.span(),
         });
     };
 
-    if let Some(callee_ty) = info.implicit_zero_callee.take() {
-        if info.call_target != Some(CallTarget::FunctionValue) {
+    if let Some(callee_ty) = lower_info.implicit_zero_callee.take() {
+        if lower_info.call_target != Some(LowerCallTarget::FunctionValue) {
             return Err(AliasError {
                 msg: "内部 sema 不变式被破坏: 零参裸名调用缺少函数调用目标".into(),
                 span: expr.span(),
             });
         }
-        let callee_info = ExprInfo {
-            ty: callee_ty,
-            call_target: None,
-            implicit_zero_callee: None,
-        };
+        let callee_info = ExprInfo { ty: callee_ty };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(
                 name.clone(),
@@ -292,8 +280,9 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         return Ok(Expr::Call {
             callee: Box::new(callee),
             args: Vec::new(),
+            target: CallTarget::FunctionValue,
             span: expr.span(),
-            info,
+            info: ExprInfo { ty: lower_info.ty },
         });
     }
 
@@ -303,21 +292,14 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             | crate::ast::Expr::Juxtapose { .. }
             | crate::ast::Expr::MethodCall { .. }
     );
-    if is_call && info.call_target.is_none() {
+    if is_call && lower_info.call_target.is_none() {
         return Err(AliasError {
             msg: "内部 sema 不变式被破坏: 调用表达式缺少已解析目标".into(),
             span: expr.span(),
         });
     }
-    if matches!(
-        info.call_target,
-        Some(CallTarget::Method(MethodTarget::User { id: None, .. }))
-    ) {
-        return Err(AliasError {
-            msg: "内部 sema 不变式被破坏: 用户方法调用缺少 MethodId".into(),
-            span: expr.span(),
-        });
-    }
+    let mut call_target = lower_info.call_target.take();
+    let info = ExprInfo { ty: lower_info.ty };
 
     Ok(match expr {
         crate::ast::Expr::Int(value, span) => Expr::Int(*value, *span, info),
@@ -388,21 +370,29 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 .iter()
                 .map(|arg| lower_call_arg(arg, facts))
                 .collect::<AliasResult<Vec<_>>>()?,
+            target: lower_call_target(
+                call_target.take().ok_or_else(|| AliasError {
+                    msg: "内部 sema 不变式被破坏: Call 缺少 target".into(),
+                    span: *span,
+                })?,
+                args,
+                facts,
+                *span,
+            )?,
             span: *span,
             info,
         },
-        crate::ast::Expr::Juxtapose { lhs, rhs, span } => match info.call_target.as_ref() {
-            Some(CallTarget::FunctionValue) => Expr::Call {
+        crate::ast::Expr::Juxtapose { lhs, rhs, span } => match call_target.take() {
+            Some(LowerCallTarget::FunctionValue) => Expr::Call {
                 callee: Box::new(lower_expr(lhs, facts)?),
                 args: vec![CallArg {
-                    label: None,
                     value: lower_expr(rhs, facts)?,
-                    span: rhs.span(),
                 }],
+                target: CallTarget::FunctionValue,
                 span: *span,
                 info,
             },
-            Some(CallTarget::Method(_)) => {
+            Some(LowerCallTarget::Method(target)) => {
                 if !matches!(rhs.as_ref(), crate::ast::Expr::Ident(..)) {
                     return Err(AliasError {
                         msg: "内部 sema 不变式被破坏: 零参方法中缀 RHS 不是方法名".into(),
@@ -412,6 +402,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 Expr::MethodCall {
                     recv: Box::new(lower_expr(lhs, facts)?),
                     args: Vec::new(),
+                    target,
                     span: *span,
                     info,
                 }
@@ -431,18 +422,21 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 .iter()
                 .map(|arg| lower_call_arg(arg, facts))
                 .collect::<AliasResult<Vec<_>>>()?,
+            target: match call_target.take() {
+                Some(LowerCallTarget::Method(target)) => target,
+                _ => {
+                    return Err(AliasError {
+                        msg: "内部 sema 不变式被破坏: MethodCall 缺少方法 target".into(),
+                        span: *span,
+                    })
+                }
+            },
             span: *span,
             info,
         },
-        crate::ast::Expr::Field { recv, name, span } => Expr::Field {
+        crate::ast::Expr::Field { recv, span, .. } => Expr::Field {
             recv: Box::new(lower_expr(recv, facts)?),
-            name: name.clone(),
-            field_index: take_required(
-                &mut facts.field_indices,
-                key,
-                *span,
-                "字段访问索引",
-            )?,
+            field_index: take_required(&mut facts.field_indices, key, *span, "字段访问索引")?,
             span: *span,
             info,
         },
@@ -476,8 +470,6 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                             msg: "内部 sema 不变式被破坏: 函数参数缺少静态类型".into(),
                             span: param.span,
                         })?,
-                        name: param.name.clone(),
-                        span: param.span,
                     })
                 })
                 .collect::<AliasResult<Vec<_>>>()?,
@@ -508,11 +500,43 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     })
 }
 
+fn lower_call_target(
+    target: LowerCallTarget,
+    args: &[crate::ast::CallArg],
+    facts: &mut LowerFacts,
+    span: Span,
+) -> AliasResult<CallTarget> {
+    match target {
+        LowerCallTarget::StructConstructor(name) => {
+            let arg_field_indices = args
+                .iter()
+                .map(|arg| {
+                    take_required(
+                        &mut facts.ctor_arg_indices,
+                        arg as *const crate::ast::CallArg as usize,
+                        arg.span,
+                        "构造器实参字段索引",
+                    )
+                })
+                .collect::<AliasResult<Vec<_>>>()?;
+            Ok(CallTarget::StructConstructor {
+                name,
+                arg_field_indices,
+            })
+        }
+        LowerCallTarget::Method(_) => Err(AliasError {
+            msg: "内部 sema 不变式被破坏: 普通 Call 携带方法 target".into(),
+            span,
+        }),
+        LowerCallTarget::FunctionValue => Ok(CallTarget::FunctionValue),
+        LowerCallTarget::ResultConstructor(kind) => Ok(CallTarget::ResultConstructor(kind)),
+        LowerCallTarget::Builtin(builtin) => Ok(CallTarget::Builtin(builtin)),
+    }
+}
+
 fn lower_call_arg(arg: &crate::ast::CallArg, facts: &mut LowerFacts) -> AliasResult<CallArg> {
     Ok(CallArg {
-        label: arg.label.clone(),
         value: lower_expr(&arg.value, facts)?,
-        span: arg.span,
     })
 }
 
@@ -531,6 +555,5 @@ fn lower_match_arm(arm: &crate::ast::MatchArm, facts: &mut LowerFacts) -> AliasR
             crate::ast::ArmBody::Value(expr) => ArmBody::Value(Box::new(lower_expr(expr, facts)?)),
             crate::ast::ArmBody::Ret(expr) => ArmBody::Ret(Box::new(lower_expr(expr, facts)?)),
         },
-        span: arm.span,
     })
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static CASE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn fail(src: &str) -> AliasError {
-    run("conversion-law.as", src).expect_err("该程序应在编译期失败")
+    run(src).expect_err("该程序应在编译期失败")
 }
 
 fn run_cli(src: &str) -> std::process::Output {
@@ -35,7 +35,7 @@ func i32 main = () -> {
     return result
 }
 "#;
-    assert_eq!(run("conversion-forms.as", src).unwrap(), 255);
+    assert_eq!(run(src).unwrap(), 255);
 }
 
 #[test]
@@ -53,7 +53,7 @@ func i32 main = () -> {
     return ass.x * 10 + direct
 }
 "#;
-    assert_eq!(run("assignment-target-conversion.as", src).unwrap(), 77);
+    assert_eq!(run(src).unwrap(), 77);
 }
 
 #[test]
@@ -91,7 +91,7 @@ func i32 main = () -> {
     return declared + assigned + field.value + argument + values[0] + result_value + matched + composite + through_return(source) + defaulted.value
 }
 "#;
-    assert_eq!(run("target-propagation-matrix.as", src).unwrap(), 43);
+    assert_eq!(run(src).unwrap(), 43);
 }
 
 #[test]
@@ -117,7 +117,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("string-conversions.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
@@ -157,7 +157,7 @@ func i32 main = () -> {
     return unchanged ? 0 : 1
 }
 "#;
-    assert_eq!(run("try-from-fallback.as", fallback).unwrap(), 0);
+    assert_eq!(run(fallback).unwrap(), 0);
 
     let direct = fail(
         "func i32 main = () -> {\n    val string b = 'boy'\n    val i32 a = b\n    return a\n}\n",

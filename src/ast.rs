@@ -4,7 +4,6 @@ use crate::Span;
 
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub imports: Vec<Import>,
     pub items: Vec<Item>,
 }
 
@@ -30,13 +29,6 @@ pub struct StructField {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct Import {
-    pub names: Vec<String>,
-    pub from: String,
-    pub span: Span,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindKind {
     Val,
@@ -46,7 +38,6 @@ pub enum BindKind {
 
 #[derive(Debug, Clone)]
 pub struct Binding {
-    pub is_pub: bool,
     pub kind: BindKind,
     pub ty: TypeExpr,
     pub name: String,
@@ -104,9 +95,8 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
-    ExprStmt {
+    Expr {
         expr: Expr,
-        span: Span,
     },
     Return {
         value: Option<Expr>,
@@ -115,7 +105,6 @@ pub enum Stmt {
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
         else_body: Option<Vec<Stmt>>,
-        span: Span,
     },
     While {
         cond: Expr,

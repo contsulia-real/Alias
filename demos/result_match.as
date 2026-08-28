@@ -1,5 +1,5 @@
 // ============================================================
-// demos/result_match.as — Phase 2b 演练夹具
+// demos/result_match.as — 当前 result / match 演练夹具
 // 覆盖: result<T,E> 内建枚举 / ok·err 构造 / match 表达式
 //   (值产出臂 + never 流臂) / ? 同型错误传播 (含穿透循环) /
 //   字符串转义 \t \n \' \" \\ \0 / <ok>·<err> 显示

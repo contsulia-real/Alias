@@ -23,7 +23,7 @@ pub(super) fn populate_captures(program: &mut CheckedProgram) {
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Binding(binding) if binding.receiver.is_none() => Some(binding.binding_id),
+            Item::Binding(binding) if !binding.is_method() => Some(binding.binding_id),
             _ => None,
         })
         .collect();
@@ -49,10 +49,13 @@ fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> 
     while let Some(node) = stack.pop() {
         match node {
             Node::ExitFunc(ordinal) => {
-                let actual = function_stack.pop().unwrap_or_else(|| {
-                    panic!("内部 sema 不变式被破坏: FuncLit locals 栈为空")
-                });
-                assert_eq!(actual, ordinal, "内部 sema 不变式被破坏: FuncLit locals 栈错位");
+                let actual = function_stack
+                    .pop()
+                    .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: FuncLit locals 栈为空"));
+                assert_eq!(
+                    actual, ordinal,
+                    "内部 sema 不变式被破坏: FuncLit locals 栈错位"
+                );
             }
             Node::Stmt(stmt) => {
                 if let Some(&ordinal) = function_stack.last() {
@@ -99,7 +102,10 @@ fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> 
         }
     }
 
-    assert!(function_stack.is_empty(), "内部 sema 不变式被破坏: FuncLit locals 栈未清空");
+    assert!(
+        function_stack.is_empty(),
+        "内部 sema 不变式被破坏: FuncLit locals 栈未清空"
+    );
     locals
 }
 
@@ -116,10 +122,13 @@ fn collect_function_captures(
     while let Some(node) = stack.pop() {
         match node {
             Node::ExitFunc(ordinal) => {
-                let frame = frames.pop().unwrap_or_else(|| {
-                    panic!("内部 sema 不变式被破坏: FuncLit capture 栈为空")
-                });
-                assert_eq!(frame.ordinal, ordinal, "内部 sema 不变式被破坏: FuncLit capture 栈错位");
+                let frame = frames
+                    .pop()
+                    .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: FuncLit capture 栈为空"));
+                assert_eq!(
+                    frame.ordinal, ordinal,
+                    "内部 sema 不变式被破坏: FuncLit capture 栈错位"
+                );
                 captures[ordinal] = frame.ordered;
                 if let Some(parent) = frames.last_mut() {
                     for id in captures[ordinal].iter().copied() {
@@ -160,8 +169,15 @@ fn collect_function_captures(
         }
     }
 
-    assert_eq!(next_ordinal, locals.len(), "内部 sema 不变式被破坏: FuncLit 遍历数量变化");
-    assert!(frames.is_empty(), "内部 sema 不变式被破坏: FuncLit capture 栈未清空");
+    assert_eq!(
+        next_ordinal,
+        locals.len(),
+        "内部 sema 不变式被破坏: FuncLit 遍历数量变化"
+    );
+    assert!(
+        frames.is_empty(),
+        "内部 sema 不变式被破坏: FuncLit capture 栈未清空"
+    );
     captures
 }
 
@@ -171,10 +187,7 @@ fn record_use(
     globals: &HashSet<BindingId>,
     id: BindingId,
 ) {
-    if !locals[frame.ordinal].contains(&id)
-        && !globals.contains(&id)
-        && frame.seen.insert(id)
-    {
+    if !locals[frame.ordinal].contains(&id) && !globals.contains(&id) && frame.seen.insert(id) {
         frame.ordered.push(id);
     }
 }
@@ -203,7 +216,11 @@ fn apply_captures(program: &mut CheckedProgram, captures: &mut [Vec<BindingId>])
             },
         }
     }
-    assert_eq!(next_ordinal, captures.len(), "内部 sema 不变式被破坏: FuncLit 写回数量变化");
+    assert_eq!(
+        next_ordinal,
+        captures.len(),
+        "内部 sema 不变式被破坏: FuncLit 写回数量变化"
+    );
 }
 
 fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {
@@ -259,13 +276,17 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
             stack.push(Node::Expr(value));
             stack.push(Node::Expr(recv));
         }
-        Stmt::ExprStmt { expr, .. } => stack.push(Node::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value, .. } => {
             if let Some(value) = value {
                 stack.push(Node::Expr(value));
             }
         }
-        Stmt::If { branches, else_body, .. } => {
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
             if let Some(body) = else_body {
                 for stmt in body.iter().rev() {
                     stack.push(Node::Stmt(stmt));
@@ -290,15 +311,11 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
             }
             stack.push(Node::Expr(iterable));
         }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Break | Stmt::Continue => {}
     }
 }
 
-fn push_match_children<'a>(
-    stack: &mut Vec<Node<'a>>,
-    subject: &'a Expr,
-    arms: &'a [MatchArm],
-) {
+fn push_match_children<'a>(stack: &mut Vec<Node<'a>>, subject: &'a Expr, arms: &'a [MatchArm]) {
     for arm in arms.iter().rev() {
         match &arm.body {
             ArmBody::Block(stmts) => {
@@ -330,7 +347,12 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(rhs));
             stack.push(Node::Expr(lhs));
         }
-        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
             stack.push(Node::Expr(else_expr));
             stack.push(Node::Expr(then_expr));
             stack.push(Node::Expr(cond));
@@ -386,13 +408,17 @@ fn push_stmt_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) 
             stack.push(MutNode::Expr(value));
             stack.push(MutNode::Expr(recv));
         }
-        Stmt::ExprStmt { expr, .. } => stack.push(MutNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value, .. } => {
             if let Some(value) = value {
                 stack.push(MutNode::Expr(value));
             }
         }
-        Stmt::If { branches, else_body, .. } => {
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
             if let Some(body) = else_body {
                 for stmt in body.iter_mut().rev() {
                     stack.push(MutNode::Stmt(stmt));
@@ -417,7 +443,7 @@ fn push_stmt_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) 
             }
             stack.push(MutNode::Expr(iterable));
         }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Break | Stmt::Continue => {}
     }
 }
 
@@ -457,7 +483,12 @@ fn push_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
             stack.push(MutNode::Expr(rhs));
             stack.push(MutNode::Expr(lhs));
         }
-        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
             stack.push(MutNode::Expr(else_expr));
             stack.push(MutNode::Expr(then_expr));
             stack.push(MutNode::Expr(cond));

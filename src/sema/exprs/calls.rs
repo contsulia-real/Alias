@@ -1,4 +1,5 @@
 use super::*;
+use crate::sema::MethodInfo;
 
 impl Checker {
     pub(super) fn call(
@@ -112,16 +113,16 @@ impl Checker {
         }
     }
 
-    pub(super) fn resolve_call_target(&self, callee: &Expr, env: &Env) -> CallTarget {
+    pub(super) fn resolve_call_target(&self, callee: &Expr, env: &Env) -> LowerCallTarget {
         let Expr::Ident(name, _) = callee else {
-            return CallTarget::FunctionValue;
+            return LowerCallTarget::FunctionValue;
         };
         if Scope::get(env, name).is_none() {
             if self.structs.contains_key(name) {
-                return CallTarget::StructConstructor(name.clone());
+                return LowerCallTarget::StructConstructor(name.clone());
             }
             if name == "ok" || name == "err" {
-                return CallTarget::ResultConstructor(if name == "ok" {
+                return LowerCallTarget::ResultConstructor(if name == "ok" {
                     CtorKind::Ok
                 } else {
                     CtorKind::Err
@@ -139,8 +140,8 @@ impl Checker {
             _ => None,
         };
         builtin
-            .map(CallTarget::Builtin)
-            .unwrap_or(CallTarget::FunctionValue)
+            .map(LowerCallTarget::Builtin)
+            .unwrap_or(LowerCallTarget::FunctionValue)
     }
 
     fn construct(
@@ -368,13 +369,13 @@ impl Checker {
                 span,
             });
         };
-        if args.len() != sig.params.len() {
+        if args.len() != sig.params().len() {
             return Err(AliasError {
-                msg: format!("期望 {} 个参数, 实际 {} 个", sig.params.len(), args.len()),
+                msg: format!("期望 {} 个参数, 实际 {} 个", sig.params().len(), args.len()),
                 span,
             });
         }
-        for (i, (a, want)) in args.iter().zip(&sig.params).enumerate() {
+        for (i, (a, want)) in args.iter().zip(sig.params()).enumerate() {
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
                 Err(ExprCheckError::Mismatch { actual, .. }) => {
@@ -391,7 +392,7 @@ impl Checker {
                 Err(e) => return Err(e.into_alias()),
             }
         }
-        Ok(sig.ret)
+        Ok(sig.ret().clone())
     }
 }
 
@@ -439,14 +440,16 @@ pub(super) fn resolve_method_target(
         .methods
         .get(&rname)
         .and_then(|table| table.get(name))
-        .and_then(|method| method.id)
+        .and_then(|method| match method {
+            MethodInfo::User { id, .. } => Some(*id),
+            MethodInfo::Builtin { .. } => None,
+        })
         .ok_or_else(|| AliasError {
             msg: format!("内部 sema 不变式被破坏: 用户方法 {rname}.{name} 缺少 MethodId"),
             span,
         })?;
     Ok(MethodTarget::User {
         receiver: recv.clone(),
-        name: name.to_string(),
-        id: Some(id),
+        id,
     })
 }

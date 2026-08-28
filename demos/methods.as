@@ -1,5 +1,5 @@
 // ============================================================
-// demos/methods.as — Phase 2c 扩展方法演练夹具
+// demos/methods.as — 当前扩展方法演练夹具
 // 覆盖: 方法定义文法 (pub? func <Ret> <Recv>.<name>) /
 //   self 隐式不可变绑定 / 结构体方法经 self 写 var 字段 /
 //   同名方法跨类型命名空间共存 / 方法链式调用 /
@@ -11,7 +11,7 @@ struct counter {
     val string tag = 'c'
 }
 
-// 用户扩展方法: string 拼接 (helper.as 冻结形状)
+// 用户扩展方法：string 拼接
 pub func string string.append = (string tail) -> return '${self}${tail}'
 
 // 同名方法跨类型共存: 命名空间按接收者类型划分

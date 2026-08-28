@@ -66,6 +66,50 @@ impl<'m, M: Module> Compiler<'m, M> {
         name: &str,
         args: &[Value],
     ) -> AliasResult<Value> {
+        if runtime_contract(name)?.ret.is_none() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 无返回值 runtime '{name}' 被当作值调用"),
+            ));
+        }
+        let inst = self.call_rt_inst(bcx, name, args)?;
+        match bcx.inst_results(inst) {
+            [value] => Ok(*value),
+            _ => Err(native_err(
+                Span::default(),
+                format!("内部: 有返回值 runtime '{name}' 未产生唯一结果"),
+            )),
+        }
+    }
+
+    pub(crate) fn call_rt_void(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        args: &[Value],
+    ) -> AliasResult<()> {
+        if runtime_contract(name)?.ret.is_some() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 有返回值 runtime '{name}' 被当作 unit 调用"),
+            ));
+        }
+        let inst = self.call_rt_inst(bcx, name, args)?;
+        if !bcx.inst_results(inst).is_empty() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 无返回值 runtime '{name}' 意外产生结果"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn call_rt_inst(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        args: &[Value],
+    ) -> AliasResult<cranelift_codegen::ir::Inst> {
         let contract = runtime_contract(name)?;
         if args.len() != contract.params.len() {
             return Err(native_err(
@@ -95,13 +139,8 @@ impl<'m, M: Module> Compiler<'m, M> {
             }
         }
         let fid = self.import_runtime(name)?;
-        let fref = self.module.declare_func_in_func(fid, &mut bcx.func);
-        let inst = bcx.ins().call(fref, args);
-        Ok(match bcx.inst_results(inst) {
-            [v] => *v,
-            [] => bcx.ins().iconst(types::I64, 0),
-            _ => invariant_violation("运行时单返回值签名"),
-        })
+        let fref = self.module.declare_func_in_func(fid, bcx.func);
+        Ok(bcx.ins().call(fref, args))
     }
 
     pub(crate) fn define_user_func(
@@ -168,14 +207,10 @@ impl<'m, M: Module> Compiler<'m, M> {
             if ret_vty == VTy::Unit {
                 bcx.ins().jump(ret_block, &[]);
             } else {
-                let zero = if cl_type(&ret_vty) == types::F32 {
-                    bcx.ins().f32const(0.0)
-                } else if cl_type(&ret_vty) == types::F64 {
-                    bcx.ins().f64const(0.0)
-                } else {
-                    bcx.ins().iconst(cl_type(&ret_vty), 0)
-                };
-                bcx.ins().jump(ret_block, &[BlockArg::Value(zero)]);
+                return Err(native_err(
+                    Span::default(),
+                    "内部: 非 unit 函数存在可达落空路径，sema 返回路径不变式被破坏",
+                ));
             }
         }
         bcx.switch_to_block(ret_block);
@@ -186,13 +221,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             bcx.ins().return_(&[]);
         }
         bcx.finalize(self.module.target_config());
-        if let Err(ve) = ctx.verify_if(self.module.isa()) {
-            eprintln!("[内部验证失败] {}", ve);
-            eprintln!("[Cranelift 中间表示]\n{}", ctx.func);
-        }
-        self.module
-            .define_function(fid, &mut ctx)
-            .map_err(|e| native_err(Span::default(), format!("内部: 函数定义失败 {e}")))
+        self.define_verified_function(fid, &mut ctx, "用户函数")
     }
 
     pub(crate) fn compile_entry(
@@ -246,7 +275,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         for (binding_index, b) in items
             .iter()
             .filter_map(|i| match i {
-                Item::Binding(b) if b.receiver.is_none() => Some(b),
+                Item::Binding(b) if !b.is_method() => Some(b),
                 _ => None,
             })
             .enumerate()
@@ -296,7 +325,9 @@ impl<'m, M: Module> Compiler<'m, M> {
                 .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
         let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
-        let env = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 8);
+        let env = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), clo, value_word_offset(1));
         let msig = user_signature(self.cc, &[], &main_ret);
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
@@ -304,25 +335,19 @@ impl<'m, M: Module> Compiler<'m, M> {
         let code_word = norm_load(&mut bcx, raw, &main_ret);
         let exit_code = bcx.ins().ireduce(types::I32, code_word);
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
-        let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
+        let epr = self.module.declare_func_in_func(ep, bcx.func);
         bcx.ins().call(epr, &[exit_code]);
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
         bcx.switch_to_block(abort_ret);
         bcx.seal_block(abort_ret);
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
-        let epr = self.module.declare_func_in_func(ep, &mut bcx.func);
+        let epr = self.module.declare_func_in_func(ep, bcx.func);
         let one = bcx.ins().iconst(types::I32, 1);
         bcx.ins().call(epr, &[one]);
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
         bcx.finalize(self.module.target_config());
-        if let Err(ve) = ctx.verify_if(self.module.isa()) {
-            eprintln!("[内部验证失败] {}", ve);
-            eprintln!("[Cranelift 中间表示]\n{}", ctx.func);
-        }
-        self.module
-            .define_function(fid, &mut ctx)
-            .map_err(|e| native_err(Span::default(), format!("内部: 入口定义失败 {e}")))?;
+        self.define_verified_function(fid, &mut ctx, "进程入口")?;
         Ok(fid)
     }
 }
@@ -378,7 +403,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         bcx.ins().iconst(types::I64, 0)
     } else {
         let en = c.import_runtime("alias.env.new")?;
-        let eref = c.module.declare_func_in_func(en, &mut bcx.func);
+        let eref = c.module.declare_func_in_func(en, bcx.func);
         let len = bcx.ins().iconst(types::I32, captures.len() as i64);
         let ecall = bcx.ins().call(eref, &[len]);
         first_result(bcx, ecall)
@@ -390,7 +415,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
                 types::I64,
                 MemFlagsData::new(),
                 base,
-                ((*idx as i64) * 8) as i32,
+                value_word_offset(*idx),
             )
         } else {
             let mut found: Option<Value> = None;
@@ -402,18 +427,14 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
             }
             found.unwrap_or_else(|| invariant_violation("HIR 捕获 BindingId 必须解析到外层单元格"))
         };
-        bcx.ins().store(
-            MemFlagsData::new(),
-            cellw,
-            env_word,
-            ((i as i64) * 8) as i32,
-        );
+        bcx.ins()
+            .store(MemFlagsData::new(), cellw, env_word, value_word_offset(i));
     }
 
-    let fref = c.module.declare_func_in_func(fid, &mut bcx.func);
+    let fref = c.module.declare_func_in_func(fid, bcx.func);
     let code = bcx.ins().func_addr(c.ptr_ty, fref);
     let cn = c.import_runtime("alias.closure.new")?;
-    let cnref = c.module.declare_func_in_func(cn, &mut bcx.func);
+    let cnref = c.module.declare_func_in_func(cn, bcx.func);
     let cncall = bcx.ins().call(cnref, &[code, env_word]);
     Ok(first_result(bcx, cncall))
 }

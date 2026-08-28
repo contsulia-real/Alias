@@ -19,6 +19,12 @@ pub(super) fn emit_io_runtime<M: Module>(
             c.call_rt(&mut $bcx, $nm, &__args)?
         }};
     }
+    macro_rules! call_rt_void_m {
+        ($bcx:expr, $nm:expr, $args:expr) => {{
+            let __args = $args;
+            c.call_rt_void(&mut $bcx, $nm, &__args)?
+        }};
+    }
     macro_rules! call_ext_m {
         ($bcx:expr, $fid:expr, $args:expr) => {{
             let __r = c.module.declare_func_in_func($fid, &mut $bcx.func);
@@ -37,7 +43,7 @@ pub(super) fn emit_io_runtime<M: Module>(
         let ss = bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
         let null = bcx.ins().iconst(c.ptr_ty, 0);
-        let wf = c.module.declare_func_in_func(ext.write_file, &mut bcx.func);
+        let wf = c.module.declare_func_in_func(ext.write_file, bcx.func);
         let len32 = bcx.ins().ireduce(types::I32, a[1]);
         bcx.ins().call(wf, &[h, a[0], len32, wa, null]);
         false
@@ -46,9 +52,9 @@ pub(super) fn emit_io_runtime<M: Module>(
     shim!(c, "alias.println.str", |bcx, a| {
         let p = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        call_rt_m!(bcx, "rt.write.stdout", vec![p, l]);
+        call_rt_void_m!(bcx, "rt.write.stdout", vec![p, l]);
         let nl = sym!(bcx, "rt_nl");
-        call_rt_m!(
+        call_rt_void_m!(
             bcx,
             "rt.write.stdout",
             vec![nl, bcx.ins().iconst(types::I64, 1)]
@@ -58,7 +64,7 @@ pub(super) fn emit_io_runtime<M: Module>(
     shim!(c, "alias.print.str", |bcx, a| {
         let p = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 0);
         let l = bcx.ins().load(types::I64, MemFlagsData::new(), a[0], 8);
-        call_rt_m!(bcx, "rt.write.stdout", vec![p, l]);
+        call_rt_void_m!(bcx, "rt.write.stdout", vec![p, l]);
         false
     });
 
@@ -68,7 +74,7 @@ pub(super) fn emit_io_runtime<M: Module>(
     ] {
         shim!(c, pname, |bcx, a| {
             let blk = call_rt_m!(bcx, "alias.display.int", vec![a[0]]);
-            call_rt_m!(bcx, dname, vec![blk]);
+            call_rt_void_m!(bcx, dname, vec![blk]);
             false
         });
     }
@@ -78,7 +84,7 @@ pub(super) fn emit_io_runtime<M: Module>(
     ] {
         shim!(c, pname, |bcx, a| {
             let blk = call_rt_m!(bcx, "alias.display.bool", vec![a[0]]);
-            call_rt_m!(bcx, dname, vec![blk]);
+            call_rt_void_m!(bcx, dname, vec![blk]);
             false
         });
     }

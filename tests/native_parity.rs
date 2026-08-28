@@ -1,9 +1,9 @@
-//! Phase 4 编译器黄金基线测试 — 机械枚举 demos/ 语料 + 定向黄金用例。
+//! 当前编译器黄金基线测试 — 机械枚举 demos/ 语料 + 定向黄金用例。
 //!
 //! 当前只有 COFF + rust-lld 原生编译后端；
 //! 按迁移政策改为**黄金基线断言**: 语料仍由 `std::fs::read_dir` 机械枚举
 //! (禁手写列表), 每个 demo 断言冻结的三元组 (stdout 字节/stderr 字节/
-//! 退出码)。基线来自 Phase 4 切换时的实际探测 — 新增 demo 必须显式
+//! 退出码)。所有 demo 都必须是当前语言可成功执行的语料；新增 demo 必须显式
 //! 冻结基线后再入列 (缺失基线即测试失败, 防止静默漂移)。
 
 use std::path::{Path, PathBuf};
@@ -30,77 +30,53 @@ struct Baseline {
 #[rustfmt::skip]
 fn corpus_baselines() -> Vec<Baseline> {
     vec![
-        // 引用捕获哨兵 demo: 循环打印 1..10 + import 通知 (golden 同源)
+        // 引用捕获哨兵 demo: 循环打印 1..10。
         Baseline {
             file: "count_to_ten.as",
             stdout: b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
-            stderr: "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
+            stderr: b"",
             exit: 0,
         },
-        // Phase 3 全量对等演练夹具 (P3 探测冻结; M40: P2e 无括号泛化后
-        // `println wrap 'yo'` 由「误打印 <func>」修复为真实调用 → "[yo]")
+        // 当前原生后端综合演练夹具。
         Baseline {
             file: "hello_native.as",
             stdout: "999\n49\n55\n3\n4\n5\n14\n13\n-5\ntrue\nfalse\ntrue\nhey\nn=6\n[yo]\ntrue\ntrue\n3\n42\n".as_bytes(),
             stderr: b"",
             exit: 11,
         },
-        // Phase 2a struct 演练夹具 (M23; 探测冻结)
+        // 当前 struct 演练夹具。
         Baseline {
             file: "structs.as",
             stdout: b"42\n7\n100\n3\n555\n565\n565\n9\n565\ntrue\n565\n<struct>\n",
             stderr: b"",
             exit: 0,
         },
-        // Phase 2b result/match/?/转义演练夹具 (M26; 探测冻结)
+        // 当前 result/match/?/转义演练夹具。
         Baseline {
             file: "result_match.as",
             stdout: "100/4 = 25\nprobe(5) = 20\nprobe(0) 出错: n 为零\n3\n999\n行数不能为负\n<ok>\n<err>\ntab:[\t]\nnl:[\n]\nquotes:['\"]\nbackslash:[\\]\nNUL 可比较: true\nn 为零\n".as_bytes(),
             stderr: b"",
             exit: 9,
         },
-        // forward-spec 文档: match/result/?/转义 已随 Phase 2b 落地可解析;
-        // 语料前进至 import 名解析 (open 未定义 — 标准库 Phase 5 前) → sema 拒绝
-        Baseline {
-            file: "file_wc.as",
-            stdout: b"",
-            stderr: "错误 @ 34:10 — 未定义的绑定 'open'\n".as_bytes(),
-            exit: 1,
-        },
-        // Phase 2c 演练夹具 (M31/M32; 探测冻结)
+        // 当前扩展方法演练夹具。
         Baseline {
             file: "methods.as",
             stdout: "忠犬\nABC\nabc\n3\nhi\n[]\n[plain]\n3\nHi!\n5\n7\nc(7)\n7\n".as_bytes(),
             stderr: b"",
             exit: 0,
         },
-        // Phase 2d array<T> 演练夹具 (M36; 探测冻结)
+        // 当前 array<T> 演练夹具。
         Baseline {
             file: "arrays.as",
             stdout: "10\n30\n6\n7\n5\n5\n4\n4\n5\n99\n5\n2\n3\n50\n忠\n3\n犬bc\n<array>\n".as_bytes(),
             stderr: b"",
             exit: 0,
         },
-        // forward-spec 文档: 方法已随 Phase 2c 落地可解析; 语料前进至
-        // main 存在性 (helper.as 只有方法定义, 无 main) → sema 拒绝
-        Baseline {
-            file: "helper.as",
-            stdout: b"",
-            stderr: "找不到顶层 func main\n".as_bytes(),
-            exit: 1,
-        },
-        // forward-spec 文档: channel 泛型语法未实现 → 解析期拒绝
-        Baseline {
-            file: "producer_consumer.as",
-            stdout: b"",
-            stderr: "错误 @ 22:43 — 无法开始一个表达式: Some(Gt)\n".as_bytes(),
-            exit: 1,
-        },
-        // `this` 绑定当前函数自身，递归不依赖声明名；import 仍只通知。
+        // `this` 绑定当前函数自身，递归不依赖声明名。
         Baseline {
             file: "recursion.as",
             stdout: b"5! = 120",
-            stderr: "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
+            stderr: b"",
             exit: 0,
         },
     ]
@@ -266,7 +242,7 @@ fn compiler_targeted_golden_cases() {
 }
 
 /// 引用捕获哨兵 (迁移计划显式要求): count_to_ten.as 经默认编译路径
-/// 打印 1..10 + import 通知, 退 0。
+/// 打印 1..10，退 0。
 #[test]
 fn count_to_ten_reference_capture_sentinel() {
     let demo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("demos/count_to_ten.as");
@@ -275,7 +251,7 @@ fn count_to_ten_reference_capture_sentinel() {
         "count_to_ten_sentinel",
         &triplet,
         b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
-        "[alias] 注意: 1 条 import 已解析但标准库尚未接入 (Phase 5 前)\n".as_bytes(),
+        b"",
         0,
     );
 }

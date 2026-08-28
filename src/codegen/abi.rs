@@ -7,6 +7,13 @@ use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type
 use cranelift_frontend::FunctionBuilder;
 use std::collections::HashMap;
 
+/// array/result/env 载荷统一使用一个 64-bit word；所有元素步长必须引用此 owner。
+pub(crate) const VALUE_WORD_BYTES: i64 = 8;
+
+pub(crate) const fn value_word_offset(index: usize) -> i32 {
+    (index as i64 * VALUE_WORD_BYTES) as i32
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum VTy {
     I(IntW),
@@ -183,7 +190,6 @@ pub(crate) fn user_signature(
 
 #[derive(Clone, Debug)]
 pub(crate) struct StructFieldLayout {
-    pub(crate) name: String,
     pub(crate) default: Option<Expr>,
     pub(crate) vty: VTy,
     pub(crate) offset: i32,
@@ -281,7 +287,6 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
             off = align_to(off, abi.align_bytes);
             max_align = max_align.max(abi.align_bytes);
             fields.push(StructFieldLayout {
-                name: field.name.clone(),
                 default: field.default.clone(),
                 vty,
                 offset: off as i32,

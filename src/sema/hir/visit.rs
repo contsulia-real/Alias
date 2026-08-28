@@ -28,7 +28,7 @@ impl CheckedProgram {
             match node {
                 TypeNode::Binding(binding) => {
                     visit(&binding.ty);
-                    if let Some(receiver) = &binding.receiver {
+                    if let BindingOwner::Method { receiver, .. } = &binding.owner {
                         visit(receiver);
                     }
                     stack.push(TypeNode::Expr(&binding.value));
@@ -40,13 +40,17 @@ impl CheckedProgram {
                         stack.push(TypeNode::Expr(value));
                         stack.push(TypeNode::Expr(recv));
                     }
-                    Stmt::ExprStmt { expr, .. } => stack.push(TypeNode::Expr(expr)),
+                    Stmt::Expr { expr, .. } => stack.push(TypeNode::Expr(expr)),
                     Stmt::Return { value, .. } => {
                         if let Some(value) = value {
                             stack.push(TypeNode::Expr(value));
                         }
                     }
-                    Stmt::If { branches, else_body, .. } => {
+                    Stmt::If {
+                        branches,
+                        else_body,
+                        ..
+                    } => {
                         if let Some(body) = else_body {
                             for stmt in body.iter().rev() {
                                 stack.push(TypeNode::Stmt(stmt));
@@ -65,18 +69,24 @@ impl CheckedProgram {
                         }
                         stack.push(TypeNode::Expr(cond));
                     }
-                    Stmt::For { ty, iterable, body, .. } => {
+                    Stmt::For {
+                        ty, iterable, body, ..
+                    } => {
                         visit(ty);
                         for stmt in body.iter().rev() {
                             stack.push(TypeNode::Stmt(stmt));
                         }
                         stack.push(TypeNode::Expr(iterable));
                     }
-                    Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                    Stmt::Break | Stmt::Continue => {}
                 },
                 TypeNode::Expr(expr) => {
                     visit(expr.ty());
-                    if let Some(CallTarget::Method(MethodTarget::User { receiver, .. })) = expr.call_target() {
+                    if let Expr::MethodCall {
+                        target: MethodTarget::User { receiver, .. },
+                        ..
+                    } = expr
+                    {
                         visit(receiver);
                     }
                     match expr {
@@ -101,7 +111,12 @@ impl CheckedProgram {
                             stack.push(TypeNode::Expr(rhs));
                             stack.push(TypeNode::Expr(lhs));
                         }
-                        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+                        Expr::Ternary {
+                            cond,
+                            then_expr,
+                            else_expr,
+                            ..
+                        } => {
                             stack.push(TypeNode::Expr(else_expr));
                             stack.push(TypeNode::Expr(then_expr));
                             stack.push(TypeNode::Expr(cond));

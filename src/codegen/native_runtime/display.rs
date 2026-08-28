@@ -1,6 +1,6 @@
-use super::*;
 use super::display_float::emit_float_display_shim;
 use super::display_integer::emit_integer_display_shim;
+use super::*;
 
 pub(super) fn emit_display_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
@@ -38,7 +38,7 @@ pub(super) fn emit_display_runtime<M: Module>(
         {
             let cur = bcx.use_var(n);
             let p = bcx.use_var(pos);
-            let d = bcx.ins().srem(cur, ten.clone());
+            let d = bcx.ins().srem(cur, ten);
             let ch = bcx.ins().iadd(d, digits);
             let one = bcx.ins().iconst(types::I64, 1);
             let newp = bcx.ins().isub(p, one);
@@ -72,7 +72,7 @@ pub(super) fn emit_display_runtime<M: Module>(
                 bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
             let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
             let null = bcx.ins().iconst(c.ptr_ty, 0);
-            let wf = c.module.declare_func_in_func(ext.write_file, &mut bcx.func);
+            let wf = c.module.declare_func_in_func(ext.write_file, bcx.func);
             let len32 = bcx.ins().ireduce(types::I32, len);
             let wf_args = [a[0], start, len32, wa, null];
             bcx.ins().call(wf, &wf_args);
@@ -84,11 +84,9 @@ pub(super) fn emit_display_runtime<M: Module>(
         let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
         let v64 = bcx.ins().sextend(types::I64, a[0]);
         let zero = bcx.ins().iconst(types::I64, 0);
-        let neg = bcx
-            .ins()
-            .icmp(IntCC::SignedLessThan, v64.clone(), zero.clone());
+        let neg = bcx.ins().icmp(IntCC::SignedLessThan, v64, zero);
         let neg_mag = bcx.ins().isub(zero, v64);
-        let mag = bcx.ins().select(neg.clone(), neg_mag, v64);
+        let mag = bcx.ins().select(neg, neg_mag, v64);
         let ten = bcx.ins().iconst(types::I64, 10);
         let pos = bcx.declare_var(types::I64);
         let p23 = bcx.ins().iconst(types::I64, 23);
@@ -104,8 +102,8 @@ pub(super) fn emit_display_runtime<M: Module>(
         {
             let cur = bcx.use_var(n);
             let p = bcx.use_var(pos);
-            let d = bcx.ins().srem(cur, ten.clone());
-            let ch = bcx.ins().iadd(d, digits.clone());
+            let d = bcx.ins().srem(cur, ten);
+            let ch = bcx.ins().iadd(d, digits);
             let one = bcx.ins().iconst(types::I64, 1);
             let newp = bcx.ins().isub(p, one);
             bcx.def_var(pos, newp);
@@ -168,7 +166,7 @@ pub(super) fn emit_display_runtime<M: Module>(
         let t_addr = sym!(bcx, "rt_true");
         let f_addr = sym!(bcx, "rt_false");
         let is_t = bcx.ins().icmp_imm_s(IntCC::NotEqual, a[0], 0);
-        let addr = bcx.ins().select(is_t.clone(), t_addr, f_addr);
+        let addr = bcx.ins().select(is_t, t_addr, f_addr);
         let t_len = bcx.ins().iconst(types::I64, 4);
         let f_len = bcx.ins().iconst(types::I64, 5);
         let len = bcx.ins().select(is_t, t_len, f_len);
@@ -206,7 +204,7 @@ pub(super) fn emit_display_runtime<M: Module>(
         let is_ok = bcx.ins().icmp_imm_s(IntCC::Equal, a[0], 0);
         let ok_len = bcx.ins().iconst(types::I64, 4);
         let err_len = bcx.ins().iconst(types::I64, 5);
-        let addr = bcx.ins().select(is_ok.clone(), ok_addr, err_addr);
+        let addr = bcx.ins().select(is_ok, ok_addr, err_addr);
         let len = bcx.ins().select(is_ok, ok_len, err_len);
         let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
         bcx.ins().store(MemFlagsData::new(), addr, blk, 0);

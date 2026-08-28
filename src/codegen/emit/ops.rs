@@ -1,11 +1,10 @@
+use super::strings::{call_str_cmp, display_typed};
 use super::*;
 
-pub(crate) fn is_contextual_conversion(info: &ExprInfo) -> bool {
+pub(crate) fn is_contextual_conversion(target: &CallTarget) -> bool {
     matches!(
-        info.call_target,
-        Some(CallTarget::Builtin(
-            BuiltinCall::From | BuiltinCall::TryFrom
-        ))
+        target,
+        CallTarget::Builtin(BuiltinCall::From | BuiltinCall::TryFrom)
     )
 }
 
@@ -27,26 +26,20 @@ pub(crate) fn emit_binary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    op: BinOp,
-    lhs: &Expr,
-    l: Value,
-    r: Value,
-    span: Span,
+    input: (BinOp, &Expr, Value, Value, Span),
 ) -> AliasResult<Value> {
+    let (op, lhs, l, r, span) = input;
     let lt = c.vty(lhs.ty());
-    emit_binary_values(c, bcx, frame, op, &lt, l, r, span)
+    emit_binary_values(c, bcx, frame, (op, &lt, l, r, span))
 }
 
 pub(crate) fn emit_binary_values<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    op: BinOp,
-    lt: &VTy,
-    l: Value,
-    r: Value,
-    span: Span,
+    input: (BinOp, &VTy, Value, Value, Span),
 ) -> AliasResult<Value> {
+    let (op, lt, l, r, span) = input;
     use BinOp::*;
     match op {
         Add | Sub | Mul | Div | Rem => match lt {
@@ -64,10 +57,10 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
                     Add | Sub | Mul => {
-                        emit_checked_int_binary(c, bcx, frame, op, li, ri, true, span)?
+                        emit_checked_int_binary(c, bcx, frame, (op, li, ri, true, span))?
                     }
-                    Div => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, false)?,
-                    Rem => emit_divrem_guard(c, bcx, frame, li, ri, true, w.bits(), span, true)?,
+                    Div => emit_divrem_guard(c, bcx, frame, (li, ri, true, w.bits(), span, false))?,
+                    Rem => emit_divrem_guard(c, bcx, frame, (li, ri, true, w.bits(), span, true))?,
                     _ => unreachable!(),
                 };
                 Ok(widen_signed(bcx, v, wt))
@@ -78,10 +71,12 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
                     Add | Sub | Mul => {
-                        emit_checked_int_binary(c, bcx, frame, op, li, ri, false, span)?
+                        emit_checked_int_binary(c, bcx, frame, (op, li, ri, false, span))?
                     }
-                    Div => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, false)?,
-                    Rem => emit_divrem_guard(c, bcx, frame, li, ri, false, w.bits(), span, true)?,
+                    Div => {
+                        emit_divrem_guard(c, bcx, frame, (li, ri, false, w.bits(), span, false))?
+                    }
+                    Rem => emit_divrem_guard(c, bcx, frame, (li, ri, false, w.bits(), span, true))?,
                     _ => unreachable!(),
                 };
                 Ok(widen_unsigned(bcx, v, wt))
@@ -121,7 +116,7 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => emit_checked_shl(c, bcx, frame, li, ri, true, w.bits(), span)?,
+                    Shl => emit_checked_shl(c, bcx, frame, (li, ri, true, w.bits(), span))?,
                     Shr => bcx.ins().sshr(li, ri),
                     _ => unreachable!(),
                 };
@@ -132,7 +127,7 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => emit_checked_shl(c, bcx, frame, li, ri, false, w.bits(), span)?,
+                    Shl => emit_checked_shl(c, bcx, frame, (li, ri, false, w.bits(), span))?,
                     Shr => bcx.ins().ushr(li, ri),
                     _ => unreachable!(),
                 };
@@ -180,12 +175,9 @@ fn emit_checked_int_binary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    op: BinOp,
-    l: Value,
-    r: Value,
-    signed: bool,
-    span: Span,
+    input: (BinOp, Value, Value, bool, Span),
 ) -> AliasResult<Value> {
+    let (op, l, r, signed, span) = input;
     let (result, overflow) = match (signed, op) {
         (true, BinOp::Add) => bcx.ins().sadd_overflow(l, r),
         (true, BinOp::Sub) => bcx.ins().ssub_overflow(l, r),
@@ -203,12 +195,9 @@ fn emit_checked_shl<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    value: Value,
-    shift: Value,
-    signed: bool,
-    bits: u32,
-    span: Span,
+    input: (Value, Value, bool, u32, Span),
 ) -> AliasResult<Value> {
+    let (value, shift, signed, bits, span) = input;
     let count_bad = bcx
         .ins()
         .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, shift, bits as i64);
@@ -273,29 +262,6 @@ pub(crate) fn widen_unsigned(
     }
 }
 
-pub(crate) fn jump_zero_return(bcx: &mut FunctionBuilder, frame: &Frame) {
-    let rb = frame
-        .ret_block
-        .unwrap_or_else(|| invariant_violation("运行时错误传播需要返回块"));
-    let params = bcx.block_params(rb);
-    if params.is_empty() {
-        bcx.ins().jump(rb, &[]);
-        return;
-    }
-    let [param] = params else {
-        invariant_violation("返回块至多一个参数")
-    };
-    let ty = bcx.func.dfg.value_type(*param);
-    let zero = if ty == types::F32 {
-        bcx.ins().f32const(0.0)
-    } else if ty == types::F64 {
-        bcx.ins().f64const(0.0)
-    } else {
-        bcx.ins().iconst(ty, 0)
-    };
-    bcx.ins().jump(rb, &[BlockArg::Value(zero)]);
-}
-
 pub(crate) fn emit_convert<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -329,12 +295,12 @@ pub(crate) fn emit_convert<M: Module>(
         VTy::I(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, frame, span, v, src, true, bits, wt)
+            emit_convert_to_int(c, bcx, frame, (span, v, src, true, bits, wt))
         }
         VTy::U(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, frame, span, v, src, false, bits, wt)
+            emit_convert_to_int(c, bcx, frame, (span, v, src, false, bits, wt))
         }
         _ => invariant_violation("转换目标为数值族或 string"),
     }
@@ -344,13 +310,9 @@ fn emit_convert_to_int<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    span: Span,
-    v: Value,
-    src: &VTy,
-    signed: bool,
-    bits: u32,
-    wt: cranelift_codegen::ir::Type,
+    input: (Span, Value, &VTy, bool, u32, cranelift_codegen::ir::Type),
 ) -> AliasResult<Value> {
+    let (span, v, src, signed, bits, wt) = input;
     use cranelift_codegen::ir::condcodes::FloatCC;
     if matches!(src, VTy::F(_)) {
         let f64v = match bcx.func.dfg.value_type(v) {
@@ -432,7 +394,7 @@ fn emit_convert_to_int<M: Module>(
 pub(crate) fn emit_abort_branch<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
+    _frame: &Frame,
     trap: Value,
     sym: &str,
     span: Span,
@@ -446,8 +408,8 @@ pub(crate) fn emit_abort_branch<M: Module>(
 
     bcx.switch_to_block(abort_b);
     let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt(bcx, sym, &[aid])?;
-    jump_zero_return(bcx, frame);
+    c.call_rt_void(bcx, sym, &[aid])?;
+    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
     bcx.switch_to_block(ok_b);
     Ok(())
@@ -462,13 +424,9 @@ pub(crate) fn emit_divrem_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &Frame,
-    l: Value,
-    r: Value,
-    signed: bool,
-    bits: u32,
-    span: Span,
-    remainder: bool,
+    input: (Value, Value, bool, u32, Span, bool),
 ) -> AliasResult<Value> {
+    let (l, r, signed, bits, span, remainder) = input;
     let wt = ir_type_bits(bits);
     let zero = bcx.ins().iconst(wt, 0);
     let by_zero = bcx.ins().icmp(IntCC::Equal, r, zero);
@@ -500,7 +458,7 @@ pub(crate) fn emit_divrem_guard<M: Module>(
 pub(crate) fn emit_index_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
+    _frame: &Frame,
     idx32: Value,
     len32: Value,
     span: Span,
@@ -521,8 +479,8 @@ pub(crate) fn emit_index_guard<M: Module>(
 
     bcx.switch_to_block(abort_b);
     let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt(bcx, "alias.abort_oob", &[aid])?;
-    jump_zero_return(bcx, frame);
+    c.call_rt_void(bcx, "alias.abort_oob", &[aid])?;
+    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
     bcx.switch_to_block(ok_b);
     Ok(())

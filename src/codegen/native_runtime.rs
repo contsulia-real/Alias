@@ -32,22 +32,19 @@ macro_rules! shim {
         $bcx.switch_to_block(__entry);
         $bcx.seal_block(__entry);
         let $a: Vec<Value> = $bcx.block_params(__entry).to_vec();
-        #[allow(unused_variables)]
+        let _ = &$a;
         let __terminated: bool = $body;
         if !__terminated {
-            match __ret {
-                Some(t) => {
-                    let z = $bcx.ins().iconst(t, 0);
-                    $bcx.ins().return_(&[z]);
-                }
-                None => {
-                    $bcx.ins().return_(&[]);
-                }
+            if __ret.is_some() {
+                return Err(native_err(
+                    Span::default(),
+                    format!("内部: 有返回值 runtime shim '{}' 未终止", $name),
+                ));
             }
+            $bcx.ins().return_(&[]);
         }
-        $c.module
-            .define_function(__fid, &mut __ctx)
-            .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))?;
+        $bcx.finalize($c.module.target_config());
+        $c.define_verified_function(__fid, &mut __ctx, &format!("runtime shim '{}'", $name))?;
     }};
 }
 

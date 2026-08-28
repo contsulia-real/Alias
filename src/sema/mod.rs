@@ -7,13 +7,30 @@ mod stmts;
 pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
-use crate::sema::hir::{BindingId, ExprInfo, MethodId};
+use crate::sema::hir::{BindingId, BuiltinCall, MethodId, MethodTarget};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use types::{FloatW, IntW, Ty, UIntW};
+
+/// 只在 sema 检查阶段存在；lowering 会把 target 固化到具体 HIR 节点并消除此状态。
+pub(crate) struct LowerExprInfo {
+    pub(crate) ty: Ty,
+    pub(crate) call_target: Option<LowerCallTarget>,
+    pub(crate) implicit_zero_callee: Option<Ty>,
+}
+
+/// 只允许存在于 sema 检查与 HIR lowering 之间；最终 HIR 按节点种类拆开调用目标。
+#[derive(Clone, PartialEq)]
+pub(crate) enum LowerCallTarget {
+    FunctionValue,
+    StructConstructor(String),
+    ResultConstructor(crate::ast::CtorKind),
+    Builtin(BuiltinCall),
+    Method(MethodTarget),
+}
 
 #[derive(Clone)]
 struct VarInfo {
@@ -36,14 +53,30 @@ pub(crate) struct StructInfo {
 }
 
 #[derive(Clone)]
-struct MethodInfo {
-    /// 只有用户方法携带稳定 MethodId；内建方法由专用 MethodTarget 表示。
-    id: Option<MethodId>,
-    params: Vec<Ty>,
-    ret: Ty,
-    #[allow(dead_code)]
-    is_pub: bool,
-    builtin: bool,
+enum MethodInfo {
+    Builtin {
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    User {
+        id: MethodId,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+}
+
+impl MethodInfo {
+    fn params(&self) -> &[Ty] {
+        match self {
+            Self::Builtin { params, .. } | Self::User { params, .. } => params,
+        }
+    }
+
+    fn ret(&self) -> &Ty {
+        match self {
+            Self::Builtin { ret, .. } | Self::User { ret, .. } => ret,
+        }
+    }
 }
 
 struct Scope {
@@ -79,6 +112,10 @@ impl Scope {
         None
     }
 
+    fn get_here(env: &Env, name: &str) -> Option<VarInfo> {
+        env.entries.borrow().get(name).cloned()
+    }
+
     fn insert(env: &Env, name: String, info: VarInfo) {
         env.entries.borrow_mut().insert(name, info);
     }
@@ -95,7 +132,7 @@ struct Checker {
     next_binding_id: u32,
     next_method_id: u32,
 
-    expr_facts: HashMap<usize, ExprInfo>,
+    expr_facts: HashMap<usize, LowerExprInfo>,
     binding_types: HashMap<usize, Ty>,
     binding_ids: HashMap<usize, BindingId>,
     receiver_types: HashMap<usize, Ty>,
@@ -180,6 +217,12 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                 } else {
                     if b.kind == BindKind::Func {
                         if let Expr::FuncLit { params, .. } = &b.value {
+                            if Scope::get_here(&top, &b.name).is_some() {
+                                return Err(AliasError {
+                                    msg: format!("同一顶层作用域不能重复声明绑定 '{}'", b.name),
+                                    span: b.span,
+                                });
+                            }
                             let ret = types::check_return_type_slot(&b.ty, b.span, &ck.structs)?;
                             let mut ptys = Vec::with_capacity(params.len());
                             for p in params {
@@ -210,7 +253,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
             Item::StructDef(sd) => ck.struct_def(sd, &top)?,
         }
     }
-    let _main_id = ck.validate_main()?;
+    let main_id = ck.validate_main()?;
     hir::lower(
         program,
         hir::LowerFacts {
@@ -230,7 +273,9 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
             assign_target_ids: ck.assign_target_ids,
             match_binding_ids: ck.match_binding_ids,
             expr_binding_ids: ck.expr_binding_ids,
+            ctor_arg_indices: ck.ctor_arg_indices,
         },
+        main_id,
     )
 }
 
@@ -245,16 +290,7 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
     ];
     let mut strings = HashMap::new();
     for (name, params, ret) in string_seed {
-        strings.insert(
-            name.to_string(),
-            MethodInfo {
-                id: None,
-                params,
-                ret,
-                is_pub: true,
-                builtin: true,
-            },
-        );
+        strings.insert(name.to_string(), MethodInfo::Builtin { params, ret });
     }
     methods.insert("string".to_string(), strings);
 
@@ -275,12 +311,9 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
         for name in ["plus", "minus", "times", "div"] {
             table.insert(
                 name.to_string(),
-                MethodInfo {
-                    id: None,
+                MethodInfo::Builtin {
                     params: vec![ty.clone()],
                     ret: ty.clone(),
-                    is_pub: true,
-                    builtin: true,
                 },
             );
         }
@@ -288,12 +321,9 @@ fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
 
     methods.entry("bool".into()).or_default().insert(
         "not".into(),
-        MethodInfo {
-            id: None,
+        MethodInfo::Builtin {
             params: vec![],
             ret: Ty::Bool,
-            is_pub: true,
-            builtin: true,
         },
     );
     methods

@@ -1,3 +1,5 @@
+use super::expr::{emit_expr, emit_expr_expected};
+use super::ops::is_contextual_conversion;
 use super::*;
 
 pub(crate) fn emit_str<M: Module>(
@@ -14,7 +16,8 @@ pub(crate) fn emit_str<M: Module>(
         let piece = match p {
             StrPart::Lit(s) => str_literal_handle(c, bcx, s)?,
             StrPart::Hole(h) => {
-                if matches!(h.as_ref(), Expr::Call { info, .. } if is_contextual_conversion(info)) {
+                if matches!(h.as_ref(), Expr::Call { target, .. } if is_contextual_conversion(target))
+                {
                     emit_expr_expected(c, bcx, frame, h, &VTy::Str)?
                 } else {
                     let w = emit_expr(c, bcx, frame, h)?;
@@ -49,7 +52,7 @@ pub(crate) fn str_literal_handle<M: Module>(
             id
         }
     };
-    let gv = c.module.declare_data_in_func(data_id, &mut bcx.func);
+    let gv = c.module.declare_data_in_func(data_id, bcx.func);
     let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
     let len = bcx.ins().iconst(types::I32, s.len() as i64);
     c.call_rt(bcx, "alias.str.new", &[addr, len])

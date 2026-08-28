@@ -1,7 +1,7 @@
 use alias::{run, AliasError};
 
 fn fail(src: &str) -> AliasError {
-    run("typeof-law.as", src).expect_err("该程序应在编译期失败")
+    run(src).expect_err("该程序应在编译期失败")
 }
 
 #[test]
@@ -22,7 +22,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("typeof-forms.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
@@ -34,7 +34,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run("typeof-no-eval.as", src).unwrap(), 0);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]

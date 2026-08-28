@@ -11,7 +11,7 @@ func i32 main = () -> {
     return (first ? plus_one : plus_two)(20) + (second ? plus_one : plus_two)(20)
 }
 "#;
-    assert_eq!(run("ternary-function-value.as", src).unwrap(), 43);
+    assert_eq!(run(src).unwrap(), 43);
 }
 
 #[test]
@@ -27,7 +27,7 @@ func i32 main = () -> {
     })(40)
 }
 "#;
-    assert_eq!(run("match-function-value.as", src).unwrap(), 42);
+    assert_eq!(run(src).unwrap(), 42);
 }
 
 #[test]
@@ -37,5 +37,5 @@ func i32 main = () -> {
     return ((i32 value) -> return value + 1)(41)
 }
 "#;
-    assert_eq!(run("literal-function-value.as", src).unwrap(), 42);
+    assert_eq!(run(src).unwrap(), 42);
 }

@@ -1,5 +1,7 @@
 use super::*;
 
+const SPAN_RECORD_BYTES: i64 = 8;
+
 pub(crate) fn define_span_data<M: Module>(
     c: &mut Compiler<'_, M>,
     table: &[(u32, u32)],
@@ -8,7 +10,7 @@ pub(crate) fn define_span_data<M: Module>(
         .module
         .declare_data("alias_span_table", Linkage::Local, false, false)
         .map_err(|e| native_err(Span::default(), format!("内部: span 段声明失败 {e}")))?;
-    let mut bytes = Vec::with_capacity(table.len() * 8);
+    let mut bytes = Vec::with_capacity(table.len() * SPAN_RECORD_BYTES as usize);
     for (line, col) in table {
         bytes.extend_from_slice(&line.to_le_bytes());
         bytes.extend_from_slice(&col.to_le_bytes());
@@ -27,7 +29,6 @@ fn emit_span_abort<M: Module>(
     span_data: cranelift_module::DataId,
     static_ids: &HashMap<&str, cranelift_module::DataId>,
     suffix: &str,
-    suffix_len: i64,
 ) -> AliasResult<()> {
     let (fid, sig, _) = declare_runtime_shim(c, name)?;
     let mut ctx = Context::new();
@@ -41,11 +42,11 @@ fn emit_span_abort<M: Module>(
     let a: Vec<Value> = bcx.block_params(entry).to_vec();
 
     let base = {
-        let gv = c.module.declare_data_in_func(span_data, &mut bcx.func);
+        let gv = c.module.declare_data_in_func(span_data, bcx.func);
         bcx.ins().symbol_value(c.ptr_ty, gv)
     };
     let id64 = bcx.ins().uextend(types::I64, a[0]);
-    let off = bcx.ins().imul_imm_s(id64, 8);
+    let off = bcx.ins().imul_imm_s(id64, SPAN_RECORD_BYTES);
     let laddr = bcx.ins().iadd(base, off);
     let line = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 0);
     let col = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 4);
@@ -78,28 +79,32 @@ fn emit_span_abort<M: Module>(
     }
     let err_args = [bcx.ins().iconst(types::I32, -12)];
     let err = {
-        let r = c
-            .module
-            .declare_func_in_func(ext.get_std_handle, &mut bcx.func);
+        let r = c.module.declare_func_in_func(ext.get_std_handle, bcx.func);
         let inst = bcx.ins().call(r, &err_args);
         first_result(&bcx, inst)
     };
-    w_str!(bcx, err, "rt_msg_prefix", 9);
+    w_str!(
+        bcx,
+        err,
+        "rt_msg_prefix",
+        super::driver::runtime_static_len("rt_msg_prefix")
+    );
     w_dec!(bcx, err, line);
-    w_str!(bcx, err, "rt_colon", 1);
+    w_str!(
+        bcx,
+        err,
+        "rt_colon",
+        super::driver::runtime_static_len("rt_colon")
+    );
     w_dec!(bcx, err, col);
-    w_str!(bcx, err, suffix, suffix_len);
+    w_str!(bcx, err, suffix, super::driver::runtime_static_len(suffix));
     let code1 = bcx.ins().iconst(types::I32, 1);
-    let ep = c
-        .module
-        .declare_func_in_func(ext.exit_process, &mut bcx.func);
+    let ep = c.module.declare_func_in_func(ext.exit_process, bcx.func);
     bcx.ins().call(ep, &[code1]);
     bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
     bcx.finalize(c.module.target_config());
-    c.module
-        .define_function(fid, &mut ctx)
-        .map_err(|e| native_err(Span::default(), format!("内部: shim 定义失败 {e}")))
+    c.define_verified_function(fid, &mut ctx, name)
 }
 
 pub(super) fn emit_abort_runtime<M: Module>(
@@ -108,14 +113,15 @@ pub(super) fn emit_abort_runtime<M: Module>(
     span_data: cranelift_module::DataId,
     static_ids: &HashMap<&str, cranelift_module::DataId>,
 ) -> AliasResult<()> {
-    for (symbol, suffix, len) in [
-        ("alias.abort_div", "rt_msg_suffix", 15i64),
-        ("alias.abort_oob", "rt_oob_suffix", 18),
-        ("alias.abort_pop", "rt_pop_suffix", 19),
-        ("alias.abort_conv", "rt_conv_suffix", 18),
-        ("alias.abort_overflow", "rt_overflow_suffix", 18),
+    for (symbol, suffix) in [
+        ("alias.abort_div", "rt_msg_suffix"),
+        ("alias.abort_oob", "rt_oob_suffix"),
+        ("alias.abort_pop", "rt_pop_suffix"),
+        ("alias.abort_conv", "rt_conv_suffix"),
+        ("alias.abort_overflow", "rt_overflow_suffix"),
+        ("alias.abort_iter", "rt_iter_suffix"),
     ] {
-        emit_span_abort(c, symbol, ext, span_data, static_ids, suffix, len)?;
+        emit_span_abort(c, symbol, ext, span_data, static_ids, suffix)?;
     }
     Ok(())
 }

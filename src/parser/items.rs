@@ -1,33 +1,27 @@
 //! parser::items — 顶层项解析。
 //!
 //! 拥有: 程序结构循环 ([`Parser::parse_program`])、struct 定义
-//! (字段即实例内绑定)、import 解析 (Phase 1 暂存不执行)。
+//! (字段即实例内绑定)。
 //! 绑定项 (含 pub? func 扩展方法定义) 委托 stmts::parse_binding。
 
 use super::Parser;
-use crate::ast::{Import, Item, Program, StructDef, StructField};
-use crate::lexer::{StrPart, Tok};
+use crate::ast::{Item, Program, StructDef, StructField};
+use crate::lexer::Tok;
 use crate::AliasResult;
 
 impl Parser {
     // ---------- 程序结构 ----------
 
     pub(super) fn parse_program(&mut self) -> AliasResult<Program> {
-        let mut imports = Vec::new();
         let mut items = Vec::new();
         self.skip_newlines();
         while self.peek().is_some() {
             match self.peek() {
-                // import { a.b, c } from 'xxx' — Phase 1 暂存不执行
-                Some(Tok::Ident(n)) if n == "import" => {
-                    imports.push(self.parse_import()?);
-                    self.end_stmt();
-                }
                 Some(Tok::Pub) | Some(Tok::Val) | Some(Tok::Var) | Some(Tok::Func) => {
                     items.push(Item::Binding(self.parse_binding()?));
                     self.end_stmt();
                 }
-                // struct 定义 (Phase 2a) — 与绑定同属顶层项
+                // struct 定义与绑定同属顶层项。
                 Some(Tok::Struct) => {
                     items.push(self.parse_struct_def()?);
                     self.end_stmt();
@@ -41,10 +35,10 @@ impl Parser {
             }
             self.skip_newlines();
         }
-        Ok(Program { imports, items })
+        Ok(Program { items })
     }
 
-    // ---------- struct 定义 (Phase 2a): 字段即实例内绑定 ----------
+    // ---------- struct 定义：字段即实例内绑定 ----------
 
     /// struct <名字> { (val|var) <类型> <名字> (= 表达式)? ... }
     fn parse_struct_def(&mut self) -> AliasResult<Item> {
@@ -93,51 +87,6 @@ impl Parser {
             mutable,
             ty,
             default,
-            span,
-        })
-    }
-
-    fn parse_import(&mut self) -> AliasResult<Import> {
-        let span = self.span();
-        self.bump();
-        self.expect(&Tok::LBrace)?;
-        let mut names = Vec::new();
-        loop {
-            let mut name = self.expect_ident()?;
-            while self.peek() == Some(&Tok::Dot) {
-                self.bump();
-                name.push('.');
-                name.push_str(&self.expect_ident()?);
-            }
-            names.push(name);
-            if !self.eat(&Tok::Comma) {
-                break;
-            }
-        }
-        self.expect(&Tok::RBrace)?;
-        match self.peek().cloned() {
-            Some(Tok::Ident(n)) if n == "from" => {
-                self.bump();
-            }
-            other => return Err(self.err_here(format!("期望 from, 实际 {:?}", other))),
-        }
-        let path = match self.peek().cloned() {
-            Some(Tok::Str(parts)) => {
-                self.bump();
-                parts
-                    .into_iter()
-                    .map(|p| match p {
-                        StrPart::Lit(s) => s,
-                        StrPart::Hole(_) => String::new(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            }
-            other => return Err(self.err_here(format!("期望模块路径字符串, 实际 {:?}", other))),
-        };
-        Ok(Import {
-            names,
-            from: path,
             span,
         })
     }
