@@ -120,6 +120,44 @@ func i32 main = () -> {
 }
 
 #[test]
+fn resolved_hir_rejects_builtin_method_target_for_wrong_receiver() {
+    let source = "func i32 main = () -> return 'abc'.len()\n";
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let mut checked = crate::sema::check(program).unwrap();
+    let main = checked
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "main" => Some(binding),
+            _ => None,
+        })
+        .expect("main binding");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main value must be function literal")
+    };
+    let Body::Single(stmt) = body.as_mut() else {
+        panic!("fixture main must use single-statement body")
+    };
+    let Stmt::Return {
+        value: Some(Expr::MethodCall { target, .. }),
+    } = stmt.as_mut()
+    else {
+        panic!("fixture must return a builtin method call")
+    };
+    assert_eq!(*target, MethodTarget::StringLen);
+    *target = MethodTarget::ArrayLen;
+
+    let error = super::validate::validate_resolved_hir(&checked)
+        .expect_err("builtin target for the wrong receiver must fail the final HIR gate");
+    assert!(
+        error.msg.contains("内建方法 target 与接收者静态类型不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
 fn resolved_hir_rejects_corrupt_constructor_field_index() {
     let source = r#"
 struct point { val i32 x = 7 }
