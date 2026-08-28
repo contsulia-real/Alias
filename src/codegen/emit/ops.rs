@@ -1,26 +1,13 @@
 use super::strings::{call_str_cmp, display_typed};
-use super::*;
-
-pub(crate) fn is_contextual_conversion(target: &CallTarget) -> bool {
-    matches!(
-        target,
-        CallTarget::Builtin(BuiltinCall::From | BuiltinCall::TryFrom)
-    )
-}
-
-pub(crate) fn conversion_exists_vty(source: &VTy, target: &VTy) -> bool {
-    (source.is_numeric() && target.is_numeric())
-        || (matches!(target, VTy::Str) && !matches!(source, VTy::Unknown | VTy::Unit))
-}
-
-pub(crate) fn binary_vty_flows_expected(op: BinOp, expected: &VTy) -> bool {
-    use BinOp::*;
-    match op {
-        Add | Sub | Mul | Div => expected.is_numeric(),
-        Rem | Shl | Shr | BitAnd | BitXor | BitOr => matches!(expected, VTy::I(_) | VTy::U(_)),
-        Lt | Le | Gt | Ge | EqEq | NotEq | And | Or => false,
-    }
-}
+use crate::codegen::abi::{cl_type, ir_type_bits, VTy};
+use crate::codegen::{invariant_violation, Compiler, Frame};
+use crate::sema::hir::{BinOp, Expr};
+use crate::sema::types::FloatW;
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, TrapCode, Value};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::Module;
 
 pub(crate) fn emit_binary<M: Module>(
     c: &mut Compiler<M>,
