@@ -25,7 +25,7 @@ pub(super) fn lower(
     // must run after capture population. Validating before this mutation would certify an object
     // different from the one codegen actually consumes.
     super::capture::populate_captures(&mut checked);
-    super::validate::validate_resolved_hir(&checked)?;
+    super::validate_resolved_hir(&checked)?;
     Ok(checked)
 }
 
@@ -185,7 +185,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
             )?,
             value: lower_expr(value, facts)?,
         },
-        crate::ast::Stmt::Expr { expr, .. } => Stmt::Expr {
+        crate::ast::Stmt::Expr { expr } => Stmt::Expr {
             expr: lower_expr(expr, facts)?,
         },
         crate::ast::Stmt::Return { value, .. } => Stmt::Return {
@@ -197,7 +197,6 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
         crate::ast::Stmt::If {
             branches,
             else_body,
-            ..
         } => Stmt::If {
             branches: branches
                 .iter()
@@ -227,12 +226,14 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 .collect::<AliasResult<Vec<_>>>()?,
         },
         crate::ast::Stmt::For {
-            iterable,
-            body,
-            span,
-            ..
+            iterable, body, span, ..
         } => Stmt::For {
-            binding_id: take_required(&mut facts.for_ids, key, *span, "for BindingId")?,
+            binding_id: take_required(
+                &mut facts.for_ids,
+                key,
+                *span,
+                "for 循环变量 BindingId",
+            )?,
             ty: facts.fors.remove(&key).ok_or_else(|| AliasError {
                 msg: "内部 sema 不变式被破坏: for 循环变量缺少静态类型".into(),
                 span: *span,
@@ -250,51 +251,15 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
 }
 
 fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Expr> {
+    // Pointer keys are a phase-local identity, not a persistent node ID. check() records facts
+    // against this exact Program allocation and immediately hands the same Program to lower();
+    // moving/cloning/replacing any AST node in between would make every lookup below stale.
+    // Any future AST rewrite phase must introduce stable NodeId first rather than adding fallbacks.
     let key = expr as *const crate::ast::Expr as usize;
-    let Some(mut lower_info) = facts.exprs.remove(&key) else {
-        return Err(AliasError {
-            msg: "内部 sema 不变式被破坏: 表达式缺少静态类型".into(),
-            span: expr.span(),
-        });
-    };
-
-    if let Some(callee_ty) = lower_info.implicit_zero_callee.take() {
-        if lower_info.call_target != Some(LowerCallTarget::FunctionValue) {
-            return Err(AliasError {
-                msg: "内部 sema 不变式被破坏: 零参裸名调用缺少函数调用目标".into(),
-                span: expr.span(),
-            });
-        }
-        let callee_info = ExprInfo { ty: callee_ty };
-        let callee = match expr {
-            crate::ast::Expr::Ident(name, span) => Expr::Ident(
-                name.clone(),
-                Some(take_required(
-                    &mut facts.expr_binding_ids,
-                    key,
-                    *span,
-                    "零参函数 callee BindingId",
-                )?),
-                *span,
-                callee_info,
-            ),
-            crate::ast::Expr::This(span) => Expr::This(*span, callee_info),
-            _ => {
-                return Err(AliasError {
-                    msg: "内部 sema 不变式被破坏: 零参隐式调用只允许直接函数引用".into(),
-                    span: expr.span(),
-                })
-            }
-        };
-        return Ok(Expr::Call {
-            callee: Box::new(callee),
-            args: Vec::new(),
-            target: CallTarget::FunctionValue,
-            span: expr.span(),
-            info: ExprInfo { ty: lower_info.ty },
-        });
-    }
-
+    let mut lower_info = facts.exprs.remove(&key).ok_or_else(|| AliasError {
+        msg: "内部 sema 不变式被破坏: 表达式缺少静态类型".into(),
+        span: expr.span(),
+    })?;
     let is_call = matches!(
         expr,
         crate::ast::Expr::Call { .. }
