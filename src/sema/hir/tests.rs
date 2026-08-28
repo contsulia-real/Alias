@@ -1,4 +1,4 @@
-use super::*;
+use super::{ArmBody, Body, CallTarget, Expr, Item, MethodTarget, Stmt, StrPart};
 use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
@@ -186,6 +186,7 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             }
         }
         Expr::Cast { expr, .. }
+        | Expr::Convert { expr, .. }
         | Expr::Neg { expr, .. }
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
@@ -249,6 +250,11 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             }
             stack.push(TestNode::Expr(subject));
         }
-        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Ident(..) | Expr::This(..) => {}
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Ident(..)
+        | Expr::This(..)
+        | Expr::Typeof { .. } => {}
     }
 }
