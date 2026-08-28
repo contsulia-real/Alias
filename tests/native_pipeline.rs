@@ -8,9 +8,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TMP_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+fn next_tmp_seq() -> usize {
+    // 计数器只提供进程内临时路径唯一后缀，不发布任何跨线程状态或 happens-before
+    // 关系；Relaxed 已满足唯一序列需求，使用更强 ordering 会虚构不存在的同步语义。
+    TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 /// 编译源码到临时 exe 并执行, 返回三元组。
 fn build_and_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
-    let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let n = next_tmp_seq();
     let dir = std::env::temp_dir().join(format!(
         "alias_native_build_{}_{n}_{}",
         std::process::id(),
@@ -44,7 +50,7 @@ fn build_and_run(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
 }
 
 fn run_command(src: &str) -> (Vec<u8>, Vec<u8>, i32) {
-    let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let n = next_tmp_seq();
     let dir = std::env::temp_dir().join(format!(
         "alias_native_run_{}_{n}_{}",
         std::process::id(),
@@ -95,7 +101,7 @@ fn nested_closure_program(depth: usize) -> String {
 
 /// 同一原生产物重复执行，专门捕获依赖地址/时序的间歇性崩溃。
 fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32)> {
-    let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let n = next_tmp_seq();
     let dir = std::env::temp_dir().join(format!("alias_native_repeat_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("创建临时目录失败");
     let src_path = dir.join("prog.as");
@@ -126,7 +132,7 @@ fn build_once_and_run_many(src: &str, runs: usize) -> Vec<(Vec<u8>, Vec<u8>, i32
 /// 在链接阶段失败；若未来有人塞回进程内执行捷径，本测试会立即暴露。
 #[test]
 fn run_requires_the_native_link_step() {
-    let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let n = next_tmp_seq();
     let dir =
         std::env::temp_dir().join(format!("alias_native_link_gate_{}_{n}", std::process::id()));
     std::fs::create_dir(&dir).expect("创建临时目录失败");
@@ -280,7 +286,7 @@ fn run_matches_build_artifact_for_deep_transitive_closure_chain() {
 
 #[test]
 fn run_and_build_demo_corpus_match() {
-    // demos/ 只保留当前语言可运行语料；机械枚举并逐字节比较两条 CLI 工作流。
+    // demo 名单由目录本身拥有；这里机械枚举全部 .as，避免第二份白名单随语料增长漂移。
     let entries = std::fs::read_dir("demos").expect("枚举 demos 失败");
     let mut runnable = 0;
     for e in entries.filter_map(|e| e.ok()) {
@@ -288,21 +294,14 @@ fn run_and_build_demo_corpus_match() {
         if path.extension().map(|x| x != "as").unwrap_or(true) {
             continue;
         }
+        runnable += 1;
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        if name == "count_to_ten.as"
-            || name == "hello_native.as"
-            || name == "structs.as"
-            || name == "result_match.as"
-            || name == "methods.as"
-            || name == "arrays.as"
-        {
-            runnable += 1;
-            let src = std::fs::read_to_string(&path).unwrap();
-            let run = run_command(&src);
-            let built = build_and_run(&src);
-            assert_eq!(built.0, run.0, "{name} stdout 不一致");
-            assert_eq!(built.2, run.2, "{name} exit 不一致");
-        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        let run = run_command(&src);
+        let built = build_and_run(&src);
+        assert_eq!(built.0, run.0, "{name} stdout 不一致");
+        assert_eq!(built.1, run.1, "{name} stderr 不一致");
+        assert_eq!(built.2, run.2, "{name} exit 不一致");
     }
     assert!(runnable >= 2, "可运行 demo 数量异常: {runnable}");
 }
