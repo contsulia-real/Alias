@@ -4,8 +4,7 @@
 //   (值产出臂 + never 流臂) / ? 同型错误传播 (含穿透循环) /
 //   字符串转义 \t \n \' \" \\ \0 / <ok>·<err> 显示
 //
-// 【边界】无 if 分支 — while 单轮即守卫 (既有惯例);
-//   错误换型 (io_error→string 类) 手写 match, ? 只管同型传播 (P6)
+// 【边界】错误换型需手写 match；? 只传播与所在函数同型的 result 错误。
 // ============================================================
 
 struct stat {
@@ -42,7 +41,7 @@ func result<stat, string> mk_stat = (i32 ln, i32 by) -> {
     return ok(stat(lines = ln, bytes = by))
 }
 
-// never 流臂: 两臂皆 return 收尾 — 全函数无落空路径 (Q③ 终结性扩展)
+// never 流臂: 两臂皆 return 收尾，因此函数没有可达落空路径。
 func i32 never_arm_demo = () -> {
     match inv100(0) {
         ok(v) -> {
