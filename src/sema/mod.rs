@@ -7,7 +7,10 @@ mod stmts;
 pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
-use crate::sema::hir::{BindingId, BuiltinCall, MethodId, MethodTarget};
+use crate::builtins::is_reserved_lexical_name;
+use crate::sema::hir::{
+    BindingId, BuiltinCall, MethodId, MethodTarget, ResolvedConversion,
+};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -29,6 +32,8 @@ pub(crate) enum LowerCallTarget {
     StructConstructor(String),
     ResultConstructor(crate::ast::CtorKind),
     Builtin(BuiltinCall),
+    Typeof,
+    ContextualConversion(ResolvedConversion),
     Method(MethodTarget),
 }
 
@@ -57,6 +62,7 @@ enum MethodInfo {
     Builtin {
         params: Vec<Ty>,
         ret: Ty,
+        target: MethodTarget,
     },
     User {
         id: MethodId,
@@ -76,6 +82,67 @@ impl MethodInfo {
         match self {
             Self::Builtin { ret, .. } | Self::User { ret, .. } => ret,
         }
+    }
+
+    fn target(&self, receiver: &Ty) -> Option<MethodTarget> {
+        match self {
+            Self::Builtin { target, .. } => Some(target.clone()),
+            Self::User { id, .. } => Some(MethodTarget::User {
+                receiver: receiver.clone(),
+                id: *id,
+            }),
+        }
+    }
+}
+
+fn builtin_method(receiver: &Ty, name: &str) -> Option<MethodInfo> {
+    let (params, ret, target) = match receiver {
+        ty if ty.is_numeric() => {
+            let op = match name {
+                "plus" => BinOp::Add,
+                "minus" => BinOp::Sub,
+                "times" => BinOp::Mul,
+                "div" => BinOp::Div,
+                _ => return None,
+            };
+            (vec![ty.clone()], ty.clone(), MethodTarget::Numeric(op))
+        }
+        Ty::Bool if name == "not" => (vec![], Ty::Bool, MethodTarget::BoolNot),
+        Ty::Str => match name {
+            "len" => (vec![], Ty::Int(IntW::W32), MethodTarget::StringLen),
+            "upper" => (vec![], Ty::Str, MethodTarget::StringUpper),
+            "lower" => (vec![], Ty::Str, MethodTarget::StringLower),
+            "trim" => (vec![], Ty::Str, MethodTarget::StringTrim),
+            _ => return None,
+        },
+        Ty::Array(elem) => match name {
+            "len" => (vec![], Ty::Int(IntW::W32), MethodTarget::ArrayLen),
+            "push" => (vec![(**elem).clone()], Ty::Unit, MethodTarget::ArrayPush),
+            "pop" => (vec![], (**elem).clone(), MethodTarget::ArrayPop),
+            "iterator" => (
+                vec![],
+                Ty::Iterator(elem.clone()),
+                MethodTarget::ArrayIterator,
+            ),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(MethodInfo::Builtin {
+        params,
+        ret,
+        target,
+    })
+}
+
+fn ensure_user_lexical_name(name: &str, span: Span) -> AliasResult<()> {
+    if is_reserved_lexical_name(name) {
+        Err(AliasError {
+            msg: format!("预定义名字 '{name}' 不能用于用户声明"),
+            span,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -127,6 +194,7 @@ struct Checker {
     loop_depth: usize,
     main: Option<(BindingId, Ty, Span)>,
     structs: HashMap<String, StructInfo>,
+    /// 这里只保存用户方法。内建方法由 builtin_method() 这一 owner 按接收者类型解析。
     methods: HashMap<String, HashMap<String, MethodInfo>>,
 
     next_binding_id: u32,
@@ -171,6 +239,9 @@ impl Checker {
     }
 
     fn binding_id_for(&mut self, binding: &Binding) -> BindingId {
+        // facts 的 identity 只在同一次 check(program) → hir::lower(program) 调用链内有效。
+        // 这段期间 AST 仍由原 Program 持有且不得 move/clone-replace 节点；lower 会用同一
+        // 地址消费 fact。若未来在两阶段之间加入 AST 重写，必须先改成稳定 NodeId。
         let key = binding as *const Binding as usize;
         if let Some(id) = self.binding_ids.get(&key) {
             return *id;
@@ -187,7 +258,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         loop_depth: 0,
         main: None,
         structs: HashMap::new(),
-        methods: builtin_methods(),
+        methods: HashMap::new(),
         next_binding_id: 0,
         next_method_id: 0,
         expr_facts: HashMap::new(),
@@ -215,6 +286,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                 if b.receiver.is_some() {
                     ck.method_def(b, &top)?;
                 } else {
+                    ensure_user_lexical_name(&b.name, b.span)?;
                     if b.kind == BindKind::Func {
                         if let Expr::FuncLit { params, .. } = &b.value {
                             if Scope::get_here(&top, &b.name).is_some() {
@@ -226,6 +298,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                             let ret = types::check_return_type_slot(&b.ty, b.span, &ck.structs)?;
                             let mut ptys = Vec::with_capacity(params.len());
                             for p in params {
+                                ensure_user_lexical_name(&p.name, p.span)?;
                                 ptys.push(types::check_value_type_slot(
                                     &p.ty,
                                     p.span,
@@ -277,56 +350,6 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         },
         main_id,
     )
-}
-
-fn builtin_methods() -> HashMap<String, HashMap<String, MethodInfo>> {
-    let mut methods: HashMap<String, HashMap<String, MethodInfo>> = HashMap::new();
-
-    let string_seed: [(&str, Vec<Ty>, Ty); 4] = [
-        ("len", vec![], Ty::Int(IntW::W32)),
-        ("upper", vec![], Ty::Str),
-        ("lower", vec![], Ty::Str),
-        ("trim", vec![], Ty::Str),
-    ];
-    let mut strings = HashMap::new();
-    for (name, params, ret) in string_seed {
-        strings.insert(name.to_string(), MethodInfo::Builtin { params, ret });
-    }
-    methods.insert("string".to_string(), strings);
-
-    let numerics = vec![
-        Ty::Int(IntW::W8),
-        Ty::Int(IntW::W16),
-        Ty::Int(IntW::W32),
-        Ty::Int(IntW::W64),
-        Ty::UInt(UIntW::U8),
-        Ty::UInt(UIntW::U16),
-        Ty::UInt(UIntW::U32),
-        Ty::UInt(UIntW::U64),
-        Ty::Float(FloatW::F32),
-        Ty::Float(FloatW::F64),
-    ];
-    for ty in numerics {
-        let table = methods.entry(ty.name()).or_default();
-        for name in ["plus", "minus", "times", "div"] {
-            table.insert(
-                name.to_string(),
-                MethodInfo::Builtin {
-                    params: vec![ty.clone()],
-                    ret: ty.clone(),
-                },
-            );
-        }
-    }
-
-    methods.entry("bool".into()).or_default().insert(
-        "not".into(),
-        MethodInfo::Builtin {
-            params: vec![],
-            ret: Ty::Bool,
-        },
-    );
-    methods
 }
 
 fn op_mismatch(op: BinOp, l: &Ty, r: &Ty, span: Span) -> AliasError {
