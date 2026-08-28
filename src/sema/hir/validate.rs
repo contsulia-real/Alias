@@ -487,6 +487,41 @@ fn validate_user_method_target(
     Ok(())
 }
 
+fn validate_builtin_method_target(
+    expr: &Expr,
+    recv: &Expr,
+    args: &[CallArg],
+    target: &MethodTarget,
+) -> AliasResult<()> {
+    let Some(contract) = crate::sema::builtin_method_by_target(recv.ty(), target) else {
+        return Err(invariant(
+            expr.span(),
+            "内建方法 target 与接收者静态类型不一致",
+        ));
+    };
+    if contract.params().len() != args.len() {
+        return Err(invariant(
+            expr.span(),
+            "内建方法 target 的实参数量与契约不一致",
+        ));
+    }
+    for (arg, param) in args.iter().zip(contract.params()) {
+        if !types_match(param, arg.value.ty()) {
+            return Err(invariant(
+                arg.value.span(),
+                "内建方法 target 的实参类型与契约不一致",
+            ));
+        }
+    }
+    if !types_match(contract.ret(), expr.ty()) {
+        return Err(invariant(
+            expr.span(),
+            "内建方法 target 的结果类型与契约不一致",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_field_index(
     recv: &Expr,
     field_index: usize,
@@ -692,15 +727,16 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::MethodCall {
                         recv, args, target, ..
                     } => {
-                        if let MethodTarget::User { receiver, id } = target {
-                            validate_user_method_target(
+                        match target {
+                            MethodTarget::User { receiver, id } => validate_user_method_target(
                                 expr,
                                 recv,
                                 args,
                                 receiver,
                                 *id,
                                 &user_methods,
-                            )?;
+                            )?,
+                            _ => validate_builtin_method_target(expr, recv, args, target)?,
                         }
                         for arg in args.iter().rev() {
                             stack.push(HirValidationNode::Expr(&arg.value));
