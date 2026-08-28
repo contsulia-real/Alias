@@ -2,13 +2,11 @@
 //!
 //! 语义锚点：
 //! - result<T,E> 内建枚举: ok/err 为类型构造器 (非名字分派函数)
-//! - result 的构造器 Pattern 由 ok/err 穷尽；match 本身已泛化为统一 Pattern AST
+//! - result 的构造器 Pattern 由 ok/err 穷尽；match 使用统一 Pattern AST
 //! - ? 脱糖 = match e { ok(v) -> v, err(e) -> return err(e) } — 仅同型错误
-//! - 全 never 臂 match 等价 return 收尾 (Q③ 终结性扩展)
+//! - 全 never 臂 match 等价 return 收尾，可满足非 unit 函数必返回要求
 //!
 //! 列号语义: token span col = max(可视列-1, 1) (lexer.rs span_here)。
-//!
-//! allow: SIZE_OK — 法律表为纯数据矩阵 (项目先例 sema_laws.rs 同注)。
 
 use alias::{run, AliasError};
 
@@ -68,14 +66,14 @@ fn propagate_through_loop_bubbles_err() {
     assert_eq!(run(src).unwrap(), 0);
 }
 
-/// 结构体载荷: 臂绑定字段读 + var 字段写; 全 never 臂 match 作函数尾 (Q③ 扩展)。
+/// 结构体载荷: 臂绑定字段读 + var 字段写; 全 never 臂 match 作函数尾。
 #[test]
 fn struct_payload_arms_and_never_tail() {
     let src = "struct stat {\n    val i32 lines = 0\n    var i32 bytes\n}\nfunc result<stat, string> mk = (i32 l) -> {\n    while l < 0 {\n        return err('负')\n    }\n    return ok(stat(lines = l, bytes = l * 2))\n}\nfunc i32 main = () -> {\n    match mk(5) {\n        ok(s) -> {\n            s.bytes = s.bytes + 40\n            return s.lines + s.bytes\n        }\n        err(e) -> {\n            println(e)\n            return 1\n        }\n    }\n}\n";
     assert_eq!(run(src).unwrap(), 55);
 }
 
-/// 一般 Pattern 已允许非 result 主语。
+/// 一般 Pattern 允许非 result 主语。
 #[test]
 fn general_match_allows_non_result_subject() {
     let src = "func i32 main = () -> {\n    val i32 v = match 5 {\n        5 -> 42\n        _ -> 0\n    }\n    return v\n}\n";
@@ -185,7 +183,7 @@ fn result_one_param_rejected() {
 
 #[test]
 fn other_generic_still_rejected() {
-    // result/array/iterator 之外的泛型仍按当前规范拒绝。
+    // result/array/iterator 之外的泛型按当前规范拒绝。
     assert_law(
         "func i32 main = () -> {\n    val sender<i32> a = 1\n    return 0\n}\n",
         "泛型类型 sender<i32> 尚未实现",
