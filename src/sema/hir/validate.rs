@@ -18,6 +18,17 @@ struct UserMethodContract {
     ret: Ty,
 }
 
+#[derive(Clone)]
+struct StructFieldContract {
+    ty: Ty,
+    has_default: bool,
+}
+
+#[derive(Clone)]
+struct StructContract {
+    fields: Vec<StructFieldContract>,
+}
+
 fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     AliasError {
         msg: format!("内部 sema 不变式被破坏: {}", msg.into()),
@@ -223,13 +234,25 @@ fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
     ids
 }
 
-fn collect_struct_fields(program: &CheckedProgram) -> AliasResult<HashMap<String, usize>> {
+fn collect_struct_contracts(
+    program: &CheckedProgram,
+) -> AliasResult<HashMap<String, StructContract>> {
     let mut structs = HashMap::new();
     for item in &program.items {
         let Item::StructDef(def) = item else {
             continue;
         };
-        if structs.insert(def.name.clone(), def.fields.len()).is_some() {
+        let contract = StructContract {
+            fields: def
+                .fields
+                .iter()
+                .map(|field| StructFieldContract {
+                    ty: field.ty.clone(),
+                    has_default: field.default.is_some(),
+                })
+                .collect(),
+        };
+        if structs.insert(def.name.clone(), contract).is_some() {
             return Err(invariant(
                 Span::default(),
                 format!("结构体 '{}' 在 HIR 中重复", def.name),
@@ -329,7 +352,7 @@ fn validate_call_target(
     callee: &Expr,
     args: &[CallArg],
     target: &CallTarget,
-    struct_fields: &HashMap<String, usize>,
+    structs: &HashMap<String, StructContract>,
 ) -> AliasResult<()> {
     match target {
         CallTarget::FunctionValue => {
@@ -370,7 +393,7 @@ fn validate_call_target(
                     "结构体构造 target 与表达式结果类型不一致",
                 ));
             }
-            let Some(field_count) = struct_fields.get(name) else {
+            let Some(contract) = structs.get(name) else {
                 return Err(invariant(
                     expr.span(),
                     format!("结构体构造 target 引用未知结构体 '{name}'"),
@@ -383,13 +406,30 @@ fn validate_call_target(
                 ));
             }
             let mut seen = HashSet::new();
-            for index in arg_field_indices {
-                if *index >= *field_count || !seen.insert(*index) {
+            for (arg, index) in args.iter().zip(arg_field_indices) {
+                let Some(field) = contract.fields.get(*index) else {
+                    return Err(invariant(expr.span(), "构造器字段索引越界"));
+                };
+                if !seen.insert(*index) {
+                    return Err(invariant(expr.span(), "构造器字段索引重复"));
+                }
+                if !types_match(&field.ty, arg.value.ty()) {
                     return Err(invariant(
-                        expr.span(),
-                        "构造器字段索引越界或重复",
+                        arg.value.span(),
+                        "构造器实参类型与已解析字段类型不一致",
                     ));
                 }
+            }
+            if contract
+                .fields
+                .iter()
+                .enumerate()
+                .any(|(index, field)| !field.has_default && !seen.contains(&index))
+            {
+                return Err(invariant(
+                    expr.span(),
+                    "结构体构造 target 遗漏无默认值字段",
+                ));
             }
         }
         CallTarget::ResultConstructor(kind) => {
@@ -522,34 +562,35 @@ fn validate_builtin_method_target(
     Ok(())
 }
 
-fn validate_field_index(
+fn resolved_field_ty(
     recv: &Expr,
     field_index: usize,
-    struct_fields: &HashMap<String, usize>,
+    structs: &HashMap<String, StructContract>,
     span: Span,
-) -> AliasResult<()> {
+) -> AliasResult<Ty> {
     let Ty::Struct(name) = recv.ty() else {
         return Err(invariant(span, "字段索引的接收者不是 struct"));
     };
-    let Some(field_count) = struct_fields.get(name) else {
+    let Some(contract) = structs.get(name) else {
         return Err(invariant(
             span,
             format!("字段索引引用未知结构体 '{name}'"),
         ));
     };
-    if field_index >= *field_count {
+    let Some(field) = contract.fields.get(field_index) else {
         return Err(invariant(span, "已解析字段索引越界"));
-    }
-    Ok(())
+    };
+    Ok(field.ty.clone())
 }
 
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
     // The source is untrusted and nesting is bounded but nontrivial; validation uses explicit
     // stacks so the final authority gate itself does not reintroduce host-recursion risk.
-    // This pass is also the last cross-reference gate before codegen: resolved IDs and field
-    // indices are checked against declarations here so the backend never has to rediscover them.
+    // This pass is also the last cross-reference gate before codegen: resolved IDs, method
+    // targets and struct field contracts are checked against declarations here so the backend
+    // never has to rediscover or repair them.
     let known_ids = collect_declared_ids(program);
-    let struct_fields = collect_struct_fields(program)?;
+    let structs = collect_struct_contracts(program)?;
     let user_methods = collect_user_methods(program)?;
     if !known_ids.contains(&program.main_id) {
         return Err(invariant(Span::default(), "main BindingId 不存在"));
@@ -578,6 +619,12 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         return Err(invariant(field.span, "字段类型未确定"));
                     }
                     if let Some(default) = &field.default {
+                        if !types_match(&field.ty, default.ty()) {
+                            return Err(invariant(
+                                default.span(),
+                                "结构体字段默认值类型与声明类型不一致",
+                            ));
+                        }
                         stack.push(HirValidationNode::Expr(default));
                     }
                 }
@@ -630,7 +677,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         target,
                         ..
                     } => {
-                        validate_call_target(expr, callee, args, target, &struct_fields)?;
+                        validate_call_target(expr, callee, args, target, &structs)?;
                         if matches!(target, CallTarget::FunctionValue) {
                             stack.push(HirValidationNode::Expr(callee));
                         }
@@ -746,7 +793,13 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Field {
                         recv, field_index, ..
                     } => {
-                        validate_field_index(recv, *field_index, &struct_fields, expr.span())?;
+                        let field_ty = resolved_field_ty(recv, *field_index, &structs, expr.span())?;
+                        if !types_match(&field_ty, expr.ty()) {
+                            return Err(invariant(
+                                expr.span(),
+                                "字段表达式类型与已解析字段声明不一致",
+                            ));
+                        }
                         stack.push(HirValidationNode::Expr(recv));
                     }
                     Expr::Index { recv, idx, .. } => {
@@ -805,7 +858,13 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     field_index,
                     value,
                 } => {
-                    validate_field_index(recv, *field_index, &struct_fields, value.span())?;
+                    let field_ty = resolved_field_ty(recv, *field_index, &structs, value.span())?;
+                    if !types_match(&field_ty, value.ty()) {
+                        return Err(invariant(
+                            value.span(),
+                            "字段赋值 RHS 类型与已解析字段声明不一致",
+                        ));
+                    }
                     stack.push(HirValidationNode::Expr(value));
                     stack.push(HirValidationNode::Expr(recv));
                 }
