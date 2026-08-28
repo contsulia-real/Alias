@@ -1,4 +1,12 @@
-use super::*;
+use crate::codegen::abi::VALUE_WORD_BYTES;
+use crate::codegen::layout::{
+    ARRAY_CAP_OFFSET, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_RAW_BYTES,
+};
+use crate::codegen::Compiler;
+use crate::AliasResult;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData};
+use cranelift_module::{FuncId, Module};
 
 pub(super) fn emit_array_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
@@ -12,9 +20,12 @@ pub(super) fn emit_array_runtime<M: Module>(
     }
 
     shim!(c, "alias.arr.new", |bcx, a| {
-        let hdr = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 24)]);
+        let hdr = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, ARRAY_RAW_BYTES)]
+        );
         let cap64 = bcx.ins().sextend(types::I64, a[0]);
-        let esz64 = bcx.ins().sextend(types::I64, a[1]);
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, cap64, 0);
         let then_b = bcx.create_block();
         let else_b = bcx.create_block();
@@ -24,32 +35,37 @@ pub(super) fn emit_array_runtime<M: Module>(
         bcx.seal_block(else_b);
         bcx.switch_to_block(then_b);
         {
-            let bytes = bcx.ins().imul(cap64, esz64);
+            let bytes = bcx.ins().imul_imm_s(cap64, VALUE_WORD_BYTES);
             let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
-            bcx.ins().store(MemFlagsData::new(), buf, hdr, 0);
+            bcx.ins()
+                .store(MemFlagsData::new(), buf, hdr, ARRAY_DATA_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(else_b);
         {
             let zero = bcx.ins().iconst(types::I64, 0);
-            bcx.ins().store(MemFlagsData::new(), zero, hdr, 0);
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, hdr, ARRAY_DATA_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(end_b);
         bcx.seal_block(end_b);
         let zero = bcx.ins().iconst(types::I64, 0);
         bcx.ins()
-            .store(MemFlagsData::new(), zero, hdr, value_word_offset(1));
+            .store(MemFlagsData::new(), zero, hdr, ARRAY_LEN_OFFSET);
         bcx.ins()
-            .store(MemFlagsData::new(), cap64, hdr, value_word_offset(2));
+            .store(MemFlagsData::new(), cap64, hdr, ARRAY_CAP_OFFSET);
         bcx.ins().return_(&[hdr]);
         true
     });
 
     shim!(c, "alias.arr.len", |bcx, a| {
-        let l = bcx
-            .ins()
-            .load(types::I64, MemFlagsData::new(), a[0], value_word_offset(1));
+        let l = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            ARRAY_LEN_OFFSET,
+        );
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
         true
@@ -57,13 +73,18 @@ pub(super) fn emit_array_runtime<M: Module>(
 
     shim!(c, "alias.arr.push", |bcx, a| {
         let hdr = a[0];
-        let dp0 = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+        let dp0 = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            hdr,
+            ARRAY_DATA_OFFSET,
+        );
         let len = bcx
             .ins()
-            .load(types::I64, MemFlagsData::new(), hdr, value_word_offset(1));
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_LEN_OFFSET);
         let cap = bcx
             .ins()
-            .load(types::I64, MemFlagsData::new(), hdr, value_word_offset(2));
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_CAP_OFFSET);
         let full = bcx.ins().icmp(IntCC::Equal, len, cap);
         let grow_b = bcx.create_block();
         let ok_b = bcx.create_block();
@@ -93,9 +114,10 @@ pub(super) fn emit_array_runtime<M: Module>(
             bcx.ins().jump(after_copy_b, &[]);
             bcx.switch_to_block(after_copy_b);
             bcx.seal_block(after_copy_b);
-            bcx.ins().store(MemFlagsData::new(), grown, hdr, 0);
             bcx.ins()
-                .store(MemFlagsData::new(), new_cap, hdr, value_word_offset(2));
+                .store(MemFlagsData::new(), grown, hdr, ARRAY_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), new_cap, hdr, ARRAY_CAP_OFFSET);
             bcx.ins().jump(join_b, &[BlockArg::Value(grown)]);
         }
         bcx.switch_to_block(ok_b);
@@ -109,7 +131,7 @@ pub(super) fn emit_array_runtime<M: Module>(
         let one = bcx.ins().iconst(types::I64, 1);
         let len1 = bcx.ins().iadd(len, one);
         bcx.ins()
-            .store(MemFlagsData::new(), len1, hdr, value_word_offset(1));
+            .store(MemFlagsData::new(), len1, hdr, ARRAY_LEN_OFFSET);
         false
     });
 
@@ -117,11 +139,16 @@ pub(super) fn emit_array_runtime<M: Module>(
         let hdr = a[0];
         let len = bcx
             .ins()
-            .load(types::I64, MemFlagsData::new(), hdr, value_word_offset(1));
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_LEN_OFFSET);
         let new_len = bcx.ins().iadd_imm_s(len, -1);
         bcx.ins()
-            .store(MemFlagsData::new(), new_len, hdr, value_word_offset(1));
-        let dp = bcx.ins().load(types::I64, MemFlagsData::new(), hdr, 0);
+            .store(MemFlagsData::new(), new_len, hdr, ARRAY_LEN_OFFSET);
+        let dp = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            hdr,
+            ARRAY_DATA_OFFSET,
+        );
         let slot = bcx.ins().imul_imm_s(new_len, VALUE_WORD_BYTES);
         let addr = bcx.ins().iadd(dp, slot);
         let v = bcx.ins().load(types::I64, MemFlagsData::new(), addr, 0);
