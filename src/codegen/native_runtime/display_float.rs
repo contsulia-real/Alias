@@ -298,6 +298,9 @@ pub(super) fn emit_float_display_shim<M: Module>(
     bcx.seal_block(exp_digits_b);
     let neg_exp = bcx.ins().ineg(final_exp);
     let exp_mag = bcx.ins().select(exp_neg, neg_exp, final_exp);
+    // 这里恰好只需要百/十/个位：有限非零 f64 归一化后的十进制指数范围为
+    // -324..=308（f32 提升后更窄）。若输入域不再受 IEEE-754 f64 约束，必须先
+    // 扩展指数编码，不能让更高位被 hundreds 当成单个十进制字符写出。
     let hundreds = bcx.ins().udiv_imm_u(exp_mag, 100);
     let has_hundreds = bcx.ins().icmp_imm_s(IntCC::NotEqual, hundreds, 0);
     let hundred_b = bcx.create_block();
