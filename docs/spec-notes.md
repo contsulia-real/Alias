@@ -120,6 +120,14 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - 顶层普通 binding 与命名 func 共享名字空间，禁止重名；
 - `main` 必须且只能声明一次。
 
+预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
+
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`；
+- result 构造器：`ok`、`err`；
+- 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
+
+用户定义的 struct 名不属于上述预定义集合：它与顶层 binding/func 冲突，但词法子作用域中的普通 binding、参数或 Pattern 绑定可以 shadow 其 constructor 名；调用解析必须先服从当前 lexical scope，再考虑用户 struct constructor。
+
 当前 `func` 绑定 RHS 必须直接是函数字面量；不能用既有函数值初始化另一个 `func` 绑定。
 
 ### 4.1 返回控制流
@@ -179,7 +187,7 @@ struct User {
 - 未显式提供的字段使用声明默认值；
 - 字段默认值、构造实参和字段赋值均按字段声明类型进行目标检查；
 - 结构体值显示为 `<struct>`；
-- 结构体名与普通顶层绑定处于同一名字空间，局部绑定可遮蔽构造器名字。
+- 结构体名与普通顶层绑定处于同一名字空间，局部 binding/参数/Pattern binding 可遮蔽 constructor 名字。
 
 结构体物理布局由 `codegen/abi.rs` 按字段声明顺序、各自 size/align 和最大对齐计算，不允许其它模块复制偏移规则。
 
