@@ -1,4 +1,13 @@
-use super::*;
+use super::declare_runtime_shim;
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
+use crate::codegen::Compiler;
+use crate::AliasResult;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, Function, InstBuilder, MemFlagsData, UserFuncName};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::Module;
 
 pub(super) fn emit_integer_display_shim<M: Module>(
     c: &mut Compiler<'_, M>,
@@ -84,11 +93,13 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     let start = bcx.ins().iadd(buf, p);
     let c32 = bcx.ins().iconst(types::I64, 32);
     let len = bcx.ins().isub(c32, p);
-    let sz16 = bcx.ins().iconst(types::I64, 16);
-    let blk_call = bcx.ins().call(alloc_ref, &[sz16]);
+    let string_bytes = bcx.ins().iconst(types::I64, STRING_BYTES);
+    let blk_call = bcx.ins().call(alloc_ref, &[string_bytes]);
     let blk = first_result(&bcx, blk_call);
-    bcx.ins().store(MemFlagsData::new(), start, blk, 0);
-    bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+    bcx.ins()
+        .store(MemFlagsData::new(), start, blk, STRING_DATA_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
     bcx.ins().return_(&[blk]);
 
     bcx.finalize(c.module.target_config());
