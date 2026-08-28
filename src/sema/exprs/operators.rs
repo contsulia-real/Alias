@@ -7,54 +7,65 @@ use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
     pub(super) fn binary(&mut self, op: BinOp, l: Ty, r: Ty, span: Span) -> AliasResult<Ty> {
-        use BinOp::*;
-        if l.is_unknown() || r.is_unknown() {
-            return Ok(Ty::Unknown);
-        }
-        if matches!(op, And | Or) {
-            return if l == Ty::Bool && r == Ty::Bool {
-                Ok(Ty::Bool)
-            } else {
-                Err(op_mismatch(op, &l, &r, span))
-            };
-        }
-        let mixed = |span| {
-            if l.is_numeric() && r.is_numeric() && l != r {
-                AliasError {
-                    msg: format!("{} 与 {} 禁止隐式混算", l.name(), r.name()),
-                    span,
-                }
-            } else {
-                op_mismatch(op, &l, &r, span)
-            }
+        binary_result_type(op, &l, &r, span)
+    }
+}
+
+/// 二元运算的唯一静态结果契约。checker 与 resolved-HIR 最终验证共同消费它；
+/// backend 不得复制这套语言规则。
+pub(in crate::sema) fn binary_result_type(
+    op: BinOp,
+    l: &Ty,
+    r: &Ty,
+    span: Span,
+) -> AliasResult<Ty> {
+    use BinOp::*;
+    if l.is_unknown() || r.is_unknown() {
+        return Ok(Ty::Unknown);
+    }
+    if matches!(op, And | Or) {
+        return if *l == Ty::Bool && *r == Ty::Bool {
+            Ok(Ty::Bool)
+        } else {
+            Err(op_mismatch(op, l, r, span))
         };
-        match op {
-            Add | Sub | Mul | Div => match (&l, &r) {
-                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
-                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
-                (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),
-                _ => Err(mixed(span)),
-            },
-            Rem => match (&l, &r) {
-                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
-                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
-                _ => Err(mixed(span)),
-            },
-            Shl | Shr | BitAnd | BitXor | BitOr => match (&l, &r) {
-                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
-                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
-                _ => Err(mixed(span)),
-            },
-            Lt | Le | Gt | Ge | EqEq | NotEq => match (&l, &r) {
-                (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Bool),
-                (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::Bool),
-                (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Bool),
-                (Ty::Str, Ty::Str) => Ok(Ty::Bool),
-                (Ty::Bool, Ty::Bool) if matches!(op, EqEq | NotEq) => Ok(Ty::Bool),
-                _ => Err(mixed(span)),
-            },
-            And | Or => unreachable!(),
+    }
+    let mixed = |span| {
+        if l.is_numeric() && r.is_numeric() && l != r {
+            AliasError {
+                msg: format!("{} 与 {} 禁止隐式混算", l.name(), r.name()),
+                span,
+            }
+        } else {
+            op_mismatch(op, l, r, span)
         }
+    };
+    match op {
+        Add | Sub | Mul | Div => match (l, r) {
+            (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+            (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
+            (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),
+            _ => Err(mixed(span)),
+        },
+        Rem => match (l, r) {
+            (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+            (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
+            _ => Err(mixed(span)),
+        },
+        Shl | Shr | BitAnd | BitXor | BitOr => match (l, r) {
+            (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
+            (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
+            _ => Err(mixed(span)),
+        },
+        Lt | Le | Gt | Ge | EqEq | NotEq => match (l, r) {
+            (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Bool),
+            (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::Bool),
+            (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Bool),
+            (Ty::Str, Ty::Str) => Ok(Ty::Bool),
+            (Ty::Bool, Ty::Bool) if matches!(op, EqEq | NotEq) => Ok(Ty::Bool),
+            _ => Err(mixed(span)),
+        },
+        And | Or => unreachable!(),
     }
 }
 
@@ -105,7 +116,8 @@ pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<ExprChec
     })
 }
 
-pub(super) fn conversion_exists(source: &Ty, target: &Ty) -> bool {
+/// 显式 cast 与 contextual conversion 的唯一可转换关系。
+pub(in crate::sema) fn conversion_exists(source: &Ty, target: &Ty) -> bool {
     (source.is_numeric() && target.is_numeric())
         || (matches!(target, Ty::Str) && !source.is_unknown() && *source != Ty::Unit)
 }
