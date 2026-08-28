@@ -11,6 +11,10 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
 use std::collections::HashMap;
 
+/// Packed runtime diagnostic record: little-endian u32 line followed by u32 column.
+/// Producer and abort shim must share these offsets; changing one side alone corrupts diagnostics.
+const SPAN_LINE_OFFSET: i32 = 0;
+const SPAN_COL_OFFSET: i32 = 4;
 const SPAN_RECORD_BYTES: i64 = 8;
 
 pub(crate) fn define_span_data<M: Module>(
@@ -59,8 +63,12 @@ fn emit_span_abort<M: Module>(
     let id64 = bcx.ins().uextend(types::I64, a[0]);
     let off = bcx.ins().imul_imm_s(id64, SPAN_RECORD_BYTES);
     let laddr = bcx.ins().iadd(base, off);
-    let line = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 0);
-    let col = bcx.ins().load(types::I32, MemFlagsData::new(), laddr, 4);
+    let line = bcx
+        .ins()
+        .load(types::I32, MemFlagsData::new(), laddr, SPAN_LINE_OFFSET);
+    let col = bcx
+        .ins()
+        .load(types::I32, MemFlagsData::new(), laddr, SPAN_COL_OFFSET);
 
     macro_rules! w_str {
         ($bcx:expr, $err:expr, $data:expr, $len:expr) => {{
@@ -112,6 +120,9 @@ fn emit_span_abort<M: Module>(
     let code1 = bcx.ins().iconst(types::I32, 1);
     let ep = c.module.declare_func_in_func(ext.exit_process, bcx.func);
     bcx.ins().call(ep, &[code1]);
+    // ExitProcess is semantically non-returning, but Cranelift does not infer that external
+    // contract. A trap keeps the generated block terminated even if the OS call unexpectedly
+    // returns, so runtime abort can never fall through into user code.
     bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
     bcx.finalize(c.module.target_config());
