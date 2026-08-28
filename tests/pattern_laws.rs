@@ -1,4 +1,4 @@
-//! Pattern AST / match 第一批完整法律测试。
+//! Pattern AST / match 当前法律测试。
 
 use alias::run;
 
