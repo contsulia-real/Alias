@@ -1,4 +1,9 @@
-use super::*;
+use super::{require_value, Checker, Env, ExprCheckResult, Scope, VarInfo};
+use crate::ast::{ArmBody, CtorKind, Expr, MatchArm, Pattern, Stmt};
+use crate::sema::ensure_user_lexical_name;
+use crate::sema::types::{int_literal_fits, types_match, Ty};
+use crate::{AliasError, AliasResult, Span};
+use std::collections::HashSet;
 
 impl Checker {
     pub(super) fn match_expr(
@@ -196,7 +201,9 @@ impl Checker {
     ) -> ExprCheckResult<Option<Ty>> {
         let local = Scope::child(env);
         if let Some((name, bind_ty)) = binding {
+            ensure_user_lexical_name(name, arm.pattern.span())?;
             let id = self.fresh_binding_id();
+            // MatchArm facts use the same transient check→lower AST-address identity.
             self.match_binding_ids
                 .insert(arm as *const MatchArm as usize, id);
             Scope::insert(
