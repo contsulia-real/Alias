@@ -1,4 +1,6 @@
-use super::{ArmBody, Body, CallTarget, Expr, Item, MethodTarget, Stmt, StrPart};
+use super::{
+    ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
+};
 use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
@@ -69,6 +71,52 @@ func i32 main = () -> {
     assert!(saw_field);
     assert!(saw_method);
     assert!(saw_capture);
+}
+
+#[test]
+fn resolved_hir_rejects_unknown_user_method_id() {
+    let source = r#"
+struct point { val i32 x = 7 }
+func i32 point.bump = (i32 amount) -> return self.x + amount
+func i32 main = () -> {
+    val point p = point()
+    return p bump 1
+}
+"#;
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let mut checked = crate::sema::check(program).unwrap();
+    let main = checked
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "main" => Some(binding),
+            _ => None,
+        })
+        .expect("main binding");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main value must be function literal")
+    };
+    let Body::Block(stmts) = body.as_mut() else {
+        panic!("fixture main must use block body")
+    };
+    let target = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Return {
+                value: Some(Expr::MethodCall { target, .. }),
+            } => Some(target),
+            _ => None,
+        })
+        .expect("fixture must contain user method call");
+    let MethodTarget::User { id, .. } = target else {
+        panic!("fixture call must resolve to user method")
+    };
+    *id = MethodId(u32::MAX);
+
+    let error = super::validate::validate_resolved_hir(&checked)
+        .expect_err("unknown MethodId must fail the final HIR gate");
+    assert!(error.msg.contains("未知 MethodId"), "实际: {}", error.msg);
 }
 
 #[test]
