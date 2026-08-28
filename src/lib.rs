@@ -9,6 +9,7 @@ mod limits;
 mod linker;
 mod parser;
 mod sema;
+mod target;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
