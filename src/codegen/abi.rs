@@ -40,14 +40,19 @@ pub(crate) enum WordRepr {
     Direct,
 }
 
+/// 一个静态值跨 Cranelift 表达式、内存/调用边界和通用 word 容器时的物理合同。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValueAbi {
+    /// 后端表达式内部的规范寄存器类型；窄整数统一提升到 I64，减少算术路径分叉。
     pub(crate) register: Type,
+    /// cell/struct field 等真实存储宽度。
     pub(crate) storage: Type,
     pub(crate) storage_bytes: usize,
     pub(crate) align_bytes: usize,
+    /// 用户函数机器签名仍保留声明宽度，不能把内部 I64 规范化泄漏到 ABI。
     pub(crate) param: Type,
     pub(crate) ret: Type,
+    /// 写入 array/result/env 等 64-bit 通用槽时采用的编码。
     pub(crate) word: WordRepr,
 }
 
@@ -95,38 +100,6 @@ impl VTy {
         }
     }
 
-    pub(crate) fn display_name(&self) -> String {
-        match self {
-            VTy::I(w) => match w {
-                IntW::W8 => "i8".into(),
-                IntW::W16 => "i16".into(),
-                IntW::W32 => "i32".into(),
-                IntW::W64 => "i64".into(),
-            },
-            VTy::U(w) => match w {
-                UIntW::U8 => "u8".into(),
-                UIntW::U16 => "u16".into(),
-                UIntW::U32 => "u32".into(),
-                UIntW::U64 => "u64".into(),
-            },
-            VTy::F(w) => match w {
-                FloatW::F32 => "f32".into(),
-                FloatW::F64 => "f64".into(),
-            },
-            VTy::Bool => "bool".into(),
-            VTy::Str => "string".into(),
-            VTy::Unit => "unit".into(),
-            VTy::Func(..) | VTy::FuncPoly => "func".into(),
-            VTy::Struct(s) => s.clone(),
-            VTy::Result(t, e) => {
-                format!("result<{}, {}>", t.display_name(), e.display_name())
-            }
-            VTy::Array(t) => format!("array<{}>", t.display_name()),
-            VTy::Iterator(t) => format!("iterator<{}>", t.display_name()),
-            VTy::Unknown => "未知".into(),
-        }
-    }
-
     pub(crate) fn is_numeric(&self) -> bool {
         matches!(self, VTy::I(_) | VTy::U(_) | VTy::F(_))
     }
@@ -134,6 +107,8 @@ impl VTy {
 
 fn integer_abi(bits: u32, signed: bool) -> ValueAbi {
     let storage = ir_type_bits(bits);
+    // 算术/比较发射统一处理 I64 形式，但 memory 与函数边界必须保持源码声明宽度；
+    // 否则 i8/i16/i32 的布局和 Windows 调用签名会被内部规范化意外扩大。
     ValueAbi {
         register: types::I64,
         storage,
@@ -178,6 +153,8 @@ pub(crate) fn user_signature(
     ret: &VTy,
 ) -> Signature {
     let mut sig = Signature::new(cc);
+    // 所有用户函数统一先接收 globals 与 closure env 两个隐藏 I64 参数；直接函数、
+    // 闭包和方法调用都依赖这一固定前缀，任何一侧自行增删都会造成 call ABI 错位。
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
     sig.params
@@ -265,18 +242,6 @@ pub(crate) fn projected_ty(table: &ProjectionTable, ty: &Ty) -> VTy {
 pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable) -> StructTable {
     let mut table = StructTable::new();
     for item in items {
-        if let Item::StructDef(sd) = item {
-            table.insert(
-                sd.name.clone(),
-                StructLayout {
-                    fields: Vec::new(),
-                    size: 0,
-                    align: 1,
-                },
-            );
-        }
-    }
-    for item in items {
         let Item::StructDef(sd) = item else { continue };
         let mut fields = Vec::with_capacity(sd.fields.len());
         let mut off = 0usize;
@@ -284,6 +249,8 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
         for field in &sd.fields {
             let vty = projected_ty(projections, &field.ty);
             let abi = vty.abi();
+            // 每个字段先对齐自身，再推进实际存储宽度；struct 值本身是引用 word，
+            // 因此无需预注册其它 struct 的 inline layout。
             off = align_to(off, abi.align_bytes);
             max_align = max_align.max(abi.align_bytes);
             fields.push(StructFieldLayout {
@@ -293,6 +260,7 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
             });
             off += abi.storage_bytes;
         }
+        // 尾部 padding 使数组/连续对象中的下一个 struct 仍满足本 struct 最大对齐要求。
         table.insert(
             sd.name.clone(),
             StructLayout {
@@ -307,6 +275,8 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
 
 pub(crate) fn norm_load(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
     let abi = vty.abi();
+    // 从真实 storage 边界进入表达式世界时恢复规范寄存器形式；窄有符号/无符号
+    // 必须分别扩展，否则高位语义会在后续 I64 算术和比较中被破坏。
     if abi.storage == abi.register {
         raw
     } else if matches!(vty, VTy::I(_)) {
@@ -324,6 +294,8 @@ pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> 
     if actual == abi.storage {
         return value;
     }
+    // 写回 cell/field/参数边界前恢复声明宽度；float promotion/demotion 只处理真实
+    // F32/F64 数值，不与通用 word 的 bit encoding 混用。
     match vty {
         VTy::I(_) | VTy::U(_) => bcx.ins().ireduce(abi.storage, value),
         VTy::F(FloatW::F32) if actual == types::F64 => bcx.ins().fdemote(types::F32, value),
@@ -334,6 +306,8 @@ pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> 
 
 pub(crate) fn storage_word(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> Value {
     let abi = vty.abi();
+    // 通用容器永远只有一个 I64 word。整数按符号规范扩展；float 必须保存 IEEE bit
+    // pattern，而不是执行数值转换，否则 result/array/env 往返后值会改变。
     match abi.word {
         WordRepr::F32Bits => {
             let bits = bcx.ins().bitcast(types::I32, MemFlagsData::new(), value);
@@ -353,6 +327,8 @@ pub(crate) fn storage_word(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -
 }
 
 pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
+    // 整数 word 在 storage_word 时已经规范扩展，可直接作为表达式 I64；只有 float
+    // 需要把保存的 bit pattern 重解释回真实浮点寄存器类型。
     match vty.abi().word {
         WordRepr::F32Bits => {
             let bits = bcx.ins().ireduce(types::I32, raw);
@@ -365,6 +341,8 @@ pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> 
 
 pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, elem_vty: &VTy) {
     let abi = elem_vty.abi();
+    // array backing store 按元素真实 storage 宽度写入，而 array runtime 的槽步长仍由
+    // VALUE_WORD_BYTES 管理；因此写入前必须把通用 word 恢复成元素 storage 表示。
     let value = match abi.word {
         WordRepr::F32Bits => {
             let bits = bcx.ins().ireduce(types::I32, word);
@@ -381,7 +359,11 @@ pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, el
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
+        ProjectionTable, VTy,
+    };
+    use crate::sema::types::{FloatW, IntW, Ty, UIntW};
 
     #[test]
     fn primitive_abi_matrix_is_complete_and_consistent() {
