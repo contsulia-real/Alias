@@ -1,6 +1,12 @@
-use super::expr::{emit_expr, emit_expr_expected};
-use super::ops::is_contextual_conversion;
-use super::*;
+use super::expr::emit_expr;
+use crate::codegen::abi::VTy;
+use crate::codegen::{native_err, Compiler, Frame};
+use crate::sema::hir::{Expr, StrPart};
+use crate::sema::types::{FloatW, IntW, UIntW};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::{Linkage, Module};
 
 pub(crate) fn emit_str<M: Module>(
     c: &mut Compiler<M>,
@@ -16,13 +22,10 @@ pub(crate) fn emit_str<M: Module>(
         let piece = match p {
             StrPart::Lit(s) => str_literal_handle(c, bcx, s)?,
             StrPart::Hole(h) => {
-                if matches!(h.as_ref(), Expr::Call { target, .. } if is_contextual_conversion(target))
-                {
-                    emit_expr_expected(c, bcx, frame, h, &VTy::Str)?
-                } else {
-                    let w = emit_expr(c, bcx, frame, h)?;
-                    display_word(c, bcx, h, w)?
-                }
+                // Sema has already resolved contextual conversions in the hole HIR. String
+                // interpolation now performs exactly one operation here: display the final value.
+                let value = emit_expr(c, bcx, frame, h)?;
+                display_word(c, bcx, h, value)?
             }
         };
         acc = c.call_rt(bcx, "alias.str.concat", &[acc, piece])?;
