@@ -1,6 +1,4 @@
-use super::{
-    ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
-};
+use super::{ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Stmt, StrPart};
 use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
@@ -188,9 +186,10 @@ func i32 main = () -> {
         .find_map(|stmt| match stmt {
             Stmt::Binding(binding) if binding.name == "p" => match &mut binding.value {
                 Expr::Call {
-                    target: CallTarget::StructConstructor {
-                        arg_field_indices, ..
-                    },
+                    target:
+                        CallTarget::StructConstructor {
+                            arg_field_indices, ..
+                        },
                     ..
                 } => Some(arg_field_indices),
                 _ => None,

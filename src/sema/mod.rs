@@ -8,9 +8,7 @@ pub(crate) mod types;
 
 use crate::ast::{BinOp, BindKind, Binding, Expr, Item, Program};
 use crate::builtins::is_reserved_lexical_name;
-use crate::sema::hir::{
-    BindingId, BuiltinCall, MethodId, MethodTarget, ResolvedConversion,
-};
+use crate::sema::hir::{BindingId, BuiltinCall, MethodId, MethodTarget, ResolvedConversion};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -153,35 +151,20 @@ fn builtin_method_specs(receiver: &Ty) -> Vec<BuiltinMethodSpec> {
         ],
         Ty::Bool => vec![spec("not", vec![], Ty::Bool, MethodTarget::BoolNot)],
         Ty::Str => vec![
-            spec(
-                "len",
-                vec![],
-                Ty::Int(IntW::W32),
-                MethodTarget::StringLen,
-            ),
+            spec("len", vec![], Ty::Int(IntW::W32), MethodTarget::StringLen),
             spec("upper", vec![], Ty::Str, MethodTarget::StringUpper),
             spec("lower", vec![], Ty::Str, MethodTarget::StringLower),
             spec("trim", vec![], Ty::Str, MethodTarget::StringTrim),
         ],
         Ty::Array(elem) => vec![
-            spec(
-                "len",
-                vec![],
-                Ty::Int(IntW::W32),
-                MethodTarget::ArrayLen,
-            ),
+            spec("len", vec![], Ty::Int(IntW::W32), MethodTarget::ArrayLen),
             spec(
                 "push",
                 vec![(**elem).clone()],
                 Ty::Unit,
                 MethodTarget::ArrayPush,
             ),
-            spec(
-                "pop",
-                vec![],
-                (**elem).clone(),
-                MethodTarget::ArrayPop,
-            ),
+            spec("pop", vec![], (**elem).clone(), MethodTarget::ArrayPop),
             spec(
                 "iterator",
                 vec![],

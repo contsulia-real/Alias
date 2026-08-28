@@ -137,8 +137,7 @@ fn compile_program<M: Module>(
     main_id: BindingId,
 ) -> AliasResult<FuncId> {
     c.struct_layouts = build_struct_layouts(items, &c.type_projections);
-    if c
-        .struct_layouts
+    if c.struct_layouts
         .values()
         .any(|layout| !(layout.size as usize).is_multiple_of(layout.align))
     {

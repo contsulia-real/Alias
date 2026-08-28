@@ -101,7 +101,13 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
             for arg in args.iter().rev() {
                 stack.push(HirValidationNode::Expr(&arg.value));
             }
-            if matches!(expr, Expr::Call { target: CallTarget::FunctionValue, .. }) {
+            if matches!(
+                expr,
+                Expr::Call {
+                    target: CallTarget::FunctionValue,
+                    ..
+                }
+            ) {
                 stack.push(HirValidationNode::Expr(callee));
             }
         }
@@ -333,8 +339,7 @@ fn collect_user_methods(
 
 fn validate_main_contract(program: &CheckedProgram) -> AliasResult<()> {
     let mut mains = program.items.iter().filter_map(|item| match item {
-        Item::Binding(binding)
-            if !binding.is_method() && binding.name == "main" => Some(binding),
+        Item::Binding(binding) if !binding.is_method() && binding.name == "main" => Some(binding),
         _ => None,
     });
     let Some(main) = mains.next() else {
@@ -486,10 +491,7 @@ fn validate_call_target(
                 ));
             };
             if arg_field_indices.len() != args.len() {
-                return Err(invariant(
-                    expr.span(),
-                    "构造器实参与字段索引数量不一致",
-                ));
+                return Err(invariant(expr.span(), "构造器实参与字段索引数量不一致"));
             }
             let mut seen = HashSet::new();
             for (arg, index) in args.iter().zip(arg_field_indices) {
@@ -512,10 +514,7 @@ fn validate_call_target(
                 .enumerate()
                 .any(|(index, field)| !field.has_default && !seen.contains(&index))
             {
-                return Err(invariant(
-                    expr.span(),
-                    "结构体构造 target 遗漏无默认值字段",
-                ));
+                return Err(invariant(expr.span(), "结构体构造 target 遗漏无默认值字段"));
             }
         }
         CallTarget::ResultConstructor(kind) => {
@@ -694,10 +693,7 @@ fn resolved_field_ty(
         return Err(invariant(span, "字段索引的接收者不是 struct"));
     };
     let Some(contract) = structs.get(name) else {
-        return Err(invariant(
-            span,
-            format!("字段索引引用未知结构体 '{name}'"),
-        ));
+        return Err(invariant(span, format!("字段索引引用未知结构体 '{name}'")));
     };
     let Some(field) = contract.fields.get(field_index) else {
         return Err(invariant(span, "已解析字段索引越界"));
@@ -818,10 +814,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         let mut seen = HashSet::new();
                         for id in captures {
                             if !seen.insert(*id) {
-                                return Err(invariant(
-                                    expr.span(),
-                                    format!("capture 重复 {id:?}"),
-                                ));
+                                return Err(invariant(expr.span(), format!("capture 重复 {id:?}")));
                             }
                             if !known_ids.contains(id) {
                                 return Err(invariant(
@@ -915,7 +908,8 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Field {
                         recv, field_index, ..
                     } => {
-                        let field_ty = resolved_field_ty(recv, *field_index, &structs, expr.span())?;
+                        let field_ty =
+                            resolved_field_ty(recv, *field_index, &structs, expr.span())?;
                         if !types_match(&field_ty, expr.ty()) {
                             return Err(invariant(
                                 expr.span(),

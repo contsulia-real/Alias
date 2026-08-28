@@ -3,7 +3,9 @@
 use super::exprs::{require_value, ExprCheckError};
 use super::hir::{BindingId, BuiltinCall};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
-use super::{decl_mismatch, ensure_user_lexical_name, Checker, Env, LowerCallTarget, Scope, VarInfo};
+use super::{
+    decl_mismatch, ensure_user_lexical_name, Checker, Env, LowerCallTarget, Scope, VarInfo,
+};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
 use crate::builtins::{classify_call_builtin, CallBuiltinName};
 use crate::{AliasError, AliasResult, Span};
@@ -354,8 +356,9 @@ impl Checker {
             Stmt::Expr { expr, .. } => {
                 if let Expr::Call { callee, args, span } = expr {
                     if let Expr::Ident(name, _) = callee.as_ref() {
-                        if let Some(kind @ (CallBuiltinName::Increase | CallBuiltinName::Decrease)) =
-                            classify_call_builtin(name)
+                        if let Some(
+                            kind @ (CallBuiltinName::Increase | CallBuiltinName::Decrease),
+                        ) = classify_call_builtin(name)
                         {
                             self.incdec(name, args, *span, env)?;
                             self.record_expr_type(expr, Ty::Unit);

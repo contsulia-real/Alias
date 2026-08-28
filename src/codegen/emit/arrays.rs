@@ -50,12 +50,8 @@ pub(crate) fn wrap_array<M: Module>(
     let words = bcx.ins().iconst(types::I32, ARRAY_WRAPPER_WORDS);
     let wrapper = c.call_rt(bcx, "alias.env.new", &[words])?;
     let zero = bcx.ins().iconst(types::I64, 0);
-    bcx.ins().store(
-        MemFlagsData::new(),
-        raw,
-        wrapper,
-        ARRAY_WRAPPER_RAW_OFFSET,
-    );
+    bcx.ins()
+        .store(MemFlagsData::new(), raw, wrapper, ARRAY_WRAPPER_RAW_OFFSET);
     bcx.ins().store(
         MemFlagsData::new(),
         zero,
@@ -74,24 +70,12 @@ pub(crate) fn make_iterator<M: Module>(
     let iter = c.call_rt(bcx, "alias.env.new", &[words])?;
     let zero = bcx.ins().iconst(types::I64, 0);
     let version = array_version(bcx, array);
-    bcx.ins().store(
-        MemFlagsData::new(),
-        array,
-        iter,
-        ITERATOR_ARRAY_OFFSET,
-    );
-    bcx.ins().store(
-        MemFlagsData::new(),
-        zero,
-        iter,
-        ITERATOR_INDEX_OFFSET,
-    );
-    bcx.ins().store(
-        MemFlagsData::new(),
-        version,
-        iter,
-        ITERATOR_VERSION_OFFSET,
-    );
+    bcx.ins()
+        .store(MemFlagsData::new(), array, iter, ITERATOR_ARRAY_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), zero, iter, ITERATOR_INDEX_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), version, iter, ITERATOR_VERSION_OFFSET);
     Ok(iter)
 }
 
@@ -119,12 +103,9 @@ pub(crate) fn emit_array_lit<M: Module>(
     let raw = c.call_rt(bcx, "alias.arr.new", &[cap])?;
     for (i, el) in elems.iter().enumerate() {
         let v = emit_expr(c, bcx, frame, el)?;
-        let dp = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            raw,
-            ARRAY_DATA_OFFSET,
-        );
+        let dp = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
         let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * VALUE_WORD_BYTES);
         let sv = storage_word(bcx, v, elem_vty);
         store_elem(bcx, sv, addr, elem_vty);

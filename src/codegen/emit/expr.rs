@@ -77,10 +77,7 @@ pub(crate) fn emit_expr<M: Module>(
             emit_convert(c, bcx, frame, *span, value, &src, &dst)
         }
         Expr::Convert {
-            expr,
-            mode,
-            span,
-            ..
+            expr, mode, span, ..
         } => match mode {
             ResolvedConversion::Identity => emit_expr(c, bcx, frame, expr),
             ResolvedConversion::Convert => {
@@ -197,12 +194,9 @@ pub(crate) fn emit_expr<M: Module>(
             };
             let raw_array = array_raw(bcx, array);
             let idx32 = bcx.ins().ireduce(types::I32, idxw);
-            let len64 = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                raw_array,
-                ARRAY_LEN_OFFSET,
-            );
+            let len64 =
+                bcx.ins()
+                    .load(types::I64, MemFlagsData::new(), raw_array, ARRAY_LEN_OFFSET);
             let len32 = bcx.ins().ireduce(types::I32, len64);
             emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
             let dp = bcx.ins().load(
@@ -237,12 +231,9 @@ pub(crate) fn emit_expr<M: Module>(
         }
         Expr::Propagate { expr, .. } => {
             let subj = emit_expr(c, bcx, frame, expr)?;
-            let tag = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                subj,
-                RESULT_TAG_OFFSET,
-            );
+            let tag = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), subj, RESULT_TAG_OFFSET);
             let is_err = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 1);
             let err_b = bcx.create_block();
             let ok_b = bcx.create_block();
@@ -263,12 +254,9 @@ pub(crate) fn emit_expr<M: Module>(
                 VTy::Result(t, _) => *t,
                 _ => invariant_violation("? 操作数携带 result 类型"),
             };
-            let raw = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                subj,
-                RESULT_PAYLOAD_OFFSET,
-            );
+            let raw = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
             Ok(restore_word(bcx, raw, &pvty))
         }
     }
@@ -444,12 +432,9 @@ fn emit_pattern_test<M: Module>(
             bcx.ins().icmp_imm_s(IntCC::Equal, ord, 0)
         }
         Pattern::Constructor { ctor, .. } => {
-            let tag = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                subj,
-                RESULT_TAG_OFFSET,
-            );
+            let tag = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), subj, RESULT_TAG_OFFSET);
             let want = match ctor {
                 CtorKind::Ok => 0,
                 CtorKind::Err => 1,
@@ -485,12 +470,9 @@ pub(crate) fn emit_match_arm<M: Module>(
                 CtorKind::Ok => (**ok).clone(),
                 CtorKind::Err => (**err).clone(),
             };
-            let raw = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                subj,
-                RESULT_PAYLOAD_OFFSET,
-            );
+            let raw = bcx
+                .ins()
+                .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
             let payload = restore_word(bcx, raw, &bind_vty);
             emit_local_cell(c, bcx, frame, payload, bind_vty, binding_id)?;
         }

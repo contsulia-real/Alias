@@ -1,6 +1,4 @@
-use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, size_align, value_word_offset, VTy,
-};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, size_align, value_word_offset, VTy};
 use crate::codegen::{invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::BindingId;
 use crate::AliasResult;

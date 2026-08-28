@@ -4,7 +4,9 @@ use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET
 use crate::codegen::Compiler;
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::ir::{
+    types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value,
+};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Module};
@@ -38,18 +40,12 @@ fn emit_case_shim<M: Module>(
     bcx.seal_block(entry);
     let a: Vec<Value> = bcx.block_params(entry).to_vec();
 
-    let pa = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        a[0],
-        STRING_DATA_OFFSET,
-    );
-    let la = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        a[0],
-        STRING_LEN_OFFSET,
-    );
+    let pa = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+    let la = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
     let lo_c = bcx.ins().iconst(types::I8, lo);
     let hi_c = bcx.ins().iconst(types::I8, hi);
     let delta_c = bcx.ins().iconst(types::I8, delta);
@@ -187,30 +183,18 @@ pub(super) fn emit_string_runtime<M: Module>(
     });
 
     shim!(c, "alias.str.concat", |bcx, a| {
-        let pa = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_DATA_OFFSET,
-        );
-        let la = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
-        let pb = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[1],
-            STRING_DATA_OFFSET,
-        );
-        let lb = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[1],
-            STRING_LEN_OFFSET,
-        );
+        let pa = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+        let la = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
+        let pb = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[1], STRING_DATA_OFFSET);
+        let lb = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[1], STRING_LEN_OFFSET);
         let total = bcx.ins().iadd(la, lb);
         let has_total = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, total, 0);
         let alloc_b = bcx.create_block();
@@ -266,30 +250,18 @@ pub(super) fn emit_string_runtime<M: Module>(
     });
 
     shim!(c, "alias.str.cmp", |bcx, a| {
-        let pa = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_DATA_OFFSET,
-        );
-        let la = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
-        let pb = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[1],
-            STRING_DATA_OFFSET,
-        );
-        let lb = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[1],
-            STRING_LEN_OFFSET,
-        );
+        let pa = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+        let la = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
+        let pb = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[1], STRING_DATA_OFFSET);
+        let lb = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[1], STRING_LEN_OFFSET);
         let min_len = bcx.ins().smin(la, lb);
         let i = bcx.declare_var(types::I64);
         let i0 = bcx.ins().iconst(types::I64, 0);
@@ -344,12 +316,9 @@ pub(super) fn emit_string_runtime<M: Module>(
     });
 
     shim!(c, "alias.str.len", |bcx, a| {
-        let l = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
+        let l = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
         true
@@ -358,18 +327,12 @@ pub(super) fn emit_string_runtime<M: Module>(
     emit_case_shim(c, "alias.str.lower", b'A' as i64, b'Z' as i64, 32)?;
 
     shim!(c, "alias.str.trim", |bcx, a| {
-        let pa = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_DATA_OFFSET,
-        );
-        let la = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
+        let pa = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+        let la = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
         let st = bcx.declare_var(types::I64);
         let st0 = bcx.ins().iconst(types::I64, 0);
         bcx.def_var(st, st0);

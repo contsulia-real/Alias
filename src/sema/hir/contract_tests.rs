@@ -52,9 +52,7 @@ fn resolved_hir_rejects_constructor_arg_type_drift() {
     let error = super::validate_resolved_hir(&program)
         .expect_err("constructor arg type drift must fail the final HIR gate");
     assert!(
-        error
-            .msg
-            .contains("构造器实参类型与已解析字段类型不一致"),
+        error.msg.contains("构造器实参类型与已解析字段类型不一致"),
         "实际: {}",
         error.msg
     );
@@ -119,9 +117,7 @@ fn resolved_hir_rejects_field_result_type_drift() {
     let error = super::validate_resolved_hir(&program)
         .expect_err("field result type drift must fail the final HIR gate");
     assert!(
-        error
-            .msg
-            .contains("字段表达式类型与已解析字段声明不一致"),
+        error.msg.contains("字段表达式类型与已解析字段声明不一致"),
         "实际: {}",
         error.msg
     );
@@ -129,9 +125,8 @@ fn resolved_hir_rejects_field_result_type_drift() {
 
 #[test]
 fn final_hir_gate_rejects_duplicate_binding_id() {
-    let mut program = checked(
-        "val i32 left = 1\nval i32 right = 2\nfunc i32 main = () -> return left + right\n",
-    );
+    let mut program =
+        checked("val i32 left = 1\nval i32 right = 2\nfunc i32 main = () -> return left + right\n");
     let left_id = program
         .items
         .iter()

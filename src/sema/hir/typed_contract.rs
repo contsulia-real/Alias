@@ -55,7 +55,12 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(then_expr));
             stack.push(Node::Expr(cond));
         }
-        Expr::Call { callee, args, target, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            target,
+            ..
+        } => {
             for arg in args.iter().rev() {
                 stack.push(Node::Expr(&arg.value));
             }
@@ -194,7 +199,10 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
         }
         Expr::Cast { expr: inner, .. } => {
             if !conversion_exists(inner.ty(), expr.ty()) {
-                return Err(invariant(expr.span(), "Cast 不符合 canonical conversion contract"));
+                return Err(invariant(
+                    expr.span(),
+                    "Cast 不符合 canonical conversion contract",
+                ));
             }
         }
         Expr::Convert {
@@ -215,9 +223,13 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             }
         },
         Expr::Binary { op, lhs, rhs, .. } => {
-            let result = binary_result_type(*op, lhs.ty(), rhs.ty(), expr.span()).map_err(|_| {
-                invariant(expr.span(), "Binary operands 不符合 canonical operator contract")
-            })?;
+            let result =
+                binary_result_type(*op, lhs.ty(), rhs.ty(), expr.span()).map_err(|_| {
+                    invariant(
+                        expr.span(),
+                        "Binary operands 不符合 canonical operator contract",
+                    )
+                })?;
             if !types_match(&result, expr.ty()) {
                 return Err(invariant(
                     expr.span(),
@@ -270,7 +282,10 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 return Err(invariant(expr.span(), "ArrayLit HIR 结果类型不是 array"));
             };
             if elems.iter().any(|item| !types_match(elem, item.ty())) {
-                return Err(invariant(expr.span(), "ArrayLit 元素类型与数组元素类型不一致"));
+                return Err(invariant(
+                    expr.span(),
+                    "ArrayLit 元素类型与数组元素类型不一致",
+                ));
             }
         }
         Expr::Propagate { expr: inner, .. } => {
@@ -278,7 +293,10 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 return Err(invariant(expr.span(), "Propagate HIR 操作数不是 result"));
             };
             if !types_match(ok, expr.ty()) {
-                return Err(invariant(expr.span(), "Propagate HIR 结果类型与 ok payload 不一致"));
+                return Err(invariant(
+                    expr.span(),
+                    "Propagate HIR 结果类型与 ok payload 不一致",
+                ));
             }
         }
         Expr::Call { .. }

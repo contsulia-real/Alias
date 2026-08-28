@@ -214,7 +214,11 @@ fn local_function_shadow_wins_before_struct_constructor_resolution() {
 #[test]
 fn parameter_shadow_wins_before_struct_constructor_resolution() {
     let error = fail("struct point { val i32 x = 1 }\nfunc i32 probe = (i32 point) -> return point()\nfunc i32 main = () -> return 0\n");
-    assert!(error.msg.contains("i32 不是可调用值"), "实际: {}", error.msg);
+    assert!(
+        error.msg.contains("i32 不是可调用值"),
+        "实际: {}",
+        error.msg
+    );
 }
 
 /// 引用别名: 两个名字一个实例 — 经 b 改, a 可见。

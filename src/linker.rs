@@ -50,10 +50,7 @@ fn create_temp_object(bytes: &[u8]) -> AliasResult<TempObject> {
                 drop(file);
                 if let Err((action, error)) = write_result {
                     return Err(AliasError {
-                        msg: format!(
-                            "无法{action}临时目标文件 {}: {error}",
-                            temp.0.display()
-                        ),
+                        msg: format!("无法{action}临时目标文件 {}: {error}", temp.0.display()),
                         span: Span::default(),
                     });
                 }

@@ -371,7 +371,10 @@ pub(super) fn resolve_method_target(
 ) -> AliasResult<MethodTarget> {
     if let Some(method) = builtin_method(recv, name) {
         return method.target(recv).ok_or_else(|| AliasError {
-            msg: format!("内部 sema 不变式被破坏: 内建方法 {}.{name} 缺少 target", recv.name()),
+            msg: format!(
+                "内部 sema 不变式被破坏: 内建方法 {}.{name} 缺少 target",
+                recv.name()
+            ),
             span,
         });
     }

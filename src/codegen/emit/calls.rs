@@ -3,9 +3,7 @@ use super::cells::{cell_addr, first_result, read_cell, write_cell};
 use super::expr::emit_expr;
 use super::ops::{emit_binary_values, new_span_id};
 use super::strings::display_word;
-use crate::codegen::abi::{
-    norm_load, norm_store, restore_word, storage_word, user_signature, VTy,
-};
+use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, user_signature, VTy};
 use crate::codegen::layout::{
     ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET,
     RESULT_TAG_OFFSET, RESULT_WORDS,
@@ -67,18 +65,12 @@ fn call_closure<M: Module>(
         let v = emit_expr(c, bcx, frame, &a.value)?;
         words.push(norm_store(bcx, v, pt));
     }
-    let code = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        clo,
-        CLOSURE_CODE_OFFSET,
-    );
-    let env = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        clo,
-        CLOSURE_ENV_OFFSET,
-    );
+    let code = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), clo, CLOSURE_CODE_OFFSET);
+    let env = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), clo, CLOSURE_ENV_OFFSET);
     words.insert(0, env);
     words.insert(0, bcx.use_var(frame.globals));
     let sig = user_signature(c.cc, param_vtys, ret_vty);

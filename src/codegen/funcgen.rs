@@ -1,6 +1,4 @@
-use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, user_signature, value_word_offset, VTy,
-};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, user_signature, value_word_offset, VTy};
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
 use crate::codegen::emit::expr::emit_expr;
@@ -339,18 +337,12 @@ impl<'m, M: Module> Compiler<'m, M> {
             bcx.ins()
                 .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
-        let code = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            clo,
-            CLOSURE_CODE_OFFSET,
-        );
-        let env = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            clo,
-            CLOSURE_ENV_OFFSET,
-        );
+        let code = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), clo, CLOSURE_CODE_OFFSET);
+        let env = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), clo, CLOSURE_ENV_OFFSET);
         let msig = user_signature(self.cc, &[], &main_ret);
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);

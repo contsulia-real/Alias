@@ -1,5 +1,7 @@
 use super::calls::resolve_method_target;
-use super::operators::{contextual_conversion, conversion_exists, literal_slot_unify, require_value};
+use super::operators::{
+    contextual_conversion, conversion_exists, literal_slot_unify, require_value,
+};
 use super::typing::ExprCheckError;
 use crate::ast::{Expr, StrPartAst};
 use crate::sema::types::{

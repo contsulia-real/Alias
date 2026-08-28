@@ -335,12 +335,9 @@ fn emit_for<M: Module>(
 
     bcx.switch_to_block(header);
     frame.terminated = false;
-    let array = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        iter,
-        ITERATOR_ARRAY_OFFSET,
-    );
+    let array = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), iter, ITERATOR_ARRAY_OFFSET);
     let expected = bcx.ins().load(
         types::I64,
         MemFlagsData::new(),
@@ -360,12 +357,9 @@ fn emit_for<M: Module>(
 
     bcx.switch_to_block(valid_b);
     frame.terminated = false;
-    let cursor = bcx.ins().load(
-        types::I64,
-        MemFlagsData::new(),
-        iter,
-        ITERATOR_INDEX_OFFSET,
-    );
+    let cursor = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), iter, ITERATOR_INDEX_OFFSET);
     let raw = array_raw(bcx, array);
     let len = bcx
         .ins()

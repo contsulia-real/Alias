@@ -186,7 +186,11 @@ fn excessive_interpolation_nesting_is_rejected_in_lexer() {
 fn interpolation_hole_must_consume_its_complete_token_stream() {
     let src = "func i32 main = () -> {\n    println '${1, 2}'\n    return 0\n}\n";
     let err = run(src).expect_err("插值尾随 token 不能被静默丢弃");
-    assert!(err.msg.contains("插值内表达式错误"), "实际诊断: {}", err.msg);
+    assert!(
+        err.msg.contains("插值内表达式错误"),
+        "实际诊断: {}",
+        err.msg
+    );
     assert!(err.msg.contains("意外 token"), "实际诊断: {}", err.msg);
 }
 

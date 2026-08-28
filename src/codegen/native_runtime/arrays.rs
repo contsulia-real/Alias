@@ -60,12 +60,9 @@ pub(super) fn emit_array_runtime<M: Module>(
     });
 
     shim!(c, "alias.arr.len", |bcx, a| {
-        let l = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            ARRAY_LEN_OFFSET,
-        );
+        let l = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], ARRAY_LEN_OFFSET);
         let t = bcx.ins().ireduce(types::I32, l);
         bcx.ins().return_(&[t]);
         true
@@ -73,12 +70,9 @@ pub(super) fn emit_array_runtime<M: Module>(
 
     shim!(c, "alias.arr.push", |bcx, a| {
         let hdr = a[0];
-        let dp0 = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            hdr,
-            ARRAY_DATA_OFFSET,
-        );
+        let dp0 = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_DATA_OFFSET);
         let len = bcx
             .ins()
             .load(types::I64, MemFlagsData::new(), hdr, ARRAY_LEN_OFFSET);
@@ -143,12 +137,9 @@ pub(super) fn emit_array_runtime<M: Module>(
         let new_len = bcx.ins().iadd_imm_s(len, -1);
         bcx.ins()
             .store(MemFlagsData::new(), new_len, hdr, ARRAY_LEN_OFFSET);
-        let dp = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            hdr,
-            ARRAY_DATA_OFFSET,
-        );
+        let dp = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_DATA_OFFSET);
         let slot = bcx.ins().imul_imm_s(new_len, VALUE_WORD_BYTES);
         let addr = bcx.ins().iadd(dp, slot);
         let v = bcx.ins().load(types::I64, MemFlagsData::new(), addr, 0);

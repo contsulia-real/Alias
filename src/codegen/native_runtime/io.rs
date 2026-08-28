@@ -57,18 +57,12 @@ pub(super) fn emit_io_runtime<M: Module>(
     });
 
     shim!(c, "alias.println.str", |bcx, a| {
-        let p = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_DATA_OFFSET,
-        );
-        let l = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
+        let p = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+        let l = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
         call_rt_void_m!(bcx, "rt.write.stdout", vec![p, l]);
         let nl = sym!(bcx, "rt_nl");
         call_rt_void_m!(
@@ -79,18 +73,12 @@ pub(super) fn emit_io_runtime<M: Module>(
         false
     });
     shim!(c, "alias.print.str", |bcx, a| {
-        let p = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_DATA_OFFSET,
-        );
-        let l = bcx.ins().load(
-            types::I64,
-            MemFlagsData::new(),
-            a[0],
-            STRING_LEN_OFFSET,
-        );
+        let p = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_DATA_OFFSET);
+        let l = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), a[0], STRING_LEN_OFFSET);
         call_rt_void_m!(bcx, "rt.write.stdout", vec![p, l]);
         false
     });

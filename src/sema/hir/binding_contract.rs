@@ -1,4 +1,6 @@
-use super::{ArmBody, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Stmt, StrPart};
+use super::{
+    ArmBody, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Stmt, StrPart,
+};
 use crate::sema::types::{types_match, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -41,7 +43,11 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
-fn push_match_children<'a>(stack: &mut Vec<Node<'a>>, subject: &'a Expr, arms: &'a [super::MatchArm]) {
+fn push_match_children<'a>(
+    stack: &mut Vec<Node<'a>>,
+    subject: &'a Expr,
+    arms: &'a [super::MatchArm],
+) {
     for arm in arms.iter().rev() {
         match &arm.body {
             ArmBody::Block(stmts) => {
@@ -88,7 +94,13 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             for arg in args.iter().rev() {
                 stack.push(Node::Expr(&arg.value));
             }
-            if matches!(expr, Expr::Call { target: super::CallTarget::FunctionValue, .. }) {
+            if matches!(
+                expr,
+                Expr::Call {
+                    target: super::CallTarget::FunctionValue,
+                    ..
+                }
+            ) {
                 stack.push(Node::Expr(callee));
             }
         }
@@ -168,7 +180,11 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
 fn pattern_binding_ty(subject: &Ty, pattern: &Pattern) -> AliasResult<Option<Ty>> {
     match pattern {
         Pattern::Binding { .. } => Ok(Some(subject.clone())),
-        Pattern::Constructor { ctor, binding, span } => {
+        Pattern::Constructor {
+            ctor,
+            binding,
+            span,
+        } => {
             let Ty::Result(ok, err) = subject else {
                 return Err(invariant(
                     *span,
@@ -250,12 +266,7 @@ fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId,
                             register(&mut contracts, *id, ty, expr.span())?;
                         }
                         for param in params {
-                            register(
-                                &mut contracts,
-                                param.binding_id,
-                                &param.ty,
-                                expr.span(),
-                            )?;
+                            register(&mut contracts, param.binding_id, &param.ty, expr.span())?;
                         }
                     }
                     Expr::Match { subject, arms, .. } => {

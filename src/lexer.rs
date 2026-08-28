@@ -456,9 +456,8 @@ impl<'a> Lexer<'a> {
                         Some(b'{') => {
                             self.bump();
                             if self.interp_depth >= MAX_NESTING {
-                                return self.err(format!(
-                                    "字符串插值嵌套超过 {MAX_NESTING} 层上限"
-                                ));
+                                return self
+                                    .err(format!("字符串插值嵌套超过 {MAX_NESTING} 层上限"));
                             }
                             self.interp_depth += 1;
                             let result = self.lex_hole_until_rbrace();

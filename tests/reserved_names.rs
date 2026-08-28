@@ -40,17 +40,9 @@ fn compile(name: &str, src: &str) -> std::process::Output {
 #[test]
 fn predefined_call_names_cannot_be_redeclared() {
     for name in [
-        "print",
-        "println",
-        "from",
-        "try_from",
-        "typeof",
-        "increase",
-        "decrease",
+        "print", "println", "from", "try_from", "typeof", "increase", "decrease",
     ] {
-        let src = format!(
-            "val i32 {name} = 1\nfunc i32 main = () -> return 0\n"
-        );
+        let src = format!("val i32 {name} = 1\nfunc i32 main = () -> return 0\n");
         let out = compile(name, &src);
         assert!(!out.status.success(), "预定义名字 {name} 不得允许用户声明");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -64,11 +56,12 @@ fn predefined_call_names_cannot_be_redeclared() {
 #[test]
 fn result_constructor_names_cannot_be_redeclared() {
     for name in ["ok", "err"] {
-        let src = format!(
-            "val i32 {name} = 1\nfunc i32 main = () -> return 0\n"
-        );
+        let src = format!("val i32 {name} = 1\nfunc i32 main = () -> return 0\n");
         let out = compile(name, &src);
-        assert!(!out.status.success(), "result 构造器名字 {name} 不得允许用户声明");
+        assert!(
+            !out.status.success(),
+            "result 构造器名字 {name} 不得允许用户声明"
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             stderr.contains("预定义名字") && stderr.contains(name),

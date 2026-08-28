@@ -225,14 +225,12 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 .collect::<AliasResult<Vec<_>>>()?,
         },
         crate::ast::Stmt::For {
-            iterable, body, span, ..
+            iterable,
+            body,
+            span,
+            ..
         } => Stmt::For {
-            binding_id: take_required(
-                &mut facts.for_ids,
-                key,
-                *span,
-                "for 循环变量 BindingId",
-            )?,
+            binding_id: take_required(&mut facts.for_ids, key, *span, "for 循环变量 BindingId")?,
             ty: facts.fors.remove(&key).ok_or_else(|| AliasError {
                 msg: "内部 sema 不变式被破坏: for 循环变量缺少静态类型".into(),
                 span: *span,
@@ -293,8 +291,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             crate::ast::Expr::This(span) => Expr::This(*span, callee_info),
             _ => {
                 return Err(AliasError {
-                    msg: "内部 sema 不变式被破坏: 隐式零参调用的 callee 不是直接函数引用"
-                        .into(),
+                    msg: "内部 sema 不变式被破坏: 隐式零参调用的 callee 不是直接函数引用".into(),
                     span: expr.span(),
                 })
             }
