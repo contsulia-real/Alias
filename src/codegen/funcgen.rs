@@ -1,7 +1,24 @@
-use super::*;
-// ---------------------------------------------------------------------------
-// 编译器
-// ---------------------------------------------------------------------------
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, user_signature, value_word_offset, VTy,
+};
+use crate::codegen::emit::cells::{emit_local_cell, first_result};
+use crate::codegen::emit::control::emit_body;
+use crate::codegen::emit::expr::emit_expr;
+use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
+use crate::codegen::runtime::runtime_contract;
+use crate::codegen::{
+    bound_vty, invariant_violation, native_err, Compiler, Frame, PendingFn, Slot,
+};
+use crate::sema::hir::{BindKind, BindingId, Body, Expr, Item, Param};
+use crate::sema::types::{IntW, Ty};
+use crate::{AliasResult, Span};
+use cranelift_codegen::ir::{
+    types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, TrapCode, UserFuncName, Value,
+};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{FuncId, Linkage, Module};
+use std::collections::HashMap;
 
 impl<'m, M: Module> Compiler<'m, M> {
     pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
@@ -306,10 +323,8 @@ impl<'m, M: Module> Compiler<'m, M> {
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
             } else {
                 let vty = self.vty(&b.ty);
-                (
-                    emit_expr_expected(self, &mut bcx, &mut frame, &b.value, &vty)?,
-                    vty,
-                )
+                let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?;
+                (v, vty)
             };
             let off = self.top_slots[binding_index];
             let sv = norm_store(&mut bcx, v, &svty);
@@ -324,10 +339,18 @@ impl<'m, M: Module> Compiler<'m, M> {
             bcx.ins()
                 .load(types::I64, MemFlagsData::new(), base, main_slot as i32)
         };
-        let code = bcx.ins().load(types::I64, MemFlagsData::new(), clo, 0);
-        let env = bcx
-            .ins()
-            .load(types::I64, MemFlagsData::new(), clo, value_word_offset(1));
+        let code = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            clo,
+            CLOSURE_CODE_OFFSET,
+        );
+        let env = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            clo,
+            CLOSURE_ENV_OFFSET,
+        );
         let msig = user_signature(self.cc, &[], &main_ret);
         let uref = bcx.func.import_signature(msig);
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
@@ -351,10 +374,6 @@ impl<'m, M: Module> Compiler<'m, M> {
         Ok(fid)
     }
 }
-
-// ---------------------------------------------------------------------------
-// 函数字面量: HIR 捕获列表 + 闭包对象创建
-// ---------------------------------------------------------------------------
 
 pub(crate) fn emit_funclit_value<M: Module>(
     c: &mut Compiler<M>,
