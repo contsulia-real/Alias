@@ -1,16 +1,6 @@
-//! sema::exprs — 表达式静态语义 facade。
-
-use super::hir::{BindingId, BuiltinCall, MethodTarget, ResolvedConversion};
-use super::types::{
-    check_value_type_slot, default_negative_int_ty, default_positive_int_ty, int_literal_fits,
-    types_match, FloatW, IntW, Ty,
-};
-use super::{builtin_method, op_mismatch, Checker, Env, MethodInfo, Scope, VarInfo};
-use super::{LowerCallTarget, LowerExprInfo};
-use crate::ast::{ArmBody, BinOp, CallArg, CtorKind, Expr, MatchArm, Pattern, Stmt, StrPartAst};
-use crate::builtins::is_result_constructor;
-use crate::{AliasError, AliasResult, Span};
-use std::collections::HashSet;
+//! sema::exprs — 表达式静态语义模块路由。
+//!
+//! 子模块直接依赖各自实际 owner；这里只向 sema 其它职责暴露确实共享的窄接口。
 
 mod calls;
 mod infer;
@@ -18,9 +8,5 @@ mod match_expr;
 mod operators;
 mod typing;
 
-use calls::resolve_method_target;
 pub(super) use operators::require_value;
-use operators::{
-    binary_flows_expected, contextual_conversion, conversion_exists, literal_slot_unify,
-};
-pub(super) use typing::{ExprCheckError, ExprCheckResult};
+pub(super) use typing::ExprCheckError;
