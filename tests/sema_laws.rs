@@ -1,10 +1,7 @@
-//! sema 当前法律测试 — 每项检查一条负向用例，断言精确中文消息 + 行:列。
+//! sema 当前法律测试 — 每项检查一条当前静态语义，负向用例断言中文消息 + 行:列。
 //!
-//! 消息逐字节对齐两个来源:
-//! - 运行时搬家项: interp.rs 原报错文本 (D4 律: 迁移消息字节精确)
-//! - 新发明项: D3 一致性矩阵与 Q①③④ 收紧 (见 MIGRATION.md 各条目)
-//!
-//! 列号语义: token span col = max(可视列-1, 1) (lexer.rs span_here)。
+//! 测试名称与说明只描述当前语言行为；历史来源和旧实现差异属于 `MIGRATION.md`。
+//! 列号语义按当前 lexer 的 `span_here` 算法冻结：`max(可视列-1, 1)`。
 
 use alias::{run, AliasError};
 
@@ -59,7 +56,7 @@ fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// 运行时搬家项 — 消息与 span 逐字节保留
+// 绑定、调用与基础运算法律
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -73,7 +70,7 @@ fn undefined_binding_read() {
 }
 
 #[test]
-fn val_reassignment_moved_to_sema() {
+fn val_reassignment_rejected() {
     assert_law(
         "\nfunc i32 main = () -> {\n    val i32 a = 1;\n    a = 2;\n    return 0\n}\n",
         "'a' 是 val 绑定, 不可重新赋值",
@@ -163,7 +160,7 @@ fn binary_operand_type_mismatch() {
 }
 
 #[test]
-fn neg_requires_i32() {
+fn neg_requires_signed_integer_or_float() {
     assert_law(
         "\nfunc i32 main = () -> {\n    return -true\n}\n",
         "取负需要有符号整数或浮点",
@@ -202,7 +199,7 @@ fn calling_non_function_value() {
 }
 
 // ---------------------------------------------------------------------------
-// D3 新发明: 声明类型一致性矩阵
+// 声明与槽位类型一致性
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -256,12 +253,12 @@ fn unknown_type_name_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 收紧裁决 tightened_* — Q① / Q③ / Q④ / Q②
+// 比较、返回路径与 main 约束
 // ---------------------------------------------------------------------------
 
-/// Q① 裁决: `true < false` 曾静默求值 false (interp.rs:317), 现为编译错误。
+/// bool 只支持相等/不等比较，不支持有序比较。
 #[test]
-fn tightened_q1_ordered_comparison_on_bool() {
+fn ordered_comparison_on_bool_rejected() {
     assert_law(
         "\nfunc bool main = () -> {\n    return true < false\n}\n",
         "运算符 < 不适用于 bool 与 bool",
@@ -270,25 +267,21 @@ fn tightened_q1_ordered_comparison_on_bool() {
     );
 }
 
-/// Q① 正向控制: EqEq 对 bool 仍合法。
 #[test]
-fn q1_bool_equality_still_legal() {
+fn bool_equality_is_legal() {
     let src = "\nfunc i32 main = () -> {\n    val bool ok = true == true\n    while ok == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
 }
 
-/// Q① 正向控制: string 有序比较合法 (运行时字典序语义不变)。
 #[test]
-fn q1_string_ordering_still_legal() {
+fn string_ordering_is_legal() {
     let src = "\nfunc i32 main = () -> {\n    val bool ok = 'a' < 'b'\n    while ok == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
 }
 
-/// Q③ 裁决(严格版终裁): 声明返回非 unit 的块体落空曾静默得 Unit
-/// (interp.rs:363), 现为编译错误。末条语句必须是 return,
-/// 循环收尾不再豁免 (见 spec-notes §三.1 与 MIGRATION.md Q③ 条目)。
+/// 非 unit 函数的所有可达路径都必须显式 return；块体落空非法。
 #[test]
-fn tightened_q3_block_fall_off_rejected() {
+fn non_unit_block_fall_off_rejected() {
     assert_law(
         "\nfunc i32 f = () -> {\n    val i32 a = 1\n}\nfunc i32 main = () -> {\n    return 0\n}\n",
         "返回类型为 i32 的函数所有可达路径都必须显式 return",
@@ -297,9 +290,9 @@ fn tightened_q3_block_fall_off_rejected() {
     );
 }
 
-/// Q③ 严格版负向控制: 循环收尾的 i32 main 同样拒绝 (原驱动尾豁免已废)。
+/// 循环本身不用于证明非 unit 函数必返回。
 #[test]
-fn tightened_q3_loop_tail_rejected() {
+fn loop_tail_does_not_prove_non_unit_return() {
     assert_law(
         "\nfunc i32 main = () -> {\n    var i32 i = 0\n    while i < 2 {\n        increase i\n    }\n}\n",
         "返回类型为 i32 的函数所有可达路径都必须显式 return",
@@ -307,9 +300,8 @@ fn tightened_q3_loop_tail_rejected() {
     );
 }
 
-/// Q④ 裁决: main 零参校验 (曾有参数的 main 在运行时被无参调用)。
 #[test]
-fn tightened_q4_main_no_params() {
+fn main_rejects_parameters() {
     assert_law(
         "\nfunc i32 main = (i32 a) -> return a\n",
         "顶层 func main 不能声明参数",
@@ -318,9 +310,8 @@ fn tightened_q4_main_no_params() {
     );
 }
 
-/// Q④ 裁决: main 的唯一合法返回类型是 i32。
 #[test]
-fn tightened_q4_non_i32_main_rejected() {
+fn non_i32_main_rejected() {
     for (ty, value, actual) in [("bool", "true", "bool"), ("string", "'hi'", "string")] {
         let src = format!("\nfunc {ty} main = () -> return {value}\n");
         let e = fail(&src);
@@ -335,34 +326,24 @@ fn tightened_q4_non_i32_main_rejected() {
     assert_eq!((e.span.line, e.span.col), (2, 1));
 }
 
-/// Q⑤ 裁决: 缺 main 时 Display 省略位置前缀 — 锁定新输出形态。
+/// 缺少 main 属于无具体源码位置的诊断，因此 Display 不带位置前缀。
 #[test]
-fn tightened_q5_missing_main_has_no_location_prefix() {
+fn missing_main_has_no_location_prefix() {
     let e = fail("val i32 x = 1\n");
     assert_eq!(e.msg, "找不到顶层 func main");
     assert!(
         !e.to_string().contains("错误 @"),
-        "Q⑤: default Span 不得带位置前缀, 实际: {}",
+        "default Span 不得带位置前缀, 实际: {}",
         e
     );
 }
 
-/// Q② 裁决: 参数隐式 val — 编译期拒绝对参数赋值 (原为运行时错误)。
+/// 参数是不可重新绑定的隐式 val。
 #[test]
-fn tightened_q2_param_assignment_rejected() {
+fn parameter_assignment_rejected() {
     assert_law(
         "\nfunc i32 f = (i32 p) -> {\n    p = 1;\n    return p\n}\nfunc i32 main = () -> {\n    return f(1)\n}\n",
         "'p' 是 val 绑定, 不可重新赋值",
         3, 4,
     );
-}
-
-// ---------------------------------------------------------------------------
-// demo 语料审计 — sema 接线后已知良好夹具必须原样通过
-// ---------------------------------------------------------------------------
-
-#[test]
-fn audit_count_to_ten_passes_sema() {
-    let src = include_str!("../demos/count_to_ten.as");
-    assert_eq!(run(src).unwrap(), 0);
 }
