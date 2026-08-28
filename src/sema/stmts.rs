@@ -3,7 +3,7 @@
 use super::exprs::{require_value, ExprCheckError};
 use super::hir::{BindingId, BuiltinCall};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
-use super::{decl_mismatch, Checker, Env, LowerCallTarget, Scope, VarInfo};
+use super::{decl_mismatch, ensure_user_lexical_name, Checker, Env, LowerCallTarget, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
 use crate::{AliasError, AliasResult, Span};
 
@@ -15,6 +15,7 @@ impl Checker {
                 span: b.span,
             });
         }
+        ensure_user_lexical_name(&b.name, b.span)?;
         if self.structs.contains_key(&b.name) {
             return Err(AliasError {
                 msg: format!("'{}' 已定义为结构体, 不能再定义为绑定", b.name),
@@ -114,6 +115,11 @@ impl Checker {
         let mut param_tys = Vec::with_capacity(params.len());
         let mut param_ids = Vec::with_capacity(params.len());
         for p in params {
+            // Synthetic `self` is a keyword-owned method parameter; all user-written names
+            // still pass through the predefined-name gate.
+            if p.name != "self" {
+                ensure_user_lexical_name(&p.name, p.span)?;
+            }
             if Scope::get_here(&local, &p.name).is_some() {
                 return Err(AliasError {
                     msg: format!("同一参数列表不能重复参数名 '{}'", p.name),
@@ -412,6 +418,7 @@ impl Checker {
                 body,
                 span,
             } => {
+                ensure_user_lexical_name(name, *span)?;
                 let declared = check_value_type_slot(ty, *span, &self.structs)?;
                 self.for_types
                     .insert(s as *const Stmt as usize, declared.clone());
