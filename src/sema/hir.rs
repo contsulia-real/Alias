@@ -7,6 +7,8 @@ mod validate;
 mod visit;
 
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use model::{
