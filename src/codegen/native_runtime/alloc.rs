@@ -1,5 +1,6 @@
-use super::{first_result, NativeExterns};
+use super::NativeExterns;
 use crate::codegen::abi::VALUE_WORD_BYTES;
+use crate::codegen::emit::cells::first_result;
 use crate::codegen::layout::{CLOSURE_BYTES, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
 use crate::codegen::Compiler;
 use crate::AliasResult;
