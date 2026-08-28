@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    ArmBody, Binding, BindingId, BindingOwner, Body, CallArg, CallTarget, CheckedProgram, Expr,
+    ExprInfo, Item, LowerFacts, MatchArm, Param, ResolvedConversion, Stmt, StrPart, StructDef,
+    StructField,
+};
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -17,8 +21,11 @@ pub(super) fn lower(
             .collect::<AliasResult<Vec<_>>>()?,
     };
     ensure_facts_consumed(&facts)?;
-    super::validate::validate_resolved_hir(&checked)?;
+    // Capture vectors are part of the final HIR contract, so the authoritative invariant gate
+    // must run after capture population. Validating before this mutation would certify an object
+    // different from the one codegen actually consumes.
     super::capture::populate_captures(&mut checked);
+    super::validate::validate_resolved_hir(&checked)?;
     Ok(checked)
 }
 
@@ -72,6 +79,8 @@ fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<It
                 .fields
                 .iter()
                 .map(|field| {
+                    // These addresses are the transient fact identity established during check;
+                    // no AST-moving phase exists between check and this lowering pass.
                     let key = field as *const crate::ast::StructField as usize;
                     Ok(StructField {
                         ty: facts.fields.remove(&key).ok_or_else(|| AliasError {
@@ -364,24 +373,58 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             span: *span,
             info,
         },
-        crate::ast::Expr::Call { callee, args, span } => Expr::Call {
-            callee: Box::new(lower_expr(callee, facts)?),
-            args: args
-                .iter()
-                .map(|arg| lower_call_arg(arg, facts))
-                .collect::<AliasResult<Vec<_>>>()?,
-            target: lower_call_target(
-                call_target.take().ok_or_else(|| AliasError {
-                    msg: "内部 sema 不变式被破坏: Call 缺少 target".into(),
+        crate::ast::Expr::Call { callee, args, span } => {
+            let target = call_target.take().ok_or_else(|| AliasError {
+                msg: "内部 sema 不变式被破坏: Call 缺少 target".into(),
+                span: *span,
+            })?;
+            match target {
+                LowerCallTarget::ContextualConversion(mode) => {
+                    let [_arg] = args.as_slice() else {
+                        return Err(AliasError {
+                            msg: "内部 sema 不变式被破坏: 上下文转换元数不是 1".into(),
+                            span: *span,
+                        });
+                    };
+                    // callee 的 sema facts 仍需消费，但最终 HIR 不保留 `from/try_from`
+                    // 名字；backend 只能看到已经裁决好的 Convert/Identity 节点。
+                    let _ = lower_expr(callee, facts)?;
+                    let value = lower_expr(&args[0].value, facts)?;
+                    Expr::Convert {
+                        expr: Box::new(value),
+                        mode,
+                        span: *span,
+                        info,
+                    }
+                }
+                LowerCallTarget::Typeof => {
+                    let [_arg] = args.as_slice() else {
+                        return Err(AliasError {
+                            msg: "内部 sema 不变式被破坏: typeof 元数不是 1".into(),
+                            span: *span,
+                        });
+                    };
+                    let _ = lower_expr(callee, facts)?;
+                    let operand = lower_expr(&args[0].value, facts)?;
+                    let type_name = operand.ty().name();
+                    Expr::Typeof {
+                        type_name,
+                        span: *span,
+                        info,
+                    }
+                }
+                other => Expr::Call {
+                    callee: Box::new(lower_expr(callee, facts)?),
+                    args: args
+                        .iter()
+                        .map(|arg| lower_call_arg(arg, facts))
+                        .collect::<AliasResult<Vec<_>>>()?,
+                    target: lower_call_target(other, args, facts, *span)?,
                     span: *span,
-                })?,
-                args,
-                facts,
-                *span,
-            )?,
-            span: *span,
-            info,
-        },
+                    info,
+                },
+            }
+        }
         crate::ast::Expr::Juxtapose { lhs, rhs, span } => match call_target.take() {
             Some(LowerCallTarget::FunctionValue) => Expr::Call {
                 callee: Box::new(lower_expr(lhs, facts)?),
@@ -399,6 +442,8 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                         span: rhs.span(),
                     });
                 }
+                // RHS 方法名不是可求值表达式；sema 只为整个 Juxtapose 记录 target，
+                // 因此这里不 lower RHS，避免制造不存在的 BindingId 要求。
                 Expr::MethodCall {
                     recv: Box::new(lower_expr(lhs, facts)?),
                     args: Vec::new(),
@@ -526,6 +571,10 @@ fn lower_call_target(
         }
         LowerCallTarget::Method(_) => Err(AliasError {
             msg: "内部 sema 不变式被破坏: 普通 Call 携带方法 target".into(),
+            span,
+        }),
+        LowerCallTarget::Typeof | LowerCallTarget::ContextualConversion(_) => Err(AliasError {
+            msg: "内部 sema 不变式被破坏: 已解析静态操作进入普通 Call lowering".into(),
             span,
         }),
         LowerCallTarget::FunctionValue => Ok(CallTarget::FunctionValue),
