@@ -4,6 +4,7 @@
 mod ast;
 mod codegen;
 mod lexer;
+mod limits;
 mod linker;
 mod parser;
 mod sema;
@@ -60,6 +61,7 @@ impl TempExecutable {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
+            // 该原子只生成进程内唯一后缀，不发布其它内存状态；Relaxed 已足够。
             let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
             let dir = base.join(format!(
                 "alias_run_{}_{tick:032x}_{seq:016x}",
