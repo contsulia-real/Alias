@@ -27,7 +27,19 @@ pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     })
 }
 
-pub(crate) const RESULT_CONSTRUCTORS: &[&str] = &["ok", "err"];
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResultConstructorName {
+    Ok,
+    Err,
+}
+
+pub(crate) fn classify_result_constructor(name: &str) -> Option<ResultConstructorName> {
+    Some(match name {
+        "ok" => ResultConstructorName::Ok,
+        "err" => ResultConstructorName::Err,
+        _ => return None,
+    })
+}
 
 pub(crate) const TYPE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
@@ -46,11 +58,11 @@ pub(crate) fn is_output_builtin(name: &str) -> bool {
 }
 
 pub(crate) fn is_result_constructor(name: &str) -> bool {
-    RESULT_CONSTRUCTORS.contains(&name)
+    classify_result_constructor(name).is_some()
 }
 
 pub(crate) fn is_reserved_lexical_name(name: &str) -> bool {
     classify_call_builtin(name).is_some()
-        || RESULT_CONSTRUCTORS.contains(&name)
+        || classify_result_constructor(name).is_some()
         || TYPE_NAMES.contains(&name)
 }
