@@ -5,32 +5,29 @@
 pub(crate) mod abi;
 mod emit;
 mod funcgen;
+pub(crate) mod layout;
 mod native_runtime;
 mod runtime;
 
-use emit::cells::{emit_local_cell, first_result};
-use emit::control::emit_body;
-use emit::expr::emit_expr_expected;
-
-use crate::sema::hir::*;
-use crate::sema::types::{FloatW, IntW, Ty, UIntW};
-use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlagsData, Signature, TrapCode, UserFuncName, Value,
+use crate::sema::hir::{
+    BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, Expr, Item, MethodId, Param,
 };
+use crate::sema::types::Ty;
+use crate::target::TARGET_TRIPLE;
+use crate::{AliasError, AliasResult, Span};
+use cranelift_codegen::ir::{Block, Signature};
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
-use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
+use cranelift_frontend::Variable;
+use cranelift_module::{default_libcall_names, FuncId, Module};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 
-use abi::*;
-use funcgen::*;
+use abi::{
+    align_to, build_struct_layouts, project_ty, projected_ty, size_align, ProjectionTable,
+    StructTable, VTy,
+};
 use native_runtime::{define_span_data, emit_native_runtime};
-use runtime::*;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Slot {
@@ -70,12 +67,12 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
     pub(crate) span_table: Vec<(u32, u32)>,
     type_projections: ProjectionTable,
-    struct_layouts: StructTable,
+    pub(crate) struct_layouts: StructTable,
     /// sema 已解析 MethodId → 原生函数/签名。codegen 禁止按 receiver/name 查方法。
-    methods: HashMap<MethodId, FuncId>,
-    method_rets: HashMap<MethodId, VTy>,
-    method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
-    runtime_defined: HashSet<&'static str>,
+    pub(crate) methods: HashMap<MethodId, FuncId>,
+    pub(crate) method_rets: HashMap<MethodId, VTy>,
+    pub(crate) method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
+    pub(crate) runtime_defined: HashSet<&'static str>,
 }
 
 pub(crate) struct PendingFn {
@@ -88,7 +85,7 @@ pub(crate) struct PendingFn {
 
 pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>> {
     let flag_builder = settings::builder();
-    let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
+    let triple = target_lexicon::Triple::from_str(TARGET_TRIPLE)
         .map_err(|error| native_err(Span::default(), format!("目标 triple 无效: {error}")))?;
     // 链接器和 SDK 固定为 Windows x64 MSVC，因此 object ISA 必须使用同一显式目标。
     // 使用宿主探测会让非 x64 宿主产出与 COFF/linker 合同不一致的机器码。
@@ -146,10 +143,16 @@ fn compile_program<M: Module>(
     main_id: BindingId,
 ) -> AliasResult<FuncId> {
     c.struct_layouts = build_struct_layouts(items, &c.type_projections);
-    debug_assert!(c
+    if c
         .struct_layouts
         .values()
-        .all(|layout| (layout.size as usize).is_multiple_of(layout.align)));
+        .any(|layout| !(layout.size as usize).is_multiple_of(layout.align))
+    {
+        return Err(native_err(
+            Span::default(),
+            "内部: 结构体最终大小未按最大字段对齐量取整",
+        ));
+    }
 
     let mut pending_methods: Vec<(FuncId, &Binding)> = Vec::new();
     for b in items.iter().filter_map(|i| match i {
@@ -276,7 +279,7 @@ fn compile_program<M: Module>(
     }
 
     let (main_slot, main_ret) =
-        main_slot_ret.unwrap_or_else(|| invariant_violation("main 存在性 (sema Q④ 已校验)"));
+        main_slot_ret.unwrap_or_else(|| invariant_violation("main 存在性 (sema 已校验)"));
     let entry_fid = c.compile_entry(items, main_slot, main_ret)?;
 
     while let Some(p) = c.pending.pop_front() {
@@ -340,7 +343,16 @@ pub(crate) fn bound_vty<M: Module>(c: &Compiler<M>, frame: &Frame, id: BindingId
 
 #[cfg(test)]
 mod fail_closed_tests {
-    use super::*;
+    use super::Compiler;
+    use crate::target::TARGET_TRIPLE;
+    use cranelift_codegen::ir::types;
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, Signature, UserFuncName};
+    use cranelift_codegen::settings;
+    use cranelift_codegen::Context;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::str::FromStr;
 
     fn return_context(
         fid: FuncId,
@@ -367,7 +379,7 @@ mod fail_closed_tests {
 
     #[test]
     fn verifier_failure_does_not_define_the_function() {
-        let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc").unwrap();
+        let triple = target_lexicon::Triple::from_str(TARGET_TRIPLE).unwrap();
         let isa = cranelift_codegen::isa::lookup(triple)
             .unwrap()
             .finish(settings::Flags::new(settings::builder()))
