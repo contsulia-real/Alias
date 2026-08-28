@@ -1,26 +1,12 @@
-//! 当前语义冒烟测试 — 每条用例对应一条已冻结语言法律。
+//! `alias::run` library 入口的跨层冒烟测试。
+//!
+//! 具体语言法律与精确 stdout/stderr/exit 由 `*_laws` 和 `golden` 拥有；
+//! 本文件只确认 library API 能贯通成功执行与静态错误路径。
 
 use alias::run;
 
-fn ok(src: &str) -> i32 {
-    run(src).unwrap_or_else(|e| panic!("应当通过, 实际: {e}"))
-}
-
-fn should_fail(src: &str) -> String {
-    match run(src) {
-        Err(e) => e.msg,
-        Ok(_) => panic!("应当报错"),
-    }
-}
-
 #[test]
-fn count_to_ten_demo() {
-    let src = include_str!("../demos/count_to_ten.as");
-    assert_eq!(run(src).unwrap(), 0);
-}
-
-#[test]
-fn arithmetic_and_precedence() {
+fn run_api_executes_compiled_program() {
     let src = "
 func i32 main = () -> {
     var i32 x = 6;
@@ -29,88 +15,32 @@ func i32 main = () -> {
     return y - 1
 }
 ";
-    // (6+1)*7-1 = 48
-    assert_eq!(ok(src), 48);
+    assert_eq!(run(src).expect("合法程序应经 run API 执行"), 48);
 }
 
 #[test]
-fn closure_reads_latest_value() {
+fn run_api_executes_closure_and_loop_path() {
     let src = "
 func i32 main = () -> {
     var i32 n = 0;
     func bool lt3 = (i32 cap) -> return n < cap
-    var i32 rounds = 0;
     while lt3(3) {
         increase n
-        increase rounds
     }
-    return rounds
+    return n
 }
 ";
-    assert_eq!(ok(src), 3);
+    assert_eq!(run(src).expect("闭包/循环主链应经 run API 执行"), 3);
 }
 
 #[test]
-fn string_interpolation() {
-    let src = r#"
-func i32 main = () -> {
-    var i32 i = 4;
-    val bool ok = 'n=$i' == 'n=4'
-    while ok == false { return 1 }
-    return 0
-}
-"#;
-    assert_eq!(run(src).unwrap(), 0);
-}
-
-#[test]
-fn val_reassignment_rejected() {
-    let src = "
-func i32 main = () -> {
-    val i32 a = 1;
-    a = 2;
-    return 0
-}
-";
-    let msg = should_fail(src);
-    assert!(msg.contains("val"), "报错应指明 val 不可赋值, 实际: {msg}");
-}
-
-#[test]
-fn missing_type_slot_rejected() {
-    // 类型槽强制非空 — 无推断 (宪法法律)
+fn run_api_returns_static_error() {
     let src = "
 func i32 main = () -> {
     var x = 1;
     return 0
 }
 ";
-    let msg = should_fail(src);
-    assert!(msg.contains("类型槽"), "实际: {msg}");
-}
-
-#[test]
-fn no_paren_call_single_arg_only() {
-    // increase 后同行吞一个一元表达式; 跨行不吞
-    let src = "
-func i32 main = () -> {
-    var i32 a = 10;
-    decrease a
-    return a
-}
-";
-    assert_eq!(ok(src), 9);
-}
-
-#[test]
-fn while_false_is_dead_code() {
-    let src = "
-func i32 main = () -> {
-    while false {
-        return 7
-    }
-    return 3
-}
-";
-    assert_eq!(ok(src), 3);
+    let error = run(src).expect_err("缺失类型槽必须由 run API 返回静态错误");
+    assert!(error.msg.contains("类型槽"), "实际错误: {}", error.msg);
 }
