@@ -6,6 +6,7 @@
 //!   括号深度 > 0 时换行视为普通空白
 //! - 行首延续符 '.' 抑制 Newline (支持链式调用续行)
 
+use crate::limits::{MAX_NESTING, MAX_SOURCE_BYTES, MAX_TOKENS};
 use crate::{AliasError, AliasResult, Span};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,11 +91,11 @@ struct Lexer<'a> {
     line: u32,
     col: u32,
     paren_depth: u32,
-    interp_depth: u16,
+    interp_depth: usize,
+    // 一个源码只有一个 token 预算。`${...}`、嵌套字符串与 `$name` 都必须消耗
+    // 同一计数器，否则攻击者可以把大量 token 藏进字符串插值绕过顶层上限。
+    token_count: usize,
 }
-
-const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_TOKENS: usize = 200_000;
 
 pub fn lex(src: &str) -> AliasResult<Vec<Token>> {
     if src.len() > MAX_SOURCE_BYTES {
@@ -114,15 +115,10 @@ pub fn lex(src: &str) -> AliasResult<Vec<Token>> {
         col: 1,
         paren_depth: 0,
         interp_depth: 0,
+        token_count: 0,
     };
     let mut out = Vec::new();
     while let Some(t) = lx.next_token()? {
-        if out.len() >= MAX_TOKENS {
-            return Err(AliasError {
-                msg: format!("源文件 token 数超过 {MAX_TOKENS} 上限"),
-                span: t.span,
-            });
-        }
         out.push(t);
     }
     Ok(out)
@@ -155,6 +151,29 @@ impl<'a> Lexer<'a> {
             col: self.col.saturating_sub(len).max(1),
             len,
         }
+    }
+
+    fn span_from(&self, start_span: Span) -> Span {
+        Span {
+            line: start_span.line,
+            col: start_span.col,
+            len: if self.line == start_span.line {
+                (self.col - start_span.col).max(1)
+            } else {
+                1
+            },
+        }
+    }
+
+    fn record_token(&mut self, span: Span) -> AliasResult<()> {
+        if self.token_count >= MAX_TOKENS {
+            return Err(AliasError {
+                msg: format!("源文件 token 数超过 {MAX_TOKENS} 上限"),
+                span,
+            });
+        }
+        self.token_count += 1;
+        Ok(())
     }
 
     fn err<T>(&self, msg: impl Into<String>) -> AliasResult<T> {
@@ -207,6 +226,7 @@ impl<'a> Lexer<'a> {
             }
             self.bump();
             if self.paren_depth == 0 && !self.newline_is_continuation() {
+                self.record_token(start_span)?;
                 return Ok(Some(Token {
                     tok: Tok::Newline,
                     span: start_span,
@@ -223,17 +243,8 @@ impl<'a> Lexer<'a> {
             _ => self.lex_symbol()?,
         };
 
-        let end_line = self.line;
-        let end_col = self.col;
-        let span = Span {
-            line: start_span.line,
-            col: start_span.col,
-            len: if end_line == start_span.line {
-                (end_col - start_span.col).max(1)
-            } else {
-                1
-            },
-        };
+        let span = self.span_from(start_span);
+        self.record_token(span)?;
         Ok(Some(Token { tok, span }))
     }
 
@@ -444,8 +455,10 @@ impl<'a> Lexer<'a> {
                     match self.peek() {
                         Some(b'{') => {
                             self.bump();
-                            if self.interp_depth >= 128 {
-                                return self.err("字符串插值嵌套超过 128 层上限");
+                            if self.interp_depth >= MAX_NESTING {
+                                return self.err(format!(
+                                    "字符串插值嵌套超过 {MAX_NESTING} 层上限"
+                                ));
                             }
                             self.interp_depth += 1;
                             let result = self.lex_hole_until_rbrace();
@@ -457,6 +470,7 @@ impl<'a> Lexer<'a> {
                             parts.push(StrPart::Hole(toks));
                         }
                         Some(c2) if is_ident_start(c2) => {
+                            let name_span = self.span_here(1);
                             let name_start = self.pos;
                             while let Some(c3) = self.peek() {
                                 if is_ident_continue(c3) {
@@ -471,15 +485,12 @@ impl<'a> Lexer<'a> {
                             }
                             let name = String::from_utf8_lossy(&self.src[name_start..self.pos])
                                 .into_owned();
-                            let sub = lex(&name).map_err(|mut e| {
-                                e.msg = format!("插值片段 '{name}' 解析失败: {}", e.msg);
-                                e
-                            })?;
-                            let toks = sub.into_iter().map(|t| (t.tok, t.span)).collect();
+                            let span = self.span_from(name_span);
+                            self.record_token(span)?;
                             if !lit.is_empty() {
                                 parts.push(StrPart::Lit(std::mem::take(&mut lit)));
                             }
-                            parts.push(StrPart::Hole(toks));
+                            parts.push(StrPart::Hole(vec![(Tok::Ident(name), span)]));
                         }
                         _ => lit.push('$'),
                     }
@@ -534,13 +545,16 @@ impl<'a> Lexer<'a> {
             let Some(c) = self.peek() else {
                 return self.err("插值 ${...} 未闭合");
             };
+            let start_span = self.span_here(1);
             if c == b'}' {
                 self.bump();
                 depth -= 1;
                 if depth == 0 {
                     break;
                 }
-                toks.push((Tok::RBrace, self.span_here(1)));
+                let span = self.span_from(start_span);
+                self.record_token(span)?;
+                toks.push((Tok::RBrace, span));
                 continue;
             }
             let tok = match c {
@@ -554,7 +568,9 @@ impl<'a> Lexer<'a> {
                 _ if c.is_ascii_digit() => self.lex_int()?,
                 _ => self.lex_symbol()?,
             };
-            toks.push((tok, self.span_here(1)));
+            let span = self.span_from(start_span);
+            self.record_token(span)?;
+            toks.push((tok, span));
         }
         Ok(toks)
     }
