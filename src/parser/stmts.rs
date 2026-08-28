@@ -2,6 +2,7 @@
 
 use super::Parser;
 use crate::ast::{BindKind, Binding, CallArg, Expr, Stmt};
+use crate::builtins::is_output_builtin;
 use crate::lexer::Tok;
 use crate::{AliasError, AliasResult, Span};
 
@@ -93,12 +94,10 @@ impl Parser {
                     span,
                 })
             }
-            // `println f 0` / `print f 'x'`：外层输出内建的唯一实参可以是
-            // 一个完整的普通无括号单参调用。只在第二个标识符后确实存在
-            // 普通无括号实参起始 token 时启用，因此 `println x + 1` 以及
-            // `dup 5 + 1` 的既有“无括号绑定紧于二元运算”规则完全不变。
+            // 输出内建的唯一实参可以是一个完整的普通无括号单参调用。这里仅查询
+            // builtins owner 的语法分类，不复制 print/println 名字表。
             Some(Tok::Ident(name))
-                if matches!(name.as_str(), "println" | "print")
+                if is_output_builtin(name)
                     && matches!(self.peek_at(1), Some(Tok::Ident(_)))
                     && matches!(
                         self.peek_at(2),
