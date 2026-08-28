@@ -15,7 +15,7 @@ use crate::sema::hir::{
 use crate::sema::types::Ty;
 use crate::target::TARGET_TRIPLE;
 use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::{Block, Signature};
+use cranelift_codegen::ir::Block;
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_frontend::Variable;
@@ -61,18 +61,15 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
     pub(crate) next_fid: u32,
-    pub(crate) fn_ids: Vec<FuncId>,
-    pub(crate) fn_rets: Vec<VTy>,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
     pub(crate) span_table: Vec<(u32, u32)>,
     type_projections: ProjectionTable,
-    pub(crate) struct_layouts: StructTable,
+    struct_layouts: StructTable,
     /// sema 已解析 MethodId → 原生函数/签名。codegen 禁止按 receiver/name 查方法。
-    pub(crate) methods: HashMap<MethodId, FuncId>,
-    pub(crate) method_rets: HashMap<MethodId, VTy>,
-    pub(crate) method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
-    pub(crate) runtime_defined: HashSet<&'static str>,
+    methods: HashMap<MethodId, FuncId>,
+    method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
+    runtime_defined: HashSet<&'static str>,
 }
 
 pub(crate) struct PendingFn {
@@ -110,15 +107,12 @@ pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>>
         top_slots: Vec::new(),
         global_bytes: 0,
         next_fid: 0,
-        fn_ids: Vec::new(),
-        fn_rets: Vec::new(),
         pending: VecDeque::new(),
         str_data: HashMap::new(),
         span_table: Vec::new(),
         type_projections,
         struct_layouts: HashMap::new(),
         methods: HashMap::new(),
-        method_rets: HashMap::new(),
         method_sigs: HashMap::new(),
         runtime_defined: HashSet::new(),
     };
@@ -183,7 +177,6 @@ fn compile_program<M: Module>(
         let fid =
             c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv_name}>{mname}"))?;
         c.methods.insert(*method_id, fid);
-        c.method_rets.insert(*method_id, ret_vty.clone());
         c.method_sigs.insert(*method_id, (param_vtys, ret_vty));
         pending_methods.push((fid, b));
     }
@@ -214,8 +207,6 @@ fn compile_program<M: Module>(
                 let name = format!("u{}", c.next_fid);
                 c.next_fid += 1;
                 let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
-                c.fn_ids.push(fid);
-                c.fn_rets.push(ret_vty.clone());
                 top_funcs.push((fid, slot, b));
                 if b.binding_id == main_id {
                     main_slot_ret = Some((slot, ret_vty));
@@ -407,15 +398,12 @@ mod fail_closed_tests {
             top_slots: Vec::new(),
             global_bytes: 0,
             next_fid: 0,
-            fn_ids: Vec::new(),
-            fn_rets: Vec::new(),
             pending: VecDeque::new(),
             str_data: HashMap::new(),
             span_table: Vec::new(),
             type_projections: HashMap::new(),
             struct_layouts: HashMap::new(),
             methods: HashMap::new(),
-            method_rets: HashMap::new(),
             method_sigs: HashMap::new(),
             runtime_defined: HashSet::new(),
         };
