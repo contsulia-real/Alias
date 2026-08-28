@@ -1,7 +1,8 @@
-use super::{require_value, Checker, Env, ExprCheckResult, Scope, VarInfo};
+use super::operators::require_value;
+use super::typing::ExprCheckResult;
 use crate::ast::{ArmBody, CtorKind, Expr, MatchArm, Pattern, Stmt};
-use crate::sema::ensure_user_lexical_name;
 use crate::sema::types::{int_literal_fits, types_match, Ty};
+use crate::sema::{ensure_user_lexical_name, Checker, Env, Scope, VarInfo};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashSet;
 
