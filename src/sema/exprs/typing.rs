@@ -3,7 +3,7 @@ use super::operators::{
     require_value,
 };
 use crate::ast::{CtorKind, Expr};
-use crate::builtins::{is_result_constructor, CallBuiltinName};
+use crate::builtins::{classify_result_constructor, CallBuiltinName};
 use crate::sema::hir::{BindingId, ResolvedConversion};
 use crate::sema::types::{types_match, Ty};
 use crate::sema::{Checker, Env, LowerCallTarget, LowerExprInfo, Scope};
@@ -306,15 +306,8 @@ impl Checker {
             }
             (Expr::Call { callee, args, span }, Ty::Result(ok, err)) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    if is_result_constructor(name) {
-                        self.record_call_target(
-                            e,
-                            LowerCallTarget::ResultConstructor(if name == "ok" {
-                                CtorKind::Ok
-                            } else {
-                                CtorKind::Err
-                            }),
-                        );
+                    if let Some(kind) = classify_result_constructor(name) {
+                        self.record_call_target(e, LowerCallTarget::ResultConstructor(kind));
                         let [arg] = args.as_slice() else {
                             return Err(AliasError {
                                 msg: format!("{name} 构造恰好接受 1 个参数"),
@@ -329,10 +322,9 @@ impl Checker {
                             }
                             .into());
                         }
-                        let payload = if name == "ok" {
-                            ok.as_ref()
-                        } else {
-                            err.as_ref()
+                        let payload = match kind {
+                            CtorKind::Ok => ok.as_ref(),
+                            CtorKind::Err => err.as_ref(),
                         };
                         self.expr_expected(&arg.value, env, payload)?;
                         return Ok(expected.clone());
