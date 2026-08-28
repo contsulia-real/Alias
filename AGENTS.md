@@ -5,7 +5,7 @@
 **当前语言规范：** `docs/spec-notes.md`
 
 > 本文件只拥有 **当前工程结构、架构边界、代码维护不变式与验证方式**。  
-> 语言语法、类型规则、Pattern、转换、显示等用户可观察语义只由 `docs/spec-notes.md` 定义；历史变化只由 `MIGRATION.md` 记录。不得在本文件复制第二份语言规范。
+> 语言语法、类型规则、Pattern、转换、显示等用户可观察语义只由 `docs/spec-notes.md` 定义。不得在本文件复制第二份语言规范，也不得保留会与当前状态竞争的历史规范。
 
 ## 1. 项目与唯一执行模型
 
@@ -38,18 +38,17 @@ source.as
 2. `docs/spec-notes.md` 当前语言规范；
 3. 本文件中的工程边界；
 4. `GENERAL_ENGINEERING_RULES.md`；
-5. `NO_CI.md`；
-6. `MIGRATION.md` 仅用于解释历史，不得反向覆盖当前状态。
+5. `NO_CI.md`。
 
 聊天历史、旧 commit、旧 Phase 编号和迁移期间的中间设计都不能替代当前源码与当前规范。
 
-缺失产品、语言、架构、迁移或兼容性裁决时，必须明确标记为未知/待裁决，不能自行补全。当前仍未冻结的长期决策（例如最终内存生命周期模型、失败 build 对旧成功 exe 的保留策略）不得从现状反推为永久设计。
+缺失产品、语言、架构或兼容性裁决时，必须明确标记为未知/待裁决，不能自行补全。当前仍未冻结的长期决策（例如最终内存生命周期模型、失败 build 对旧成功 exe 的保留策略）不得从现状反推为永久设计。
 
 ## 3. 当前源码结构与 owner
 
 ```text
 src/
-├── main.rs                 # CLI 参数与进程退出映射
+├── main.rs                 # CLI 参数、编译器工作线程栈与进程退出映射
 ├── lib.rs                  # run/build 编排；AliasError / Span
 ├── target.rs               # 编译器内部目标 triple owner
 ├── limits.rs               # 当前共享输入/表达式限制 owner
@@ -179,6 +178,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 - 对用户输入的深度/规模必须有显式上限；
 - HIR capture/validation 等遍历避免对不可信嵌套使用宿主递归；
+- CLI 在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖 Windows 主线程默认栈承载合法输入；
 - 用户输入超限必须产生 `AliasError`，不能 panic；
 - internal invariant panic 只用于 sema 成功后理论上不可达的编译器内部状态。
 
@@ -218,14 +218,13 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 同一个行为 contract 不应在 smoke/golden/demo corpus 中再建多个近似副本。真实 native 生命周期、destructive/security 边界不能为了减少测试数被机械删除。
 
-测试文件和注释使用当前职责名称；`parity`、迁移 P0/P1/P3 等历史脚手架只保留在 `MIGRATION.md`。
+测试文件和注释只使用当前职责名称；`parity`、迁移 P0/P1/P3 等历史脚手架不得保留在当前工程中。
 
 ## 13. 文档责任边界
 
 - `docs/spec-notes.md`：当前语言规范，唯一用户可观察语义 owner；
 - `AGENTS.md`：当前工程结构、owner、架构边界、维护规则；
-- `MIGRATION.md`：历史迁移账本；旧阶段、旧路径、旧实现描述允许保留，但不得作为当前规范；
-- topic docs：只拥有其明确专题，若已成为纯历史说明必须明确标识；
+- topic docs：只拥有其明确专题，纯历史说明应删除，不能与当前规范并存；
 - `GENERAL_ENGINEERING_RULES.md`：跨项目工程规则；
 - `NO_CI.md`：Alias CI 永久禁用硬规则。
 
@@ -237,7 +236,7 @@ Alias 是正式、长期维护项目，不以 MVP/Demo/PoC 标准降级实现。
 
 预发布开发历史不是兼容义务：新设计正式替换旧设计后，删除旧 AST、旧分支、fallback、桥接层、兼容别名和历史测试脚手架。只保留一个当前正确形态。
 
-CI 永久禁用。不得新增、恢复或建议 GitHub Actions 或其它 CI。需要验证时只使用显式手动命令：
+CI 永久禁用。不得新增、恢复或建议 GitHub Actions 或其它 CI。`.cargo/config.toml` 对整个 Alias crate 强制启用 `-D warnings`；所有 target 必须保持零 warning，不得用全局 `allow` 降级门禁。需要验证时只使用显式手动命令：
 
 ```bash
 cargo check

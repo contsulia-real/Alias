@@ -1,6 +1,8 @@
 use super::arrays::{array_raw, emit_array_lit};
 use super::calls::{emit_call, emit_method_call, field_offset, field_vty};
-use super::cells::{cell_addr, coerce_ret, ensure_current, pop_scope, push_scope, read_cell};
+use super::cells::{
+    cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
+};
 use super::control::emit_stmt;
 use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, emit_index_guard, narrow, widen_signed,
@@ -22,7 +24,7 @@ use crate::sema::types::FloatW;
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 

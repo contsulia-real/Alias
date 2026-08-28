@@ -3,17 +3,9 @@
 use crate::codegen::runtime::{
     runtime_contract, validate_contract_table, RuntimeContract, RUNTIME_CONTRACTS,
 };
-use crate::codegen::{invariant_violation, native_err, Compiler};
+use crate::codegen::{native_err, Compiler};
 use crate::{AliasResult, Span};
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{
-    BlockArg, Function, InstBuilder, StackSlotData, StackSlotKind, UserFuncName, Value,
-};
-use cranelift_codegen::Context;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
-use std::collections::HashMap;
 
 pub(super) struct NativeExterns {
     pub(super) get_std_handle: FuncId,
@@ -23,24 +15,27 @@ pub(super) struct NativeExterns {
 
 macro_rules! shim {
     ($c:expr, $name:expr, |$bcx:ident, $a:ident| $body:block) => {{
-        let (__fid, __sig, __contract) = declare_runtime_shim($c, $name)?;
+        let (__fid, __sig, __contract) =
+            $crate::codegen::native_runtime::declare_runtime_shim($c, $name)?;
         let __ret = __contract.ret.map(|v| v.ty.resolve($c.ptr_ty));
-        let mut __ctx = Context::new();
-        __ctx.func =
-            Function::with_name_signature(UserFuncName::user(0x77, __fid.as_u32()), __sig.clone());
-        let mut __fbc = FunctionBuilderContext::new();
-        let mut $bcx = FunctionBuilder::new(&mut __ctx.func, &mut __fbc);
+        let mut __ctx = cranelift_codegen::Context::new();
+        __ctx.func = cranelift_codegen::ir::Function::with_name_signature(
+            cranelift_codegen::ir::UserFuncName::user(0x77, __fid.as_u32()),
+            __sig.clone(),
+        );
+        let mut __fbc = cranelift_frontend::FunctionBuilderContext::new();
+        let mut $bcx = cranelift_frontend::FunctionBuilder::new(&mut __ctx.func, &mut __fbc);
         let __entry = $bcx.create_block();
         $bcx.append_block_params_for_function_params(__entry);
         $bcx.switch_to_block(__entry);
         $bcx.seal_block(__entry);
-        let $a: Vec<Value> = $bcx.block_params(__entry).to_vec();
+        let $a: Vec<cranelift_codegen::ir::Value> = $bcx.block_params(__entry).to_vec();
         let _ = &$a;
         let __terminated: bool = $body;
         if !__terminated {
             if __ret.is_some() {
-                return Err(native_err(
-                    Span::default(),
+                return Err($crate::codegen::native_err(
+                    $crate::Span::default(),
                     format!("内部: 有返回值 runtime shim '{}' 未终止", $name),
                 ));
             }

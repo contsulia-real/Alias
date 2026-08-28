@@ -4,7 +4,7 @@ use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET
 use crate::codegen::{native_err, Compiler};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::ir::{types, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};

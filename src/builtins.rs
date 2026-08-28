@@ -53,10 +53,6 @@ pub(crate) fn is_output_builtin(name: &str) -> bool {
     )
 }
 
-pub(crate) fn is_result_constructor(name: &str) -> bool {
-    classify_result_constructor(name).is_some()
-}
-
 pub(crate) fn is_reserved_lexical_name(name: &str) -> bool {
     classify_call_builtin(name).is_some()
         || classify_result_constructor(name).is_some()

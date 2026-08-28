@@ -1,0 +1,2 @@
+# Keep repository text deterministic across Windows and Unix tooling.
+* text=auto eol=lf

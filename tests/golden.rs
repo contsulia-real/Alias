@@ -2,7 +2,7 @@
 //!
 //! 本文件断言编译产物/CLI 的精确三元组 (stdout 字节, stderr 字节, 退出码)。
 //! `demos/*.as` 的全量语料基线由 `demo_corpus.rs` 单独拥有，不在这里重复。
-//! 当前语言规范见 `docs/spec-notes.md`；历史变更见 `MIGRATION.md`。
+//! 当前语言规范见 `docs/spec-notes.md`。
 
 use std::path::PathBuf;
 use std::process::Command;

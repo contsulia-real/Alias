@@ -2,7 +2,31 @@ use alias::{build, run};
 use std::io::ErrorKind;
 use std::process::ExitCode;
 
+const COMPILER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    let worker = match std::thread::Builder::new()
+        .name("alias-compiler".into())
+        // Frontend and Cranelift emission still contain bounded recursive descents. The Windows
+        // main-thread stack is too small even below the accepted nesting limit, so execute the
+        // same compiler pipeline on an explicitly provisioned stack rather than crashing on
+        // otherwise valid input.
+        .stack_size(COMPILER_STACK_BYTES)
+        .spawn(cli_main)
+    {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("无法启动编译器工作线程: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match worker.join() {
+        Ok(code) => code,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn cli_main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // `alias <file>` 与 `alias run <file>` 都是当前正式的一等入口。

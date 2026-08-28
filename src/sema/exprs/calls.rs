@@ -4,7 +4,7 @@ use crate::ast::{CallArg, CtorKind, Expr};
 use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
 use crate::sema::hir::{BuiltinCall, MethodTarget};
 use crate::sema::types::Ty;
-use crate::sema::{builtin_method, Checker, Env, LowerCallTarget, MethodInfo, Scope};
+use crate::sema::{builtin_method, Checker, Env, LowerCallTarget, Scope};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {

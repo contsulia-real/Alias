@@ -1,5 +1,5 @@
 use super::{Body, CallTarget, Expr, Item, Stmt};
-use crate::sema::types::Ty;
+use crate::sema::types::{IntW, Ty};
 
 fn checked(source: &str) -> super::CheckedProgram {
     let tokens = crate::lexer::lex(source).unwrap();
@@ -47,7 +47,7 @@ fn resolved_hir_rejects_constructor_arg_type_drift() {
     let Expr::Int(_, _, info) = &mut arg.value else {
         panic!("fixture constructor arg must be an integer literal")
     };
-    info.ty = Ty::Str;
+    info.ty = Ty::Int(IntW::W64);
 
     let error = super::validate_resolved_hir(&program)
         .expect_err("constructor arg type drift must fail the final HIR gate");

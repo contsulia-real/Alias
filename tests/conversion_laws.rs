@@ -37,8 +37,8 @@ func i32 main = () -> {
     val u8 byte = (u8) wide
     val i16 signed = from(byte)
     val f32 fractional = from signed
-    val i32 result = (i32) fractional
-    return result
+    val i32 converted = (i32) fractional
+    return converted
 }
 "#;
     assert_eq!(run(src).unwrap(), 255);

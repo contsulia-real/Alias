@@ -1,6 +1,7 @@
 use crate::ast::{CallArg, Expr};
 use crate::lexer::Tok;
-use crate::parser::{Parser, MAX_EXPR_CHAIN};
+use crate::limits::MAX_EXPR_CHAIN;
+use crate::parser::Parser;
 use crate::AliasResult;
 
 impl Parser {

@@ -1,7 +1,6 @@
 use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, CallArg, CallTarget, CheckedProgram, Expr,
-    ExprInfo, Item, LowerFacts, MatchArm, Param, ResolvedConversion, Stmt, StrPart, StructDef,
-    StructField,
+    ExprInfo, Item, LowerFacts, MatchArm, Param, Stmt, StrPart, StructDef, StructField,
 };
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
@@ -273,7 +272,41 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         });
     }
     let mut call_target = lower_info.call_target.take();
+    let implicit_zero_callee = lower_info.implicit_zero_callee.take();
     let info = ExprInfo { ty: lower_info.ty };
+
+    if let Some(callee_ty) = implicit_zero_callee {
+        if !matches!(call_target.take(), Some(LowerCallTarget::FunctionValue)) {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 隐式零参调用缺少函数调用 target".into(),
+                span: expr.span(),
+            });
+        }
+        let callee_info = ExprInfo { ty: callee_ty };
+        let callee = match expr {
+            crate::ast::Expr::Ident(name, span) => Expr::Ident(
+                name.clone(),
+                facts.expr_binding_ids.remove(&key),
+                *span,
+                callee_info,
+            ),
+            crate::ast::Expr::This(span) => Expr::This(*span, callee_info),
+            _ => {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: 隐式零参调用的 callee 不是直接函数引用"
+                        .into(),
+                    span: expr.span(),
+                })
+            }
+        };
+        return Ok(Expr::Call {
+            callee: Box::new(callee),
+            args: Vec::new(),
+            target: CallTarget::FunctionValue,
+            span: expr.span(),
+            info,
+        });
+    }
 
     Ok(match expr {
         crate::ast::Expr::Int(value, span) => Expr::Int(*value, *span, info),

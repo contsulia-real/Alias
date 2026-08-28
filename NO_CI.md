@@ -14,6 +14,6 @@
 - 不得在未来任务中询问是否重新启用 CI；默认答案永久为“不启用”。
 - 编译、测试、格式检查和其他验证只能由开发者或执行代理显式手动运行，例如 `cargo check`、`cargo build`、`cargo test --all-targets`、`cargo clippy --all-targets`。
 
-本文只规定验证方式，不描述语言语义。当前语言与编译器状态以 `docs/spec-notes.md` 和 `AGENTS.md` 为准；历史演进以 `MIGRATION.md` 为准。
+本文只规定验证方式，不描述语言语义。当前语言与编译器状态以 `docs/spec-notes.md` 和 `AGENTS.md` 为准。
 
 除非仓库所有者明确修改或删除本文件中的这条项目规则，否则任何工具和代理都必须继续遵守。

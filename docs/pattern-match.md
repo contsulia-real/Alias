@@ -2,7 +2,7 @@
 
 **同步日期：** 2026-08-28
 
-> 本文是 Pattern 专题说明；总规范以 `docs/spec-notes.md` 为准。这里只描述当前有效状态，历史演进见 `MIGRATION.md`。
+> 本文是 Pattern 专题说明；总规范以 `docs/spec-notes.md` 为准。这里只描述当前有效状态。
 
 ## 1. AST / HIR 边界
 
@@ -73,4 +73,4 @@ match 的产生值臂必须统一到共同静态类型，并接受外层目标�
 - `tests/result_laws.rs`
 - `tests/function_value_laws.rs`（match 产生函数值并直接调用）
 
-历史演进见 `MIGRATION.md`；当前语义以本文件和 `docs/spec-notes.md` 为准。
+当前语义以本文件和 `docs/spec-notes.md` 为准。

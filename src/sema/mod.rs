@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use types::{FloatW, IntW, Ty, UIntW};
+use types::{IntW, Ty};
 
 /// 只在 sema 检查阶段存在；lowering 会把 target 固化到具体 HIR 节点并消除此状态。
 pub(crate) struct LowerExprInfo {

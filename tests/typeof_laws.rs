@@ -10,14 +10,14 @@ fn typeof_supports_parenthesized_and_noparen_static_queries() {
 func i32 main = () -> {
     val u32 u = 1
     val array<u32> values = [u]
-    val iterator<u32> iterator = values.iterator()
+    val iterator<u32> cursor = values.iterator()
     val result<u32, string> outcome = ok(u)
     val string bare = typeof u
     if bare != 'u32' { return 1 }
     if typeof(values) != 'array<u32>' { return 2 }
     if '${typeof u}' != 'u32' { return 3 }
     if typeof((string) u) != 'string' { return 4 }
-    if (typeof iterator) != 'iterator<u32>' { return 5 }
+    if (typeof cursor) != 'iterator<u32>' { return 5 }
     if (typeof outcome) != 'result<u32, string>' { return 6 }
     return 0
 }

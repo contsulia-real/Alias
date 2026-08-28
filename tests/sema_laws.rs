@@ -1,6 +1,6 @@
 //! sema 当前法律测试 — 每项检查一条当前静态语义，负向用例断言中文消息 + 行:列。
 //!
-//! 测试名称与说明只描述当前语言行为；历史来源和旧实现差异属于 `MIGRATION.md`。
+//! 测试名称与说明只描述当前语言行为，不保留历史来源和旧实现差异。
 //! 列号语义按当前 lexer 的 `span_here` 算法冻结：`max(可视列-1, 1)`。
 
 use alias::{run, AliasError};
@@ -269,13 +269,13 @@ fn ordered_comparison_on_bool_rejected() {
 
 #[test]
 fn bool_equality_is_legal() {
-    let src = "\nfunc i32 main = () -> {\n    val bool ok = true == true\n    while ok == false { return 1 }\n    return 0\n}\n";
+    let src = "\nfunc i32 main = () -> {\n    val bool comparison = true == true\n    while comparison == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]
 fn string_ordering_is_legal() {
-    let src = "\nfunc i32 main = () -> {\n    val bool ok = 'a' < 'b'\n    while ok == false { return 1 }\n    return 0\n}\n";
+    let src = "\nfunc i32 main = () -> {\n    val bool comparison = 'a' < 'b'\n    while comparison == false { return 1 }\n    return 0\n}\n";
     assert_eq!(run(src).unwrap(), 0);
 }
 

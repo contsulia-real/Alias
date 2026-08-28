@@ -299,10 +299,8 @@ fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
                 return Err(invariant(cond.span(), "If HIR 条件不是 bool"));
             }
         }
-        Stmt::While { cond, .. } => {
-            if cond.ty() != &Ty::Bool {
-                return Err(invariant(cond.span(), "While HIR 条件不是 bool"));
-            }
+        Stmt::While { cond, .. } if cond.ty() != &Ty::Bool => {
+            return Err(invariant(cond.span(), "While HIR 条件不是 bool"));
         }
         _ => {}
     }
