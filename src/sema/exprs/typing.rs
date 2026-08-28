@@ -48,6 +48,9 @@ impl From<AliasError> for ExprCheckError {
 
 impl Checker {
     pub(super) fn expr_key(e: &Expr) -> usize {
+        // expr facts 与 binding facts 共享同一阶段约束：key 是本次 check→lower 调用链内
+        // AST 节点的临时地址，不是持久 identity。两阶段之间移动/替换 AST 会让 facts
+        // 错配；若未来需要 AST 重写，必须先引入稳定 NodeId，而不是继续依赖地址。
         e as *const Expr as usize
     }
 
@@ -136,6 +139,7 @@ impl Checker {
         assert_eq!(params.len(), types.len());
         assert_eq!(params.len(), ids.len());
         for ((param, ty), id) in params.iter().zip(types).zip(ids) {
+            // Param facts use the same transient AST-address identity as expression facts.
             let key = param as *const crate::ast::Param as usize;
             self.param_types.insert(key, ty.clone());
             self.param_ids.insert(key, *id);
@@ -208,16 +212,12 @@ impl Checker {
             };
         }
         if let Some((name, arg, span)) = contextual_conversion(e) {
-            self.record_call_target(
-                e,
-                LowerCallTarget::Builtin(if name == "from" {
-                    BuiltinCall::From
-                } else {
-                    BuiltinCall::TryFrom
-                }),
-            );
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
+                self.record_call_target(
+                    e,
+                    LowerCallTarget::ContextualConversion(ResolvedConversion::Convert),
+                );
                 return Ok(expected.clone());
             }
             if name == "from" {
@@ -227,6 +227,10 @@ impl Checker {
                 }
                 .into());
             }
+            self.record_call_target(
+                e,
+                LowerCallTarget::ContextualConversion(ResolvedConversion::Identity),
+            );
             return self.check_inferred_expected(arg, env, expected);
         }
         if let Some(r) = literal_slot_unify(expected, e) {
@@ -293,7 +297,7 @@ impl Checker {
             }
             (Expr::Call { callee, args, span }, Ty::Result(ok, err)) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    if Scope::get(env, name).is_none() && (name == "ok" || name == "err") {
+                    if is_result_constructor(name) {
                         self.record_call_target(
                             e,
                             LowerCallTarget::ResultConstructor(if name == "ok" {
@@ -372,16 +376,12 @@ impl Checker {
             return result;
         }
         if let Some((name, arg, span)) = contextual_conversion(e) {
-            self.record_call_target(
-                e,
-                LowerCallTarget::Builtin(if name == "from" {
-                    BuiltinCall::From
-                } else {
-                    BuiltinCall::TryFrom
-                }),
-            );
             let source = require_value(self.expr(arg, env)?, arg.span())?;
             if conversion_exists(&source, expected) {
+                self.record_call_target(
+                    e,
+                    LowerCallTarget::ContextualConversion(ResolvedConversion::Convert),
+                );
                 return Ok(expected.clone());
             }
             if name == "from" {
@@ -391,6 +391,10 @@ impl Checker {
                 }
                 .into());
             }
+            self.record_call_target(
+                e,
+                LowerCallTarget::ContextualConversion(ResolvedConversion::Identity),
+            );
             return Ok(source);
         }
         let Expr::Binary { op, lhs, rhs, span } = e else {
