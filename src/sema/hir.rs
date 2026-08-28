@@ -12,6 +12,8 @@ mod visit;
 mod contract_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod typed_contract_tests;
 
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
