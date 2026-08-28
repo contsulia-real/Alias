@@ -1,6 +1,13 @@
 use super::display_float::emit_float_display_shim;
 use super::display_integer::emit_integer_display_shim;
-use super::*;
+use super::NativeExterns;
+use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
+use crate::codegen::Compiler;
+use crate::AliasResult;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift_module::Module;
+use std::collections::HashMap;
 
 pub(super) fn emit_display_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
@@ -149,9 +156,15 @@ pub(super) fn emit_display_runtime<M: Module>(
                 let c23 = bcx.ins().iconst(types::I64, 23);
                 bcx.ins().isub(c23, p)
             };
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-            bcx.ins().store(MemFlagsData::new(), start, blk, 0);
-            bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+            let blk = call_rt_m!(
+                bcx,
+                "rt.heap.alloc",
+                vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+            );
+            bcx.ins()
+                .store(MemFlagsData::new(), start, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
             bcx.ins().return_(&[blk]);
         }
         true
@@ -170,9 +183,15 @@ pub(super) fn emit_display_runtime<M: Module>(
         let t_len = bcx.ins().iconst(types::I64, 4);
         let f_len = bcx.ins().iconst(types::I64, 5);
         let len = bcx.ins().select(is_t, t_len, f_len);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-        bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
-        bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+        let blk = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+        );
+        bcx.ins()
+            .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
         true
     });
@@ -190,9 +209,15 @@ pub(super) fn emit_display_runtime<M: Module>(
         shim!(c, name, |bcx, _a| {
             let addr = sym!(bcx, dname);
             let len = bcx.ins().iconst(types::I64, dlen);
-            let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-            bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
-            bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+            let blk = call_rt_m!(
+                bcx,
+                "rt.heap.alloc",
+                vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+            );
+            bcx.ins()
+                .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
             bcx.ins().return_(&[blk]);
             true
         });
@@ -206,9 +231,15 @@ pub(super) fn emit_display_runtime<M: Module>(
         let err_len = bcx.ins().iconst(types::I64, 5);
         let addr = bcx.ins().select(is_ok, ok_addr, err_addr);
         let len = bcx.ins().select(is_ok, ok_len, err_len);
-        let blk = call_rt_m!(bcx, "rt.heap.alloc", vec![bcx.ins().iconst(types::I64, 16)]);
-        bcx.ins().store(MemFlagsData::new(), addr, blk, 0);
-        bcx.ins().store(MemFlagsData::new(), len, blk, 8);
+        let blk = call_rt_m!(
+            bcx,
+            "rt.heap.alloc",
+            vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
+        );
+        bcx.ins()
+            .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
         true
     });
