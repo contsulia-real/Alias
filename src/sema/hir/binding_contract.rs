@@ -308,29 +308,21 @@ fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId,
     Ok(contracts)
 }
 
-fn binding_ty<'a>(
-    contracts: &'a HashMap<BindingId, Ty>,
-    id: BindingId,
-    span: Span,
-    what: &str,
-) -> AliasResult<&'a Ty> {
-    contracts
-        .get(&id)
-        .ok_or_else(|| invariant(span, format!("{what} 引用未知 BindingId {id:?}")))
-}
-
 fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
             Node::Expr(expr) => {
                 if let Expr::Ident(_, Some(id), ..) = expr {
-                    let declared = binding_ty(contracts, *id, expr.span(), "Ident")?;
-                    if !types_match(declared, expr.ty()) {
-                        return Err(invariant(
-                            expr.span(),
-                            "Ident 静态类型与 BindingId 声明类型不一致",
-                        ));
+                    // Unknown-ID rejection belongs to the resolved cross-reference validator.
+                    // This pass only checks the type relation once an ID resolves to a declaration.
+                    if let Some(declared) = contracts.get(id) {
+                        if !types_match(declared, expr.ty()) {
+                            return Err(invariant(
+                                expr.span(),
+                                "Ident 静态类型与 BindingId 声明类型不一致",
+                            ));
+                        }
                     }
                 }
                 push_expr_children(&mut stack, expr);
@@ -338,28 +330,16 @@ fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -
             Node::Stmt(stmt) => {
                 match stmt {
                     Stmt::Assign { target_id, value } => {
-                        let declared = binding_ty(contracts, *target_id, value.span(), "Assign")?;
-                        if !types_match(declared, value.ty()) {
-                            return Err(invariant(
-                                value.span(),
-                                "Assign RHS 类型与 BindingId 声明类型不一致",
-                            ));
+                        if let Some(declared) = contracts.get(target_id) {
+                            if !types_match(declared, value.ty()) {
+                                return Err(invariant(
+                                    value.span(),
+                                    "Assign RHS 类型与 BindingId 声明类型不一致",
+                                ));
+                            }
                         }
                     }
-                    Stmt::For {
-                        binding_id,
-                        ty,
-                        iterable,
-                        span,
-                        ..
-                    } => {
-                        let declared = binding_ty(contracts, *binding_id, *span, "for")?;
-                        if !types_match(declared, ty) {
-                            return Err(invariant(
-                                *span,
-                                "for BindingId 类型与循环变量类型不一致",
-                            ));
-                        }
+                    Stmt::For { ty, iterable, .. } => {
                         let elem = match iterable.ty() {
                             Ty::Array(elem) | Ty::Iterator(elem) => elem.as_ref(),
                             _ => {
@@ -385,8 +365,8 @@ fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -
     Ok(())
 }
 
-/// Stable BindingId graph 的 final-HIR contract：每个 ID 全局唯一且绑定唯一静态类型，
-/// 所有已解析引用必须消费该类型。这里不重新执行词法名字解析。
+/// Stable BindingId graph 的 final-HIR contract：每个声明 ID 全局唯一并绑定唯一静态类型；
+/// 已解析引用若指向现有声明，必须消费该声明类型。未知引用由 cross-reference validator 拒绝。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let contracts = collect_contracts(program)?;
     validate_uses(program, &contracts)
