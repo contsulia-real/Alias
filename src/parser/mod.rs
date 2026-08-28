@@ -6,6 +6,7 @@ mod stmts;
 
 use crate::ast::{Program, TypeExpr};
 use crate::lexer::{Tok, Token};
+use crate::limits::MAX_NESTING;
 use crate::{AliasError, AliasResult, Span};
 
 pub fn parse(tokens: Vec<Token>) -> AliasResult<Program> {
@@ -13,9 +14,6 @@ pub fn parse(tokens: Vec<Token>) -> AliasResult<Program> {
     let mut p = Parser::new(tokens);
     p.parse_program()
 }
-
-pub(super) const MAX_EXPR_CHAIN: usize = 256;
-const MAX_NESTING: usize = 128;
 
 fn validate_nesting(tokens: &[Token]) -> AliasResult<()> {
     let mut depth = 0usize;
@@ -98,6 +96,17 @@ impl Parser {
             Ok(self.bump())
         } else {
             Err(self.err_here(format!("期望 {:?}, 实际 {:?}", tok, self.peek().cloned())))
+        }
+    }
+
+    fn expect_eof(&self) -> AliasResult<()> {
+        if self.peek().is_none() {
+            Ok(())
+        } else {
+            Err(self.err_here(format!(
+                "表达式结束后存在意外 token {:?}",
+                self.peek().cloned()
+            )))
         }
     }
 
