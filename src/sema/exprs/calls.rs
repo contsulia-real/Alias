@@ -1,5 +1,12 @@
-use super::*;
-use crate::sema::MethodInfo;
+use super::{
+    builtin_method, require_value, Checker, Env, ExprCheckError, MethodInfo, Scope,
+};
+use crate::ast::{CallArg, CtorKind, Expr};
+use crate::builtins::is_result_constructor;
+use crate::sema::hir::{BuiltinCall, MethodTarget};
+use crate::sema::types::{Ty};
+use crate::sema::LowerCallTarget;
+use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
     pub(super) fn call(
@@ -10,10 +17,10 @@ impl Checker {
         env: &Env,
     ) -> AliasResult<Ty> {
         if let Expr::Ident(name, _) = callee {
-            if Scope::get(env, name).is_none() && self.structs.contains_key(name) {
+            if self.structs.contains_key(name) {
                 return self.construct(name, args, span, env);
             }
-            if Scope::get(env, name).is_none() && (name == "ok" || name == "err") {
+            if is_result_constructor(name) {
                 return self.result_ctor(name, args, span, env);
             }
         }
@@ -26,52 +33,56 @@ impl Checker {
             }
         }
         if let Expr::Ident(name, _) = callee {
-            if name == "increase" || name == "decrease" {
-                return Err(AliasError {
-                    msg: format!("{name} 只能作为独立语句使用"),
-                    span,
-                });
-            }
-            if name == "println" || name == "print" {
-                let [arg] = args else {
+            match name.as_str() {
+                "increase" | "decrease" => {
                     return Err(AliasError {
-                        msg: format!("{name} 恰好接受 1 个参数"),
+                        msg: format!("{name} 只能作为独立语句使用"),
                         span,
-                    });
-                };
-                require_value(self.expr(&arg.value, env)?, arg.value.span())?;
-                return Ok(Ty::Unit);
-            }
-            if name == "from" || name == "try_from" {
-                let [arg] = args else {
-                    return Err(AliasError {
-                        msg: format!("{name} 恰好接受 1 个参数"),
-                        span,
-                    });
-                };
-                require_value(self.expr(&arg.value, env)?, arg.value.span())?;
-                return Err(AliasError {
-                    msg: format!("{name} 需要目标类型上下文"),
-                    span,
-                });
-            }
-            if name == "typeof" {
-                let [arg] = args else {
-                    return Err(AliasError {
-                        msg: "typeof 恰好接受 1 个参数".into(),
-                        span,
-                    });
-                };
-                let t = require_value(self.expr_raw_callable(&arg.value, env)?, arg.value.span())?;
-                if t.contains_unknown() {
-                    return Err(AliasError {
-                        msg: "typeof 无法确定实参的静态类型".into(),
-                        span: arg.value.span(),
                     });
                 }
-                return Ok(Ty::Str);
+                "println" | "print" => {
+                    let [arg] = args else {
+                        return Err(AliasError {
+                            msg: format!("{name} 恰好接受 1 个参数"),
+                            span,
+                        });
+                    };
+                    require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                    return Ok(Ty::Unit);
+                }
+                "from" | "try_from" => {
+                    let [arg] = args else {
+                        return Err(AliasError {
+                            msg: format!("{name} 恰好接受 1 个参数"),
+                            span,
+                        });
+                    };
+                    require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+                    return Err(AliasError {
+                        msg: format!("{name} 需要目标类型上下文"),
+                        span,
+                    });
+                }
+                "typeof" => {
+                    let [arg] = args else {
+                        return Err(AliasError {
+                            msg: "typeof 恰好接受 1 个参数".into(),
+                            span,
+                        });
+                    };
+                    let t = require_value(self.expr_raw_callable(&arg.value, env)?, arg.value.span())?;
+                    if t.contains_unknown() {
+                        return Err(AliasError {
+                            msg: "typeof 无法确定实参的静态类型".into(),
+                            span: arg.value.span(),
+                        });
+                    }
+                    return Ok(Ty::Str);
+                }
+                _ => {}
             }
         }
+
         let ft = self.expr_raw_callable(callee, env)?;
         match ft {
             Ty::Func { params, ret } => {
@@ -113,35 +124,31 @@ impl Checker {
         }
     }
 
-    pub(super) fn resolve_call_target(&self, callee: &Expr, env: &Env) -> LowerCallTarget {
+    pub(super) fn resolve_call_target(&self, callee: &Expr, _env: &Env) -> LowerCallTarget {
         let Expr::Ident(name, _) = callee else {
             return LowerCallTarget::FunctionValue;
         };
-        if Scope::get(env, name).is_none() {
-            if self.structs.contains_key(name) {
-                return LowerCallTarget::StructConstructor(name.clone());
-            }
-            if name == "ok" || name == "err" {
-                return LowerCallTarget::ResultConstructor(if name == "ok" {
-                    CtorKind::Ok
-                } else {
-                    CtorKind::Err
-                });
-            }
+        if self.structs.contains_key(name) {
+            return LowerCallTarget::StructConstructor(name.clone());
         }
-        let builtin = match name.as_str() {
-            "print" => Some(BuiltinCall::Print),
-            "println" => Some(BuiltinCall::Println),
-            "typeof" => Some(BuiltinCall::Typeof),
-            "from" => Some(BuiltinCall::From),
-            "try_from" => Some(BuiltinCall::TryFrom),
-            "increase" => Some(BuiltinCall::Increase),
-            "decrease" => Some(BuiltinCall::Decrease),
-            _ => None,
-        };
-        builtin
-            .map(LowerCallTarget::Builtin)
-            .unwrap_or(LowerCallTarget::FunctionValue)
+        if is_result_constructor(name) {
+            return LowerCallTarget::ResultConstructor(if name == "ok" {
+                CtorKind::Ok
+            } else {
+                CtorKind::Err
+            });
+        }
+        match name.as_str() {
+            "print" => LowerCallTarget::Builtin(BuiltinCall::Print),
+            "println" => LowerCallTarget::Builtin(BuiltinCall::Println),
+            "increase" => LowerCallTarget::Builtin(BuiltinCall::Increase),
+            "decrease" => LowerCallTarget::Builtin(BuiltinCall::Decrease),
+            "typeof" => LowerCallTarget::Typeof,
+            // Successful contextual conversion checks record their resolved target before
+            // ordinary call-target resolution. Without an expected type these calls fail.
+            "from" | "try_from" => LowerCallTarget::FunctionValue,
+            _ => LowerCallTarget::FunctionValue,
+        }
     }
 
     fn construct(
@@ -173,6 +180,8 @@ impl Checker {
                 });
             }
             covered[idx] = true;
+            // CallArg facts share the check→lower AST-address lifetime invariant documented
+            // in Checker::expr_key/binding_id_for; no AST rewrite may occur between phases.
             self.ctor_arg_indices
                 .insert(a as *const CallArg as usize, idx);
             let want = &info.fields[idx].ty;
@@ -306,68 +315,18 @@ impl Checker {
             }
         }
 
-        if let Ty::Array(elem) = &rt {
-            match name {
-                "len" => {
-                    if !args.is_empty() {
-                        return Err(AliasError {
-                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
-                            span,
-                        });
-                    }
-                    return Ok(Ty::Int(IntW::W32));
-                }
-                "push" => {
-                    if args.len() != 1 {
-                        return Err(AliasError {
-                            msg: format!("期望 1 个参数, 实际 {} 个", args.len()),
-                            span,
-                        });
-                    }
-                    match self.expr_expected(&args[0].value, env, elem) {
-                        Ok(_) => {}
-                        Err(ExprCheckError::Mismatch { actual, .. }) => {
-                            return Err(AliasError {
-                                msg: format!(
-                                    "第 1 个实参需要 {}, 实际 {}",
-                                    elem.name(),
-                                    actual.name()
-                                ),
-                                span: args[0].value.span(),
-                            });
-                        }
-                        Err(e) => return Err(e.into_alias()),
-                    }
-                    return Ok(Ty::Unit);
-                }
-                "pop" => {
-                    if !args.is_empty() {
-                        return Err(AliasError {
-                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
-                            span,
-                        });
-                    }
-                    return Ok((**elem).clone());
-                }
-                "iterator" => {
-                    if !args.is_empty() {
-                        return Err(AliasError {
-                            msg: format!("期望 0 个参数, 实际 {} 个", args.len()),
-                            span,
-                        });
-                    }
-                    return Ok(Ty::Iterator(elem.clone()));
-                }
-                _ => {}
-            }
-        }
-
         let rname = rt.name();
-        let Some(sig) = self.methods.get(&rname).and_then(|m| m.get(name)).cloned() else {
-            return Err(AliasError {
-                msg: format!("类型 {rname} 上没有方法 '{name}'"),
-                span,
-            });
+        let sig = if let Some(builtin) = builtin_method(&rt, name) {
+            builtin
+        } else {
+            self.methods
+                .get(&rname)
+                .and_then(|m| m.get(name))
+                .cloned()
+                .ok_or_else(|| AliasError {
+                    msg: format!("类型 {rname} 上没有方法 '{name}'"),
+                    span,
+                })?
         };
         if args.len() != sig.params().len() {
             return Err(AliasError {
@@ -402,54 +361,20 @@ pub(super) fn resolve_method_target(
     name: &str,
     span: Span,
 ) -> AliasResult<MethodTarget> {
-    if recv.is_numeric() {
-        let op = match name {
-            "plus" => Some(BinOp::Add),
-            "minus" => Some(BinOp::Sub),
-            "times" => Some(BinOp::Mul),
-            "div" => Some(BinOp::Div),
-            _ => None,
-        };
-        if let Some(op) = op {
-            return Ok(MethodTarget::Numeric(op));
-        }
-    }
-    if *recv == Ty::Bool && name == "not" {
-        return Ok(MethodTarget::BoolNot);
-    }
-    if *recv == Ty::Str {
-        match name {
-            "len" => return Ok(MethodTarget::StringLen),
-            "upper" => return Ok(MethodTarget::StringUpper),
-            "lower" => return Ok(MethodTarget::StringLower),
-            "trim" => return Ok(MethodTarget::StringTrim),
-            _ => {}
-        }
-    }
-    if matches!(recv, Ty::Array(_)) {
-        match name {
-            "len" => return Ok(MethodTarget::ArrayLen),
-            "push" => return Ok(MethodTarget::ArrayPush),
-            "pop" => return Ok(MethodTarget::ArrayPop),
-            "iterator" => return Ok(MethodTarget::ArrayIterator),
-            _ => {}
-        }
+    if let Some(method) = builtin_method(recv, name) {
+        return method.target(recv).ok_or_else(|| AliasError {
+            msg: format!("内部 sema 不变式被破坏: 内建方法 {}.{name} 缺少 target", recv.name()),
+            span,
+        });
     }
     let rname = recv.name();
-    let id = checker
+    checker
         .methods
         .get(&rname)
         .and_then(|table| table.get(name))
-        .and_then(|method| match method {
-            MethodInfo::User { id, .. } => Some(*id),
-            MethodInfo::Builtin { .. } => None,
-        })
+        .and_then(|method| method.target(recv))
         .ok_or_else(|| AliasError {
             msg: format!("内部 sema 不变式被破坏: 用户方法 {rname}.{name} 缺少 MethodId"),
             span,
-        })?;
-    Ok(MethodTarget::User {
-        receiver: recv.clone(),
-        id,
-    })
+        })
 }
