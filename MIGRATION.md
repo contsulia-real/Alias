@@ -4,7 +4,6 @@
 **最近同步：** 2026-08-28  
 **当前规范：** `docs/spec-notes.md`  
 **当前工程知识库：** `AGENTS.md`  
-**最新已记录里程碑：** M69 — `CheckedProgram` typed HIR + `Ty → VTy` 单次投影
 
 每条记录 = 一个语义、架构或可观察行为在当时发生的变化；格式通常为：变化 | 裁决/依据 | 为何安全。
 
@@ -117,8 +116,7 @@ struct_laws 22 + result_laws 22 全绿; demos/result_match.as 双形态逐字节
 | M34 | 新增 demos/methods.as 黄金基线 (stdout 13 行含内建往返/trim 边界/链式/结构体方法 var 字段变异, exit 0); aot_parity 语料机械入册 methods.as | M16 测试政策 | JIT 与 AOT 产物三元组逐字节一致 |
 
 **终态验证**: golden 2 + aot_parity 5 + native_parity 3 + sema_laws 29 + smoke 8 +
-struct_laws 22 + result_laws 22 + method_laws 26 全绿; demos/methods.as 双形态
-逐字节一致; `cargo build` 零警告。
+struct_laws 22 + result_laws 22 + method_laws 26 全绿; demos/methods.as 双形态逐字节一致; `cargo build` 零警告。
 
 ## Phase 2d — array<T> 数组类型 (2026-08-25)
 
@@ -237,3 +235,4 @@ demos/arrays.as 双形态逐字节一致; `cargo build` 零警告。
 | M73 | 所有 Cranelift 函数在 `define_function` 前无条件调用 `Context::verify`；失败返回 verifier 错误与 IR，不再继续定义（不使用受 `enable_verifier` 控制的 `verify_if`）。非 unit 函数落空、非 unit return 缺值、带返回值 runtime shim 未终止全部 fail closed；runtime abort 后发射 trap，不再造零值跳回返回块。所有 match 臂都显式 return 时，HIR 固化为 unit 控制流节点并保持 terminated，不再泄漏 Unknown 或创建伪 continuation | 补零会掩盖 sema/runtime 合同破坏，并把无效 HIR 伪装成合法机器行为 | 定向单测先提交非法 IR、再用同一 FuncId 成功定义合法 IR，证明 verifier 失败未占用定义槽；原生法律、破坏性 codegen、never-arm result 法律与所有 runtime abort 用例覆盖 |
 | M74 | iterator fail-fast 进入 `alias.abort_iter` 统一 runtime contract；消息字节及长度来自同一静态表；array/result/env 载荷 word 步长由 ABI owner 的 `VALUE_WORD_BYTES`/`value_word_offset` 提供。对象 ISA 显式固定 `x86_64-pc-windows-msvc`，SDK discovery 只读环境配置和 Program Files Windows Kits | 普通 emitter 自建 Windows 错误系统、手填 UTF-8 长度、散落 8-byte 规则、宿主 ISA 与扫描开发机盘符均形成第二真相源 | runtime contract coverage、array iterator fail-fast、原生 build/run 和显式 Windows x64 链接验证 |
 | M75 | 同一 lexical scope、同一参数列表及顶层 binding/func 名禁止重复；不同 scope 保持 shadow；`main` 必须且只能有一个。未实现的 no-op import 从 lexer/parser AST 到 codegen 物理删除；删除 future-spec demos 及其失败黄金；一般泛型拒绝诊断删除未来 Phase 编号。`alias <file>` 明确为正式一等入口；编译器内部模块转为 private，`build` 删除未使用 path 参数；parser EOF 使用真实 span | 当前工程禁止兼容层、无语义公开语法、假参数和测试反向扩大库 API；失败 demo 与未来阶段标签不应进入当前真相 | 新增 duplicate/import/EOF 回归；demos 机械枚举只包含当前可执行语料；当前规范、AGENTS 与专题同步 |
+| M76 | **owner / resolved-HIR fixed-point**：预定义 callable/result constructor/type 名集中到结构化 builtin owner 并禁止用户 shadow；用户 struct constructor 仍按当前规范允许词法 child scope shadow，调用解析恢复 scope-first。`validate_resolved_hir` 升级为进入 codegen 前的 resolved cross-reference gate，校验 `BindingId`/`MethodId`、函数值签名、用户方法签名、struct constructor/field 索引、result/builtin target；heap object layout、目标 triple、输入限制与 ABI/type spelling 第二 owner 继续收口。历史 `native_parity` 测试层退役为单责 `demo_corpus`，`smoke/golden/sema_laws/struct_laws` 删除重复或迁移期脚手架 | 当前规范要求 parser→sema→HIR→codegen 单向完成语义，局部 struct shadow 规则此前被 constructor-first 实现破坏；final HIR 若允许悬空 MethodId/字段索引穿透到 backend，会把 sema 缺口推迟成 codegen panic；当前测试/文档不得靠历史阶段编号解释现行法律 | 预定义名字与 struct shadow 法律、破坏 MethodId/constructor index/field index 的 HIR fail-closed 单测锁定；codegen 不再拥有 `VTy::display_name`、conversion/expected-type 第二 predicate；当前 spec/AGENTS 与测试责任同步 |
