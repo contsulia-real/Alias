@@ -7,12 +7,16 @@
 use super::exprs::ExprCheckError;
 use super::hir::BindingId;
 use super::types::{check_return_type_slot, check_value_type_slot, IntW, Ty};
-use super::{Checker, Env, FieldInfo, MethodInfo, Scope, StructInfo};
+use super::{
+    builtin_method, ensure_user_lexical_name, Checker, Env, FieldInfo, MethodInfo, Scope,
+    StructInfo,
+};
 use crate::ast::{Binding, Expr, Param, StructDef};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
     pub(super) fn struct_def(&mut self, sd: &StructDef, env: &Env) -> AliasResult<()> {
+        ensure_user_lexical_name(&sd.name, sd.span)?;
         if self.structs.contains_key(&sd.name) {
             return Err(AliasError {
                 msg: format!("'{}' 已定义为结构体, 不能重复定义", sd.name),
@@ -34,6 +38,7 @@ impl Checker {
                 });
             }
             let ty = check_value_type_slot(&f.ty, f.span, &self.structs)?;
+            // StructField facts share the transient check→lower AST-address identity.
             self.field_types
                 .insert(f as *const crate::ast::StructField as usize, ty.clone());
             if let Some(d) = &f.default {
@@ -77,6 +82,12 @@ impl Checker {
             .insert(b as *const Binding as usize, recv_ty.clone());
         let recv = recv_ty.name();
         let mname = b.name.clone();
+        if builtin_method(&recv_ty, &mname).is_some() {
+            return Err(AliasError {
+                msg: format!("内建方法不可覆盖: {recv}.{mname}"),
+                span: b.span,
+            });
+        }
         let declared = check_return_type_slot(&b.ty, b.span, &self.structs)?;
         let Expr::FuncLit {
             params,
@@ -91,23 +102,20 @@ impl Checker {
         };
         let mut ptys = Vec::with_capacity(params.len());
         for p in params {
+            ensure_user_lexical_name(&p.name, p.span)?;
             ptys.push(check_value_type_slot(&p.ty, p.span, &self.structs)?);
         }
 
+        if self
+            .methods
+            .get(&recv)
+            .and_then(|table| table.get(&mname))
+            .is_some()
         {
-            let table = self.methods.entry(recv.clone()).or_default();
-            if let Some(existing) = table.get(&mname) {
-                if matches!(existing, MethodInfo::Builtin { .. }) {
-                    return Err(AliasError {
-                        msg: format!("内建方法不可覆盖: {recv}.{mname}"),
-                        span: b.span,
-                    });
-                }
-                return Err(AliasError {
-                    msg: format!("类型 {recv} 上已定义方法 '{mname}'"),
-                    span: b.span,
-                });
-            }
+            return Err(AliasError {
+                msg: format!("类型 {recv} 上已定义方法 '{mname}'"),
+                span: b.span,
+            });
         }
         let method_id = self.fresh_method_id();
         self.methods.entry(recv.clone()).or_default().insert(
