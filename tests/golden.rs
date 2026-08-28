@@ -1,8 +1,8 @@
-//! Alias 当前可观察行为黄金记录。
+//! Alias 当前代表性可观察行为黄金记录。
 //!
 //! 本文件断言编译产物/CLI 的精确三元组 (stdout 字节, stderr 字节, 退出码)。
+//! `demos/*.as` 的全量语料基线由 `demo_corpus.rs` 单独拥有，不在这里重复。
 //! 当前语言规范见 `docs/spec-notes.md`；历史变更见 `MIGRATION.md`。
-//! 精确字节发生有意变化时，必须在同一批修改中同步规范、黄金记录与迁移说明。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,12 +10,10 @@ use std::process::Command;
 /// 编译产物二进制路径 (cargo 测试基础设施注入)。
 const BIN: &str = env!("CARGO_BIN_EXE_alias");
 
-/// 用例输入形态: 内联源码 / 仓库内 demo / 无参数调用。
+/// 用例输入形态: 内联源码 / 无参数调用。
 enum Input {
     /// 源码文本, 运行前写入临时目录
     Inline(&'static str),
-    /// 相对 crate 根的既有文件路径, 原样传给二进制
-    Demo(&'static str),
     /// 不传任何命令行参数
     NoArgs,
 }
@@ -38,15 +36,6 @@ struct Golden {
 #[rustfmt::skip]
 fn golden_table() -> Vec<Golden> {
     vec![
-        // ---- demos/count_to_ten.as: 已知良好的 demo 夹具 ----
-        // 循环体先 increase i 再 println i, 故打印 1..10 (非 0..9);
-        Golden {
-            name: "count_to_ten_demo",
-            input: Input::Demo("demos/count_to_ten.as"),
-            stdout: b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
-            stderr: b"",
-            exit: 0,
-        },
         // ---- 退出码 = main 返回值 (i32) ----
         Golden {
             name: "arithmetic_exit_48",
@@ -184,10 +173,6 @@ fn golden_table() -> Vec<Golden> {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// 运行器
-// ---------------------------------------------------------------------------
-
 /// 每用例独立临时目录: 以用例名 + 进程 PID 命名, 并行测试互不干扰;
 /// Drop 时整体清除 (RAII), 断言失败也不遗留垃圾。
 struct TempCase {
@@ -259,10 +244,6 @@ fn golden_triplets() {
         let triplet = match g.input {
             Input::Inline(src) => {
                 let path = tmp.write(g.name, src);
-                run_binary(&[path.as_os_str()])
-            }
-            Input::Demo(rel) => {
-                let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
                 run_binary(&[path.as_os_str()])
             }
             Input::NoArgs => run_binary(&[]),
