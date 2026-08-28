@@ -8,10 +8,12 @@ use super::ops::{
 };
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, restore_word, storage_word, value_word_offset, VTy,
-    VALUE_WORD_BYTES,
+    cl_type, norm_load, norm_store, restore_word, storage_word, VTy, VALUE_WORD_BYTES,
 };
 use crate::codegen::funcgen::emit_funclit_value;
+use crate::codegen::layout::{
+    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
+};
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
     ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, ResolvedConversion, Stmt,
@@ -19,8 +21,8 @@ use crate::sema::hir::{
 use crate::sema::types::FloatW;
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
 use cranelift_codegen::ir::types;
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -197,13 +199,16 @@ pub(crate) fn emit_expr<M: Module>(
                 types::I64,
                 MemFlagsData::new(),
                 raw_array,
-                value_word_offset(1),
+                ARRAY_LEN_OFFSET,
             );
             let len32 = bcx.ins().ireduce(types::I32, len64);
             emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
-            let dp = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), raw_array, 0);
+            let dp = bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                raw_array,
+                ARRAY_DATA_OFFSET,
+            );
             let idx64 = bcx.ins().sextend(types::I64, idx32);
             let off = bcx.ins().imul_imm_s(idx64, VALUE_WORD_BYTES);
             let addr = bcx.ins().iadd(dp, off);
@@ -230,7 +235,12 @@ pub(crate) fn emit_expr<M: Module>(
         }
         Expr::Propagate { expr, .. } => {
             let subj = emit_expr(c, bcx, frame, expr)?;
-            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+            let tag = bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                subj,
+                RESULT_TAG_OFFSET,
+            );
             let is_err = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 1);
             let err_b = bcx.create_block();
             let ok_b = bcx.create_block();
@@ -251,9 +261,12 @@ pub(crate) fn emit_expr<M: Module>(
                 VTy::Result(t, _) => *t,
                 _ => invariant_violation("? 操作数携带 result 类型"),
             };
-            let raw = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), subj, value_word_offset(1));
+            let raw = bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                subj,
+                RESULT_PAYLOAD_OFFSET,
+            );
             Ok(restore_word(bcx, raw, &pvty))
         }
     }
@@ -429,7 +442,12 @@ fn emit_pattern_test<M: Module>(
             bcx.ins().icmp_imm_s(IntCC::Equal, ord, 0)
         }
         Pattern::Constructor { ctor, .. } => {
-            let tag = bcx.ins().load(types::I64, MemFlagsData::new(), subj, 0);
+            let tag = bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                subj,
+                RESULT_TAG_OFFSET,
+            );
             let want = match ctor {
                 CtorKind::Ok => 0,
                 CtorKind::Err => 1,
@@ -465,9 +483,12 @@ pub(crate) fn emit_match_arm<M: Module>(
                 CtorKind::Ok => (**ok).clone(),
                 CtorKind::Err => (**err).clone(),
             };
-            let raw = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), subj, value_word_offset(1));
+            let raw = bcx.ins().load(
+                types::I64,
+                MemFlagsData::new(),
+                subj,
+                RESULT_PAYLOAD_OFFSET,
+            );
             let payload = restore_word(bcx, raw, &bind_vty);
             emit_local_cell(c, bcx, frame, payload, bind_vty, binding_id)?;
         }
