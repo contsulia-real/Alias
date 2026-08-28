@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static CASE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn run_cli(src: &str) -> std::process::Output {
+    // 这里只需要进程内唯一目录后缀，不承担线程间状态发布；Relaxed 已足够。
     let seq = CASE_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("alias-security-{}-{seq}", std::process::id()));
     std::fs::create_dir(&dir).expect("创建临时目录失败");
@@ -179,6 +180,26 @@ fn excessive_interpolation_nesting_is_rejected_in_lexer() {
     let src = format!("func i32 main = () -> {{\n    println {value}\n    return 0\n}}\n");
     let err = run(&src).expect_err("超深插值必须拒绝");
     assert!(err.msg.contains("字符串插值嵌套超过 128 层上限"));
+}
+
+#[test]
+fn interpolation_hole_must_consume_its_complete_token_stream() {
+    let src = "func i32 main = () -> {\n    println '${1, 2}'\n    return 0\n}\n";
+    let err = run(src).expect_err("插值尾随 token 不能被静默丢弃");
+    assert!(err.msg.contains("插值内表达式错误"), "实际诊断: {}", err.msg);
+    assert!(err.msg.contains("意外 token"), "实际诊断: {}", err.msg);
+}
+
+#[test]
+fn interpolation_tokens_share_the_source_token_budget() {
+    let payload = format!("{}1", "1+".repeat(100_000));
+    let src = format!("func i32 main = () -> {{\n    println '${{{payload}}}'\n    return 0\n}}\n");
+    let err = run(&src).expect_err("插值 token 必须计入全源码预算");
+    assert!(
+        err.msg.contains("源文件 token 数超过 200000 上限"),
+        "实际诊断: {}",
+        err.msg
+    );
 }
 
 #[test]
