@@ -165,8 +165,6 @@ fn compile_program<M: Module>(
             return Err(native_err(b.span, "方法体必须是函数字面量"));
         };
         let self_vty = c.vty(recv);
-        let recv_name = self_vty.display_name();
-        let mname = b.name.clone();
         let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
             invariant_violation("方法绑定携带完整函数类型 (sema 已校验)")
         };
@@ -174,8 +172,10 @@ fn compile_program<M: Module>(
             invariant_violation("方法函数类型首参数必须是接收者")
         }
         let ret_vty = *ret_vty;
-        let fid =
-            c.declare_user_func_typed(&param_vtys, &ret_vty, format!("m<{recv_name}>{mname}"))?;
+        // MethodId 已由 sema 唯一解析；内部 object 符号只需要结构化身份，不应再维护
+        // 一套 receiver 的语言类型拼写来制造名字。
+        let symbol = format!("m{}_{}", method_id.0, b.name);
+        let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, symbol)?;
         c.methods.insert(*method_id, fid);
         c.method_sigs.insert(*method_id, (param_vtys, ret_vty));
         pending_methods.push((fid, b));
