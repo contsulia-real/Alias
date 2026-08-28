@@ -1,5 +1,6 @@
 use super::typing::{ExprCheckError, ExprCheckResult};
 use crate::ast::{BinOp, Expr};
+use crate::builtins::{classify_call_builtin, CallBuiltinName};
 use crate::sema::types::{int_literal_fits, Ty};
 use crate::sema::{op_mismatch, Checker};
 use crate::{AliasError, AliasResult, Span};
@@ -120,18 +121,19 @@ pub(in crate::sema) fn require_value(ty: Ty, span: Span) -> AliasResult<Ty> {
     }
 }
 
-pub(super) fn contextual_conversion(e: &Expr) -> Option<(&str, &Expr, Span)> {
+pub(super) fn contextual_conversion(e: &Expr) -> Option<(CallBuiltinName, &Expr, Span)> {
     let Expr::Call { callee, args, span } = e else {
         return None;
     };
     let Expr::Ident(name, _) = callee.as_ref() else {
         return None;
     };
-    if name != "from" && name != "try_from" {
+    let kind = classify_call_builtin(name)?;
+    if !matches!(kind, CallBuiltinName::From | CallBuiltinName::TryFrom) {
         return None;
     }
     let [arg] = args.as_slice() else {
         return None;
     };
-    Some((name, &arg.value, *span))
+    Some((kind, &arg.value, *span))
 }
