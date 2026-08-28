@@ -5,6 +5,7 @@ use super::hir::{BindingId, BuiltinCall};
 use super::types::{check_return_type_slot, check_value_type_slot, types_match, Ty};
 use super::{decl_mismatch, ensure_user_lexical_name, Checker, Env, LowerCallTarget, Scope, VarInfo};
 use crate::ast::{ArmBody, BindKind, Binding, Body, Expr, Param, Stmt};
+use crate::builtins::{classify_call_builtin, CallBuiltinName};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
@@ -16,7 +17,9 @@ impl Checker {
             });
         }
         ensure_user_lexical_name(&b.name, b.span)?;
-        if self.structs.contains_key(&b.name) {
+        // Struct names share the top-level namespace with ordinary bindings, but the language
+        // explicitly permits lexical child scopes to shadow constructor names.
+        if env.parent.is_none() && self.structs.contains_key(&b.name) {
             return Err(AliasError {
                 msg: format!("'{}' 已定义为结构体, 不能再定义为绑定", b.name),
                 span: b.span,
@@ -351,15 +354,17 @@ impl Checker {
             Stmt::Expr { expr, .. } => {
                 if let Expr::Call { callee, args, span } = expr {
                     if let Expr::Ident(name, _) = callee.as_ref() {
-                        if name == "increase" || name == "decrease" {
+                        if let Some(kind @ (CallBuiltinName::Increase | CallBuiltinName::Decrease)) =
+                            classify_call_builtin(name)
+                        {
                             self.incdec(name, args, *span, env)?;
                             self.record_expr_type(expr, Ty::Unit);
                             self.record_call_target(
                                 expr,
-                                LowerCallTarget::Builtin(if name == "increase" {
-                                    BuiltinCall::Increase
-                                } else {
-                                    BuiltinCall::Decrease
+                                LowerCallTarget::Builtin(match kind {
+                                    CallBuiltinName::Increase => BuiltinCall::Increase,
+                                    CallBuiltinName::Decrease => BuiltinCall::Decrease,
+                                    _ => unreachable!(),
                                 }),
                             );
                             self.record_resolved_callee(expr, &Ty::Unit);
