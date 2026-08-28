@@ -1,8 +1,9 @@
 use super::{
-    ArmBody, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget, CheckedProgram,
-    CtorKind, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
+    ArmBody, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget,
+    CheckedProgram, CtorKind, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
 };
-use crate::sema::types::{types_match, Ty};
+use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
+use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
 
@@ -177,6 +178,19 @@ fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt
     }
 }
 
+fn validate_binding_contract(binding: &Binding) -> AliasResult<()> {
+    if binding.ty.contains_unknown() {
+        return Err(invariant(binding.span, "绑定类型未确定"));
+    }
+    if !types_match(&binding.ty, binding.value.ty()) {
+        return Err(invariant(
+            binding.span,
+            "绑定类型与初始化 HIR 表达式类型不一致",
+        ));
+    }
+    Ok(())
+}
+
 fn collect_declared_ids(program: &CheckedProgram) -> HashSet<BindingId> {
     let mut ids = HashSet::new();
     let mut stack = Vec::new();
@@ -272,8 +286,8 @@ fn collect_user_methods(
         };
         let BindingOwner::Method {
             method_id,
+            self_id,
             receiver,
-            ..
         } = &binding.owner
         else {
             continue;
@@ -290,6 +304,18 @@ fn collect_user_methods(
                 "用户方法函数类型首参数与接收者不一致",
             ));
         }
+        let Expr::FuncLit {
+            implicit_bindings, ..
+        } = &binding.value
+        else {
+            return Err(invariant(binding.span, "用户方法值不是 FuncLit"));
+        };
+        if implicit_bindings.as_slice() != [*self_id] {
+            return Err(invariant(
+                binding.span,
+                "用户方法 FuncLit 未唯一携带已解析 self BindingId",
+            ));
+        }
         let contract = UserMethodContract {
             receiver: receiver.clone(),
             params: params[1..].to_vec(),
@@ -303,6 +329,33 @@ fn collect_user_methods(
         }
     }
     Ok(methods)
+}
+
+fn validate_main_contract(program: &CheckedProgram) -> AliasResult<()> {
+    let mut mains = program.items.iter().filter_map(|item| match item {
+        Item::Binding(binding)
+            if !binding.is_method() && binding.name == "main" => Some(binding),
+        _ => None,
+    });
+    let Some(main) = mains.next() else {
+        return Err(invariant(Span::default(), "HIR 缺少顶层 main 绑定"));
+    };
+    if mains.next().is_some() {
+        return Err(invariant(Span::default(), "HIR 含多个顶层 main 绑定"));
+    }
+    if main.binding_id != program.main_id {
+        return Err(invariant(
+            main.span,
+            "CheckedProgram.main_id 未指向顶层 main 绑定",
+        ));
+    }
+    let Ty::Func { params, ret } = &main.ty else {
+        return Err(invariant(main.span, "顶层 main HIR 类型不是函数"));
+    };
+    if !params.is_empty() || !matches!(ret.as_ref(), Ty::Int(IntW::W32)) {
+        return Err(invariant(main.span, "顶层 main HIR 签名不是 () -> i32"));
+    }
+    Ok(())
 }
 
 fn collect_function_locals(expr: &Expr) -> HashSet<BindingId> {
@@ -347,6 +400,32 @@ fn collect_function_locals(expr: &Expr) -> HashSet<BindingId> {
     locals
 }
 
+fn direct_resolved_callee_name(callee: &Expr) -> AliasResult<&str> {
+    match callee {
+        Expr::Ident(name, None, ..) => Ok(name.as_str()),
+        Expr::Ident(_, Some(_), ..) => Err(invariant(
+            callee.span(),
+            "resolved builtin/constructor callee 不应携带 BindingId",
+        )),
+        _ => Err(invariant(
+            callee.span(),
+            "resolved builtin/constructor callee 非直接名字",
+        )),
+    }
+}
+
+fn builtin_target_matches_name(name: &str, builtin: &BuiltinCall) -> bool {
+    match classify_call_builtin(name) {
+        Some(CallBuiltinName::Print) => builtin == &BuiltinCall::Print,
+        Some(CallBuiltinName::Println) => builtin == &BuiltinCall::Println,
+        Some(CallBuiltinName::Increase) => builtin == &BuiltinCall::Increase,
+        Some(CallBuiltinName::Decrease) => builtin == &BuiltinCall::Decrease,
+        Some(CallBuiltinName::From | CallBuiltinName::TryFrom | CallBuiltinName::Typeof) | None => {
+            false
+        }
+    }
+}
+
 fn validate_call_target(
     expr: &Expr,
     callee: &Expr,
@@ -387,6 +466,13 @@ fn validate_call_target(
             name,
             arg_field_indices,
         } => {
+            let callee_name = direct_resolved_callee_name(callee)?;
+            if callee_name != name {
+                return Err(invariant(
+                    callee.span(),
+                    "结构体构造 callee 名与 resolved target 不一致",
+                ));
+            }
             if !matches!(expr.ty(), Ty::Struct(actual) if actual == name) {
                 return Err(invariant(
                     expr.span(),
@@ -433,6 +519,13 @@ fn validate_call_target(
             }
         }
         CallTarget::ResultConstructor(kind) => {
+            let callee_name = direct_resolved_callee_name(callee)?;
+            if classify_result_constructor(callee_name) != Some(*kind) {
+                return Err(invariant(
+                    callee.span(),
+                    "result 构造 callee 名与 resolved target 不一致",
+                ));
+            }
             let [arg] = args else {
                 return Err(invariant(expr.span(), "result 构造 target 元数不是 1"));
             };
@@ -454,6 +547,13 @@ fn validate_call_target(
             }
         }
         CallTarget::Builtin(builtin) => {
+            let callee_name = direct_resolved_callee_name(callee)?;
+            if !builtin_target_matches_name(callee_name, builtin) {
+                return Err(invariant(
+                    callee.span(),
+                    "内建调用 callee 名与 resolved target 不一致",
+                ));
+            }
             if args.len() != 1 || expr.ty() != &Ty::Unit {
                 return Err(invariant(
                     expr.span(),
@@ -472,14 +572,6 @@ fn validate_call_target(
                 }
             }
         }
-    }
-    if !matches!(target, CallTarget::FunctionValue)
-        && !matches!(callee, Expr::Ident(..))
-    {
-        return Err(invariant(
-            callee.span(),
-            "builtin/constructor callee 非直接名字",
-        ));
     }
     Ok(())
 }
@@ -562,6 +654,36 @@ fn validate_builtin_method_target(
     Ok(())
 }
 
+fn validate_funclit_contract(
+    expr: &Expr,
+    params: &[super::Param],
+    implicit_bindings: &[BindingId],
+) -> AliasResult<()> {
+    let Ty::Func {
+        params: signature_params,
+        ..
+    } = expr.ty()
+    else {
+        return Err(invariant(expr.span(), "FuncLit 缺少完整函数类型"));
+    };
+    if signature_params.len() != implicit_bindings.len() + params.len() {
+        return Err(invariant(
+            expr.span(),
+            "FuncLit 参数数量与完整函数类型不一致",
+        ));
+    }
+    let explicit_start = signature_params.len() - params.len();
+    for (param, signature_ty) in params.iter().zip(&signature_params[explicit_start..]) {
+        if !types_match(&param.ty, signature_ty) {
+            return Err(invariant(
+                expr.span(),
+                "FuncLit 显式参数类型与完整函数类型不一致",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn resolved_field_ty(
     recv: &Expr,
     field_index: usize,
@@ -586,12 +708,13 @@ fn resolved_field_ty(
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
     // The source is untrusted and nesting is bounded but nontrivial; validation uses explicit
     // stacks so the final authority gate itself does not reintroduce host-recursion risk.
-    // This pass is also the last cross-reference gate before codegen: resolved IDs, method
+    // This pass is also the last cross-reference gate before codegen: resolved IDs, call/method
     // targets and struct field contracts are checked against declarations here so the backend
     // never has to rediscover or repair them.
     let known_ids = collect_declared_ids(program);
     let structs = collect_struct_contracts(program)?;
     let user_methods = collect_user_methods(program)?;
+    validate_main_contract(program)?;
     if !known_ids.contains(&program.main_id) {
         return Err(invariant(Span::default(), "main BindingId 不存在"));
     }
@@ -608,9 +731,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
     for item in program.items.iter().rev() {
         match item {
             Item::Binding(binding) => {
-                if binding.ty.contains_unknown() {
-                    return Err(invariant(binding.span, "绑定类型未确定"));
-                }
+                validate_binding_contract(binding)?;
                 stack.push(HirValidationNode::Expr(&binding.value));
             }
             Item::StructDef(def) => {
@@ -692,6 +813,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         body,
                         ..
                     } => {
+                        validate_funclit_contract(expr, params, implicit_bindings)?;
                         let locals = collect_function_locals(expr);
                         let mut seen = HashSet::new();
                         for id in captures {
@@ -839,9 +961,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
             }
             HirValidationNode::Stmt(stmt) => match stmt {
                 Stmt::Binding(binding) => {
-                    if binding.ty.contains_unknown() {
-                        return Err(invariant(binding.span, "局部绑定类型未确定"));
-                    }
+                    validate_binding_contract(binding)?;
                     stack.push(HirValidationNode::Expr(&binding.value));
                 }
                 Stmt::Assign { target_id, value } => {
