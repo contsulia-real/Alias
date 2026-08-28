@@ -1,14 +1,12 @@
 //! struct 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
-//! 语义锚点 (用户批准设计, spec-notes 附录三):
-//! - 引用语义: 实例 = 泄漏堆块, 变量持指针 — 别名/传参/闭包捕获共享实例
-//! - 字段级可变性: var 字段可写与绑定自身 val/var 无关
-//! - 单一命名空间: 结构体名与 func/绑定重名即编译错误
-//! - 构造全命名: 缺字段/重复/未知/类型不符各有独立诊断
+//! 当前语义锚点：
+//! - 引用语义：实例为共享堆对象，别名/传参/闭包捕获共享实例；
+//! - 字段级可变性：var 字段可写与持有绑定自身 val/var 无关；
+//! - 顶层名字空间：struct 名与顶层 binding/func 不得重名；词法子作用域可以 shadow constructor；
+//! - 构造全命名：缺字段/重复/未知/类型不符各有独立诊断。
 //!
-//! 列号语义: token span col = max(可视列-1, 1) (lexer.rs span_here)。
-//!
-//! allow: SIZE_OK — 法律表为纯数据矩阵 (项目先例 sema_laws.rs 同注)。
+//! 列号语义按当前 lexer 的 `span_here` 算法冻结：`max(可视列-1, 1)`。
 
 use alias::{run, AliasError};
 
@@ -136,11 +134,11 @@ fn field_access_on_non_struct_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 负向矩阵 — 单一命名空间
+// 负向矩阵 — 顶层名字空间
 // ---------------------------------------------------------------------------
 
 #[test]
-fn binding_clashes_with_struct() {
+fn top_level_binding_clashes_with_struct() {
     assert_law(
         "struct foo {\n    val i32 x = 1\n}\nfunc i32 foo = () -> return 1\nfunc i32 main = () -> return 0\n",
         "'foo' 已定义为结构体, 不能再定义为绑定",
@@ -149,7 +147,7 @@ fn binding_clashes_with_struct() {
 }
 
 #[test]
-fn struct_clashes_with_binding() {
+fn struct_clashes_with_top_level_binding() {
     assert_law(
         "val i32 n = 1\nstruct n {\n    val i32 x = 1\n}\nfunc i32 main = () -> return 0\n",
         "'n' 已定义为绑定, 不能再定义为结构体",
@@ -179,7 +177,6 @@ fn default_type_mismatch_rejected() {
 
 #[test]
 fn unknown_struct_in_type_slot() {
-    // 既有法律不变: 类型槽按冻结类型集 + 结构体表收紧
     assert_law(
         "func i32 main = () -> {\n    val nosuch s = 1\n    return 0\n}\n",
         "未知类型名 'nosuch'",
@@ -190,7 +187,7 @@ fn unknown_struct_in_type_slot() {
 
 #[test]
 fn forward_struct_reference_rejected() {
-    // 声明前不可见 — 与绑定同序 (insert-after-eval 镜像)
+    // Struct types are registered in source order; a later declaration is not visible yet.
     assert_law(
         "func i32 main = () -> {\n    val later s = 1\n    return 0\n}\nstruct later {\n    val i32 x = 1\n}\n",
         "未知类型名 'later'",
@@ -199,10 +196,28 @@ fn forward_struct_reference_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 正向矩阵 — 引用语义 / 默认值 / 嵌套 / 闭包捕获
+// 正向矩阵 — 引用语义 / 默认值 / shadow / 嵌套 / 闭包捕获
 // ---------------------------------------------------------------------------
 
-/// 引用别名: 两个名字一个实例 — 经 b 改, a 可见 (值语义下返回 0)。
+#[test]
+fn local_binding_can_shadow_struct_constructor_name() {
+    let src = "struct point { val i32 x = 1 }\nfunc i32 main = () -> {\n    val i32 point = 7\n    return point\n}\n";
+    assert_eq!(run(src).unwrap(), 7);
+}
+
+#[test]
+fn local_function_shadow_wins_before_struct_constructor_resolution() {
+    let src = "struct point { val i32 x = 1 }\nfunc i32 main = () -> {\n    func i32 point = (i32 x) -> return x + 1\n    return point(4)\n}\n";
+    assert_eq!(run(src).unwrap(), 5);
+}
+
+#[test]
+fn parameter_shadow_wins_before_struct_constructor_resolution() {
+    let error = fail("struct point { val i32 x = 1 }\nfunc i32 probe = (i32 point) -> return point()\nfunc i32 main = () -> return 0\n");
+    assert!(error.msg.contains("i32 不是可调用值"), "实际: {}", error.msg);
+}
+
+/// 引用别名: 两个名字一个实例 — 经 b 改, a 可见。
 #[test]
 fn reference_aliasing_two_names_one_instance() {
     let src = "struct box {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val box a = box()\n    val box b = a\n    b.v = 42\n    return a.v\n}\n";
@@ -223,22 +238,21 @@ fn out_of_order_ctor_and_var_field_mutation() {
     assert_eq!(run(src).unwrap(), 39);
 }
 
-/// 传参即共享: 函数内字段改动调用方可见 (值语义下返回 0)。
+/// 传参即共享: 函数内字段改动调用方可见。
 #[test]
 fn param_passing_shares_instance() {
     let src = "struct bag {\n    var i32 n = 0\n}\nfunc i32 touch = (bag b) -> {\n    b.n = b.n + 5\n    return b.n\n}\nfunc i32 main = () -> {\n    val bag x = bag()\n    val i32 r = touch(x)\n    return x.n\n}\n";
     assert_eq!(run(src).unwrap(), 5);
 }
 
-/// 闭包引用捕获结构体: 每次调用读到累积最新值 (second - first = 30;
-/// 若捕获为副本则两次都从 0 起, 差为 0)。别名再证同一实例。
+/// 闭包引用捕获结构体: 每次调用读到累积最新值。别名再次证明同一实例。
 #[test]
 fn closure_capture_reads_latest_field_value() {
     let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val cell c = cell()\n    func i32 bump = () -> {\n        c.v = c.v + 30\n        return c.v\n    }\n    val i32 first = bump()\n    val i32 second = bump()\n    val cell alias = c\n    alias.v = 100\n    return second - first + c.v - 100\n}\n";
     assert_eq!(run(src).unwrap(), 30);
 }
 
-/// func 绑定类型槽 = 结构体名; 返回结构体的函数。
+/// func 绑定返回类型可以是用户 struct。
 #[test]
 fn struct_returning_function() {
     let src = "struct pair {\n    val i32 a = 0\n    val i32 b = 0\n}\nfunc pair mk = (i32 v) -> return pair(a = v, b = v * 2)\nfunc i32 main = () -> {\n    val pair p = mk(21)\n    return p.a + p.b\n}\n";
