@@ -203,7 +203,7 @@ func i32 main = () -> {
     let error = super::validate::validate_resolved_hir(&checked)
         .expect_err("corrupt constructor index must fail the final HIR gate");
     assert!(
-        error.msg.contains("字段索引越界或重复"),
+        error.msg.contains("构造器字段索引越界"),
         "实际: {}",
         error.msg
     );
