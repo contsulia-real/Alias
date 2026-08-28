@@ -404,8 +404,6 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
-    c.fn_ids.push(fid);
-    c.fn_rets.push(ret_vty.clone());
     let cap_vtys: Vec<(BindingId, VTy)> = captures
         .iter()
         .map(|id| (*id, bound_vty(c, frame, *id)))
