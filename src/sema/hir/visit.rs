@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    ArmBody, Binding, BindingOwner, Body, CheckedProgram, Expr, Item, MethodTarget, Stmt, StrPart,
+};
 use crate::sema::types::Ty;
 
 enum TypeNode<'a> {
@@ -40,8 +42,8 @@ impl CheckedProgram {
                         stack.push(TypeNode::Expr(value));
                         stack.push(TypeNode::Expr(recv));
                     }
-                    Stmt::Expr { expr, .. } => stack.push(TypeNode::Expr(expr)),
-                    Stmt::Return { value, .. } => {
+                    Stmt::Expr { expr } => stack.push(TypeNode::Expr(expr)),
+                    Stmt::Return { value } => {
                         if let Some(value) = value {
                             stack.push(TypeNode::Expr(value));
                         }
@@ -49,7 +51,6 @@ impl CheckedProgram {
                     Stmt::If {
                         branches,
                         else_body,
-                        ..
                     } => {
                         if let Some(body) = else_body {
                             for stmt in body.iter().rev() {
@@ -63,7 +64,7 @@ impl CheckedProgram {
                             stack.push(TypeNode::Expr(cond));
                         }
                     }
-                    Stmt::While { cond, body, .. } => {
+                    Stmt::While { cond, body } => {
                         for stmt in body.iter().rev() {
                             stack.push(TypeNode::Stmt(stmt));
                         }
@@ -94,7 +95,8 @@ impl CheckedProgram {
                         | Expr::Float(..)
                         | Expr::Bool(..)
                         | Expr::Ident(..)
-                        | Expr::This(..) => {}
+                        | Expr::This(..)
+                        | Expr::Typeof { .. } => {}
                         Expr::Str(parts, ..) => {
                             for part in parts.iter().rev() {
                                 if let StrPart::Hole(hole) = part {
@@ -103,6 +105,7 @@ impl CheckedProgram {
                             }
                         }
                         Expr::Cast { expr, .. }
+                        | Expr::Convert { expr, .. }
                         | Expr::Neg { expr, .. }
                         | Expr::Not { expr, .. }
                         | Expr::BitNot { expr, .. }
