@@ -17,6 +17,14 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
+/// 当前已能证明不携带独立动态 ownership 的普通值类型。
+///
+/// string/func/struct/result/array/iterator 都不是 inline；unit 不是值类型，也不能借此被
+/// 当成 InlineValue。ptr<T> 等后续类型必须由其正式 ownership 规则决定，而不是默认归类。
+fn is_inline_value(ty: &Ty) -> bool {
+    matches!(ty, Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool)
+}
+
 /// 当前已经具有独立动态 ownership root 的语言值类型。
 ///
 /// 这不是 DeepCloneable/ShallowCloneable 判定；它只回答一个已产生的 Value 是否可能携带
@@ -100,8 +108,8 @@ fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCate
 /// resolved HIR 节点到 Place/Value + 当前 value subcategory 的唯一映射 owner。
 ///
 /// Identity conversion 不产生新值，必须完整保留 inner category；其它节点先决定 Place/Value，
-/// 再只把当前阶段无歧义的新 owner 标成 OwnedTemporary。`General` 只是当前阶段的普通 Value
-/// 桶，后续 InlineValue/BorrowedValue/Null/effect 分析继续细分；codegen 不得据此推断 ownership。
+/// 再优先固化无歧义的 OwnedTemporary 与 InlineValue。`General` 只保留仍需后续
+/// ownership/effect 语义继续细分的 Value，codegen 不得据此推断 ownership。
 fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     Ok(match expr {
         Expr::Ident(_, Some(_), ..) | Expr::Field { .. } | Expr::Index { .. } => {
@@ -114,6 +122,7 @@ fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
             ..
         } => inherited_identity_category(inner, *span)?,
         _ if produces_owned_temporary(expr) => ExprCategory::Value(ValueCategory::OwnedTemporary),
+        _ if is_inline_value(expr.ty()) => ExprCategory::Value(ValueCategory::InlineValue),
         _ => ExprCategory::Value(ValueCategory::General),
     })
 }
@@ -130,7 +139,7 @@ pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
 }
 
 /// final-HIR gate 独立重算每个节点的 resolved category；任何 None 或与最终 HIR 形状/
-/// 当前 OwnedTemporary 规则不一致的值都不能进入 codegen。显式栈避免引入额外宿主递归。
+/// 当前 value-category 规则不一致的值都不能进入 codegen。显式栈避免引入额外宿主递归。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {

@@ -212,17 +212,18 @@ pub(crate) enum CallTarget {
 
 /// 已经产生 Value 的表达式继续记录 ownership-sensitive 细分类。
 ///
-/// `General` 是当前第 2 阶段尚未证明为 OwnedTemporary 的普通 Value 桶；它不表示
-/// InlineValue/BorrowedValue/Null 已经裁决，也不能被 codegen 当成任何 ownership fallback。
+/// `InlineValue` 是不携带独立动态 ownership 的普通标量值。`General` 只保留当前阶段
+/// 仍需后续 ownership/effect 语义才能继续细分的 Value；codegen 不得把它当 fallback。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValueCategory {
+    InlineValue,
     General,
     OwnedTemporary,
 }
 
 /// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。
 /// Value 内部再由 `ValueCategory` 逐步固化 InlineValue/OwnedTemporary/BorrowedValue/Null
-/// 等最终语义；当前阶段只先冻结无歧义的 OwnedTemporary。
+/// 等最终语义；当前尚未实现的 borrowed/null/effect 语义不得由 codegen 猜测。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExprCategory {
     Place,

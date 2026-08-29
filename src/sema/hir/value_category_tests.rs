@@ -42,7 +42,7 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
 
     assert_eq!(
         binding_value(stmts, "n").category(),
-        Some(ExprCategory::Value(ValueCategory::General))
+        Some(ExprCategory::Value(ValueCategory::InlineValue))
     );
     assert_eq!(
         binding_value(stmts, "p").category(),
