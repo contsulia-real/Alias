@@ -17,9 +17,10 @@ mod typed_contract_tests;
 
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
-    CallTarget, CheckedProgram, CtorKind, Expr, ExprInfo, Item, LowerFacts, MatchArm, MethodId,
-    MethodTarget, Param, Pattern, ResolvedConversion, Stmt, StrPart, StructDef, StructField,
+    CallTarget, CheckedProgram, CtorKind, Expr, ExprInfo, Item, MatchArm, MethodId, MethodTarget,
+    Param, Pattern, ResolvedConversion, Stmt, StrPart, StructDef, StructField,
 };
+pub(super) use model::{LowerFacts, LowerPlaceInfo};
 
 pub(super) fn lower(
     program: crate::ast::Program,

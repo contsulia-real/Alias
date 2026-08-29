@@ -3,6 +3,7 @@
 //! 语句检查只负责控制流编排；“这个赋值写到哪里、目标是否可写、RHS 应采用什么类型”
 //! 属于 Place 语义。该规则只在这里实现，HIR lowering 与 codegen 只能消费已解析结果。
 
+use super::hir::LowerPlaceInfo;
 use super::{Checker, Env, Scope};
 use crate::ast::{Expr, Stmt};
 use crate::sema::types::Ty;
@@ -32,8 +33,12 @@ impl Checker {
 
         // 该地址只在本次 check → lower 链内作为临时 fact identity。若未来 AST
         // rewrite 会移动 Stmt，必须先换稳定 NodeId；不能用 lookup fallback 掩盖错配。
-        self.assign_target_ids
-            .insert(stmt as *const Stmt as usize, info.id);
+        self.assignment_places.insert(
+            stmt as *const Stmt as usize,
+            LowerPlaceInfo::Local {
+                binding_id: info.id,
+            },
+        );
         self.expr_expected(value, env, &info.ty).map_err(|error| {
             let error = error.into_alias();
             AliasError {
@@ -84,10 +89,12 @@ impl Checker {
             });
         }
 
-        // FieldAssign 与普通 Assign 共用同一 AST-Stmt 生命周期约束；这里只记录
-        // sema 已裁决的字段索引，lowering 不得再按字段名重新解析。
-        self.field_assign_indices
-            .insert(stmt as *const Stmt as usize, field_index);
+        // FieldAssign 与普通 Assign 共用同一 AST-Stmt 生命周期约束。一个语句只记录一个
+        // LowerPlaceInfo，避免 local/field 各自维护平行 fact 表并在后续 Index/Deref 扩散。
+        self.assignment_places.insert(
+            stmt as *const Stmt as usize,
+            LowerPlaceInfo::Field { field_index },
+        );
         self.expr_expected(value, env, &field_info.ty)
             .map_err(|error| {
                 let error = error.into_alias();

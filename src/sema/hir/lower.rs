@@ -1,6 +1,7 @@
 use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, CallArg, CallTarget, CheckedProgram, Expr,
-    ExprInfo, Item, LowerFacts, MatchArm, Param, Stmt, StrPart, StructDef, StructField,
+    ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Stmt, StrPart, StructDef,
+    StructField,
 };
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
@@ -37,13 +38,12 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("方法 self", facts.method_self_ids.len()),
         ("结构体字段", facts.fields.len()),
         ("字段索引", facts.field_indices.len()),
-        ("字段赋值索引", facts.field_assign_indices.len()),
+        ("赋值 Place", facts.assignment_places.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
         ("函数参数类型", facts.params.len()),
         ("函数参数 BindingId", facts.param_ids.len()),
         ("for 循环变量类型", facts.fors.len()),
         ("for 循环变量 BindingId", facts.for_ids.len()),
-        ("赋值目标 BindingId", facts.assign_target_ids.len()),
         ("Pattern BindingId", facts.match_binding_ids.len()),
         ("标识符 BindingId", facts.expr_binding_ids.len()),
     ];
@@ -162,27 +162,52 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
     let key = stmt as *const crate::ast::Stmt as usize;
     Ok(match stmt {
         crate::ast::Stmt::Binding(binding) => Stmt::Binding(lower_binding(binding, facts)?),
-        crate::ast::Stmt::Assign { value, span, .. } => Stmt::Assign {
-            target_id: take_required(
-                &mut facts.assign_target_ids,
+        crate::ast::Stmt::Assign { value, span, .. } => {
+            // check 已把每个赋值解析成唯一 Place；variant 若与 AST 形状不一致，说明
+            // check→lower identity/语义合同已破坏，不能把另一种 Place 重新解释成 local。
+            let target_id = match take_required(
+                &mut facts.assignment_places,
                 key,
                 *span,
-                "赋值目标 BindingId",
-            )?,
-            value: lower_expr(value, facts)?,
-        },
+                "赋值 Place",
+            )? {
+                LowerPlaceInfo::Local { binding_id } => binding_id,
+                LowerPlaceInfo::Field { .. } => {
+                    return Err(AliasError {
+                        msg: "内部 sema 不变式被破坏: 普通赋值携带字段 Place".into(),
+                        span: *span,
+                    })
+                }
+            };
+            Stmt::Assign {
+                target_id,
+                value: lower_expr(value, facts)?,
+            }
+        }
         crate::ast::Stmt::FieldAssign {
             recv, value, span, ..
-        } => Stmt::FieldAssign {
-            recv: Box::new(lower_expr(recv, facts)?),
-            field_index: take_required(
-                &mut facts.field_assign_indices,
+        } => {
+            // 与普通赋值同理：lowering 只消费 sema 已解析 Place，不按字段名重新决策。
+            let field_index = match take_required(
+                &mut facts.assignment_places,
                 key,
                 *span,
-                "字段赋值索引",
-            )?,
-            value: lower_expr(value, facts)?,
-        },
+                "赋值 Place",
+            )? {
+                LowerPlaceInfo::Field { field_index } => field_index,
+                LowerPlaceInfo::Local { .. } => {
+                    return Err(AliasError {
+                        msg: "内部 sema 不变式被破坏: 字段赋值携带 local Place".into(),
+                        span: *span,
+                    })
+                }
+            };
+            Stmt::FieldAssign {
+                recv: Box::new(lower_expr(recv, facts)?),
+                field_index,
+                value: lower_expr(value, facts)?,
+            }
+        }
         crate::ast::Stmt::Expr { expr } => Stmt::Expr {
             expr: lower_expr(expr, facts)?,
         },

@@ -185,24 +185,32 @@ pub(crate) struct ExprInfo {
     pub(crate) ty: Ty,
 }
 
-pub(crate) struct LowerFacts {
-    pub(crate) exprs: HashMap<usize, crate::sema::LowerExprInfo>,
-    pub(crate) bindings: HashMap<usize, Ty>,
-    pub(crate) binding_ids: HashMap<usize, BindingId>,
-    pub(crate) receivers: HashMap<usize, Ty>,
-    pub(crate) method_ids: HashMap<usize, MethodId>,
-    pub(crate) method_self_ids: HashMap<usize, BindingId>,
-    pub(crate) fields: HashMap<usize, Ty>,
-    pub(crate) field_indices: HashMap<usize, usize>,
-    pub(crate) field_assign_indices: HashMap<usize, usize>,
-    pub(crate) ctor_arg_indices: HashMap<usize, usize>,
-    pub(crate) params: HashMap<usize, Ty>,
-    pub(crate) param_ids: HashMap<usize, BindingId>,
-    pub(crate) fors: HashMap<usize, Ty>,
-    pub(crate) for_ids: HashMap<usize, BindingId>,
-    pub(crate) assign_target_ids: HashMap<usize, BindingId>,
-    pub(crate) match_binding_ids: HashMap<usize, BindingId>,
-    pub(crate) expr_binding_ids: HashMap<usize, BindingId>,
+/// check 阶段对一个赋值语句解析出的 Place 身份。该类型只跨越 check → lower，
+/// 不进入最终 HIR；把 local/field 拆成两张 fact 表会让“一个赋值只有一个目标”这一
+/// 不变量分散，后续扩展 Index/Deref 时还会继续制造平行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::sema) enum LowerPlaceInfo {
+    Local { binding_id: BindingId },
+    Field { field_index: usize },
+}
+
+pub(in crate::sema) struct LowerFacts {
+    pub(in crate::sema) exprs: HashMap<usize, crate::sema::LowerExprInfo>,
+    pub(in crate::sema) bindings: HashMap<usize, Ty>,
+    pub(in crate::sema) binding_ids: HashMap<usize, BindingId>,
+    pub(in crate::sema) receivers: HashMap<usize, Ty>,
+    pub(in crate::sema) method_ids: HashMap<usize, MethodId>,
+    pub(in crate::sema) method_self_ids: HashMap<usize, BindingId>,
+    pub(in crate::sema) fields: HashMap<usize, Ty>,
+    pub(in crate::sema) field_indices: HashMap<usize, usize>,
+    pub(in crate::sema) assignment_places: HashMap<usize, LowerPlaceInfo>,
+    pub(in crate::sema) ctor_arg_indices: HashMap<usize, usize>,
+    pub(in crate::sema) params: HashMap<usize, Ty>,
+    pub(in crate::sema) param_ids: HashMap<usize, BindingId>,
+    pub(in crate::sema) fors: HashMap<usize, Ty>,
+    pub(in crate::sema) for_ids: HashMap<usize, BindingId>,
+    pub(in crate::sema) match_binding_ids: HashMap<usize, BindingId>,
+    pub(in crate::sema) expr_binding_ids: HashMap<usize, BindingId>,
 }
 
 #[derive(Debug, Clone)]
