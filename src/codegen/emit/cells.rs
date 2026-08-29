@@ -40,6 +40,30 @@ pub(crate) fn cell_addr<M: Module>(
         .map(|(off, _)| CellAddr::GlobalOff(*off))
 }
 
+/// 把已经解析的 binding cell 位置统一物化成实际 machine address。
+///
+/// local slot 自身已经保存 cell pointer；capture env 保存共享 cell pointer；global slot
+/// 则是 globals block 内的固定 offset。borrow/refer 等 Place-address 操作必须复用这里，
+/// 不能各自重新解释三种 binding storage 形态。
+pub(crate) fn materialize_cell_addr(
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    addr: &CellAddr,
+) -> Value {
+    match addr {
+        CellAddr::Reg(v) => bcx.use_var(*v),
+        CellAddr::EnvLoad(i) => {
+            let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
+            bcx.ins()
+                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i))
+        }
+        CellAddr::GlobalOff(off) => {
+            let base = bcx.use_var(frame.globals);
+            bcx.ins().iadd_imm(base, *off as i64)
+        }
+    }
+}
+
 pub(crate) fn read_cell(
     bcx: &mut FunctionBuilder,
     frame: &Frame,
@@ -47,25 +71,8 @@ pub(crate) fn read_cell(
     vty: &VTy,
 ) -> Value {
     let t = cl_type(vty);
-    let raw = match addr {
-        CellAddr::Reg(v) => {
-            let cp = bcx.use_var(*v);
-            bcx.ins().load(t, MemFlagsData::new(), cp, 0)
-        }
-        CellAddr::EnvLoad(i) => {
-            // 捕获环境保存的是共享 cell 指针而不是值本身；必须先从 env 取 cell，
-            // 再按绑定 ABI 取值，才能让内外层闭包观察到同一次可变绑定更新。
-            let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            let cell = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i));
-            bcx.ins().load(t, MemFlagsData::new(), cell, 0)
-        }
-        CellAddr::GlobalOff(off) => {
-            let base = bcx.use_var(frame.globals);
-            bcx.ins().load(t, MemFlagsData::new(), base, *off as i32)
-        }
-    };
+    let cell = materialize_cell_addr(bcx, frame, addr);
+    let raw = bcx.ins().load(t, MemFlagsData::new(), cell, 0);
     norm_load(bcx, raw, vty)
 }
 
@@ -77,24 +84,8 @@ pub(crate) fn write_cell(
     vty: &VTy,
 ) {
     let sv = norm_store(bcx, v, vty);
-    match addr {
-        CellAddr::Reg(v) => {
-            let cp = bcx.use_var(*v);
-            bcx.ins().store(MemFlagsData::new(), sv, cp, 0);
-        }
-        CellAddr::EnvLoad(i) => {
-            // 与 read_cell 对称：env 槽是 cell 地址，直接覆盖 env 槽会破坏共享捕获语义。
-            let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
-            let cell = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i));
-            bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
-        }
-        CellAddr::GlobalOff(off) => {
-            let base = bcx.use_var(frame.globals);
-            bcx.ins().store(MemFlagsData::new(), sv, base, *off as i32);
-        }
-    }
+    let cell = materialize_cell_addr(bcx, frame, addr);
+    bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
 }
 
 pub(crate) fn emit_local_cell<M: Module>(

@@ -72,7 +72,7 @@ src/
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift；clone.rs / shallow.rs 只执行各自 resolved plan
-│   │   └── places.rs       # resolved Place 物理写入与字段 storage 查询 owner
+│   │   └── places.rs       # resolved Place storage address、物理写入与字段 storage 查询 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
@@ -132,6 +132,8 @@ codegen 只消费已解析 HIR，不得根据：
 - address 是否等于 descriptor base；
 
 重新决定静态语义、ownership 或 borrow relation。
+
+`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address；`codegen/emit/places.rs` 再把 resolved Local/Field Place 映射到 canonical storage address。replacement 以及后续 borrow/refer 都必须复用这条地址 owner，禁止重新拼 capture/global/field 地址规则。
 
 `codegen/emit/clone.rs` / `shallow.rs` 可以验证 resolved plan 与既有物理布局的内部不变量并执行递归复制，但不能自行判断静态类型是否允许对应操作。尤其 shallow-safe aggregate 当前即使以 heap pointer 表示，也必须建立新的独立 aggregate root；禁止简单 bit-copy pointer 后让两个语义 owner 指向同一 root。
 
