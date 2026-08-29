@@ -340,6 +340,26 @@ fn validate_uses(
     while let Some(node) = stack.pop() {
         match node {
             Node::Expr(expr) => {
+                if let Expr::Call {
+                    args,
+                    target:
+                        super::CallTarget::Builtin(
+                            super::BuiltinCall::Increase | super::BuiltinCall::Decrease,
+                        ),
+                    ..
+                } = expr
+                {
+                    if let [arg] = args.as_slice() {
+                        if let Expr::Ident(_, Some(id), ..) = &arg.value {
+                            if contracts.contains_key(id) && !writable.contains(id) {
+                                return Err(invariant(
+                                    arg.value.span(),
+                                    "increase/decrease 目标不是可写 var 绑定",
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Expr::Ident(_, Some(id), ..) = expr {
                     // 未知 ID 由 resolved cross-reference validator 统一拒绝；本 pass 只在
                     // ID 能解析到声明后检查类型关系，避免形成第二套存在性验证 owner。
@@ -399,8 +419,8 @@ fn validate_uses(
 }
 
 /// Stable BindingId graph 的 final-HIR contract：每个声明 ID 全局唯一并绑定唯一静态类型；
-/// 已解析引用必须消费该声明类型，Assign 还必须指向可写 var 绑定。未知引用由
-/// resolved cross-reference validator 拒绝。
+/// 已解析引用必须消费该声明类型，所有当前 binding 写入口还必须指向可写 var 绑定。未知
+/// 引用由 resolved cross-reference validator 拒绝。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let (contracts, writable) = collect_contracts(program)?;
     validate_uses(program, &contracts, &writable)

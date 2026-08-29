@@ -184,6 +184,53 @@ fn final_hir_gate_rejects_assignment_retargeted_to_val_binding() {
 }
 
 #[test]
+fn final_hir_gate_rejects_increase_retargeted_to_val_binding() {
+    let mut program = checked(
+        "val i32 locked = 0\nfunc i32 main = () -> {\n    var i32 n = 0\n    increase n\n    return n\n}\n",
+    );
+    let locked_id = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "locked" => Some(binding.binding_id),
+            _ => None,
+        })
+        .expect("locked binding");
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let target_id = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Expr {
+                expr:
+                    Expr::Call {
+                        args,
+                        target: CallTarget::Builtin(BuiltinCall::Increase),
+                        ..
+                    },
+            } => args.first_mut(),
+            _ => None,
+        })
+        .and_then(|arg| match &mut arg.value {
+            Expr::Ident(_, Some(id), ..) => Some(id),
+            _ => None,
+        })
+        .expect("fixture must contain increase target");
+    *target_id = locked_id;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("increase retargeted to val binding must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("increase/decrease 目标不是可写 var 绑定"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
 fn final_hir_gate_rejects_duplicate_binding_id() {
     let mut program =
         checked("val i32 left = 1\nval i32 right = 2\nfunc i32 main = () -> return left + right\n");
