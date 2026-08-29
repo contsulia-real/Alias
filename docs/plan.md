@@ -15,12 +15,29 @@
 = provenance + address + view_start + view_end
 ```
 
-当前目标 `x86_64-pc-windows-msvc` 下：
+必须严格区分：
 
 ```text
+目标程序位宽 / machine address width
+!=
+Alias ptr<T> capability value 的 storage size
+```
+
+当前目标 `x86_64-pc-windows-msvc` 是 **64-bit 目标**，机器地址与 machine pointer width 为 64 bits / 8 bytes。
+
+Alias 的一个 `ptr<T>` 语言值由四个 64-bit machine word 组成，因此：
+
+```text
+target program              = 64-bit
+machine address width        = 64 bits
+machine pointer width        = 64 bits / 8 bytes
+Alias ptr<T> capability size = 32 bytes / 256 bits
+
 size(ptr<T>)  = 32 bytes
 align(ptr<T>) = 8 bytes
 ```
+
+这里的“32 bytes”绝不表示“32-bit 程序”或“32-bit 地址空间”；它只描述一个 Alias pointer capability aggregate value 的总 storage 大小。
 
 `ptr<T>?` 使用同一表示，不增加额外 tag。
 
@@ -1056,7 +1073,7 @@ consumed owner
 
 每个可寻址 storage root 在其可被 pointer 观察的生命周期内都有一个 canonical `StorageDescriptor` identity。
 
-pointer 的 `provenance` lane 保存该 descriptor 的稳定地址/handle；在当前 Windows x64 ABI 中它是一个 64-bit runtime pointer value。
+pointer 的 `provenance` lane 保存该 descriptor 的稳定地址/handle；在当前 Windows x64 ABI 中它是一个 **64-bit machine pointer value（8 bytes）**。这再次与整个 Alias `ptr<T>` capability aggregate 的 32-byte storage 大小相区分。
 
 概念职责至少包括：
 
@@ -1258,30 +1275,41 @@ Ptr<T> {
 
 ownership capability 是 sema/HIR 静态事实，也不进入 pointer runtime value。
 
-## 23.2 当前 Windows x64 物理布局
+## 23.2 当前 Windows x64 物理布局与位宽
 
-当前目标 `x86_64-pc-windows-msvc`：
+当前目标 `x86_64-pc-windows-msvc` 是 64-bit 目标。这里有两个不同的宽度概念：
 
 ```text
-offset  0: provenance   8 bytes
-offset  8: address      8 bytes
-offset 16: view_start   8 bytes
-offset 24: view_end     8 bytes
+machine pointer / address width = 64 bits / 8 bytes
+Alias ptr<T> value size         = 256 bits / 32 bytes
+```
 
-size  = 32 bytes
+`ptr<T>` 不是一个 256-bit 机器地址；它是由四个 64-bit lane 组成的 aggregate capability value，其中只有 `address` lane 承担当前机器地址位置的角色，`provenance` lane 也是一个 64-bit machine pointer/handle。
+
+物理布局：
+
+```text
+offset  0: provenance   8 bytes / 64 bits
+offset  8: address      8 bytes / 64 bits
+offset 16: view_start   8 bytes / 64 bits
+offset 24: view_end     8 bytes / 64 bits
+
+size  = 32 bytes / 256 bits
 align = 8 bytes
 ```
 
 概念上是：
 
 ```text
-provenance : *StorageDescriptor
-address    : u64
+provenance : *StorageDescriptor   // 64-bit machine pointer
+address    : u64                  // 64-bit machine address value
 view_start : u64
 view_end   : u64
 ```
 
-其它目标若未来存在，可以定义与目标 pointer width 匹配的等价 4-word ABI；当前规范只冻结 Windows x64 的 32-byte 形式。
+其它目标若未来存在，可以定义与其 **machine pointer width** 匹配的等价 4-word capability ABI；当前规范只冻结 Windows x64 的四个 64-bit word / 32-byte 形式。
+
+任何文档、代码或诊断中提到“32-byte pointer capability”时，都不得把它简称或解释成“32-bit pointer”。
 
 ## 23.3 Pointer invariant
 
@@ -1334,7 +1362,7 @@ Alias pointer 的 per-value view bounds 不能只由机器 address 唯一恢复�
 
 # 24. Nullable pointer ABI
 
-`ptr<T>?` 与 `ptr<T>` 使用相同 32-byte storage。
+`ptr<T>?` 与 `ptr<T>` 使用相同 32-byte capability storage。这里的 32 bytes 同样只是 aggregate value 大小；当前机器地址宽度仍是 64 bits。
 
 canonical null：
 
@@ -1647,9 +1675,10 @@ stride(T) > 0
 当前 Windows x64：
 
 ```text
-size(ptr<T>)   = 32
-align(ptr<T>)  = 8
-stride(ptr<T>) = 32
+machine pointer width = 64 bits / 8 bytes
+size(ptr<T>)          = 32 bytes / 256 bits
+align(ptr<T>)         = 8 bytes
+stride(ptr<T>)        = 32 bytes
 ```
 
 `ptr<T>?` 相同。
@@ -1737,7 +1766,7 @@ member access / method call as T
 
 # 31. Pointer function ABI
 
-`ptr<T>` 是 32-byte aggregate value，不允许继续套用“一个语言值 = 一个 Cranelift scalar Type”的旧抽象。
+`ptr<T>` 是 32-byte / 256-bit aggregate capability value，不允许继续套用“一个语言值 = 一个 Cranelift scalar Type”的旧抽象。它仍运行在 64-bit 目标上；32-byte aggregate size 与 target bitness 无关。
 
 ## 31.1 Expression representation
 
@@ -1785,6 +1814,8 @@ callee：
 2. 进入本函数 SSA representation
 ```
 
+这里传入 temporary 地址所使用的机器参数本身仍是当前 x64 的 64-bit machine pointer。
+
 这是语言层 by-value parameter；间接传递只是一种机器 ABI lowering，不把 callee 参数变成 stored borrow，也不允许 callee 通过修改 argument temporary 改写 caller 的语义 Place。
 
 所有 semantic pointer parameter，包括方法接收者在其最终机器签名需要 pointer value 时，都服从同一规则。
@@ -1813,6 +1844,8 @@ write four lanes into return area
 return normally
 ```
 
+隐藏 return-area 地址本身同样是当前 x64 的 64-bit machine pointer。
+
 不依赖四个独立机器 return register，也不把 pointer 压回 I64 handle。
 
 对于存在显式 sret 的用户函数，当前 Alias internal hidden parameter order 冻结为：
@@ -1837,7 +1870,9 @@ return normally
 
 # 32. Aggregate / container ABI implications
 
-冻结 32-byte `ptr<T>` 后，当前任何“所有任意值都可以压入 8-byte universal word”的实现假设必须退出长期设计。
+冻结 32-byte `ptr<T>` capability aggregate 后，当前任何“所有任意值都可以压入 8-byte universal word”的实现假设必须退出长期设计。
+
+这里的 32-byte aggregate 不改变目标程序仍为 64-bit 的事实。
 
 ## 32.1 Array
 
@@ -2097,7 +2132,7 @@ ownership / pointer 计划不顺带修改整个整数类型提升系统。
 
 不定义 C ABI / external ABI。
 
-本文的 32-byte pointer parameter / sret 规则属于 Alias internal ABI。
+本文的 32-byte pointer capability parameter / sret 规则属于 Alias internal ABI；当前目标本身仍是 64-bit Windows x64。
 
 ## 37.4 用户自定义 destructor
 
@@ -2158,6 +2193,8 @@ v1 明确不提供。
 25. result payload 改为真实 typed payload layout
 ```
 
+第 18 项中的 `4 x I64` 表示四个 64-bit lane；它定义的是 32-byte capability aggregate，而不是 32-bit machine pointer。
+
 ## 38.3 Runtime provenance / raw memory
 
 ```text
@@ -2177,7 +2214,8 @@ v1 明确不提供。
 必须覆盖：
 
 ```text
-pointer ABI byte layout
+64-bit target / machine-address-width contract
+pointer capability ABI byte layout
 nullable canonical zero
 pointer parameter / sret round-trip
 array<ptr<T>> stride
@@ -2236,10 +2274,18 @@ Initialized<T> 不能被 reinterpret 冒充成 Initialized<U>
 每个可寻址 storage root 有 canonical StorageDescriptor
 subview 不创建新的 provenance identity
 
+current target
+= x86_64-pc-windows-msvc
+= 64-bit program / 64-bit machine address width
+
 Windows x64 ptr<T>
 = 4 x I64
 = provenance + address + view_start + view_end
-= 32 bytes / align 8
+= 32 bytes / 256-bit aggregate / align 8
+
+32-byte ptr<T> capability size
+!= 32-bit program
+!= 32-bit machine pointer
 
 ptr<T>? 使用相同 32-byte representation
 canonical null = all zero
