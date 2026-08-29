@@ -41,6 +41,7 @@ pub(crate) struct Binding {
     pub(crate) binding_id: BindingId,
     pub(crate) owner: BindingOwner,
     pub(crate) kind: BindKind,
+    pub(crate) relation: Option<StorageRelation>,
     pub(crate) ty: Ty,
     pub(crate) name: String,
     pub(crate) value: Expr,
@@ -229,6 +230,15 @@ pub(crate) enum ValueCategory {
 pub(crate) enum OwnershipCapability {
     None,
     Available,
+}
+
+/// 当前 phase 已能证明的 binding slot relation。
+///
+/// 现有语言尚无 BorrowedValue producer，因此只允许真实可达的 Owning；`Borrowed` 会在
+/// borrow semantic resolution 真正落地时加入，而不是提前制造 dead variant。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageRelation {
+    Owning,
 }
 
 /// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。

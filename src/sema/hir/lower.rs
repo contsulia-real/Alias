@@ -22,8 +22,8 @@ pub(super) fn lower(
     };
     ensure_facts_consumed(&facts)?;
     // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 value category 与当前可证明的
-    // initial ownership capability；capture 仍需在整棵 HIR 建成后统一写回。三者都完成后才
-    // 允许权威 gate 把程序交给 codegen。
+    // initial ownership capability；每个显式 Binding 同时固化当前可证明的 storage relation。
+    // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked)?;
     super::validate_resolved_hir(&checked)?;
     Ok(checked)
@@ -137,10 +137,12 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
         };
         implicit_bindings.push(*self_id);
     }
+    let relation = super::storage_relations::initial_relation(&value)?;
     Ok(Binding {
         binding_id,
         owner,
         kind: binding.kind,
+        relation,
         ty,
         name: binding.name.clone(),
         value,
