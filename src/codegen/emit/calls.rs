@@ -1,12 +1,12 @@
-use super::arrays::{array_raw, bump_array_version, make_iterator};
+use super::arrays::{array_len, array_raw, bump_array_version, make_iterator};
 use super::cells::{cell_addr, first_result, read_cell, write_cell};
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::strings::display_word;
 use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, user_signature, VTy};
 use crate::codegen::layout::{
-    result_tag, ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET,
-    RESULT_TAG_OFFSET, RESULT_WORDS,
+    result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
+    RESULT_WORDS,
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget};
@@ -198,9 +198,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("array.pop 目标必须保留数组类型")
             };
             let raw = array_raw(bcx, rv);
-            let len = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET);
+            let len = array_len(bcx, raw);
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
             emit_abort_branch(c, bcx, empty, "alias.abort_pop", span)?;
             let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;

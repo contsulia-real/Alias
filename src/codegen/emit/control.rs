@@ -1,15 +1,14 @@
-use super::arrays::{array_raw, array_version, emit_iterator_abort, make_iterator};
+use super::arrays::{
+    array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
+};
 use super::calls::{field_offset, field_vty};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, write_cell,
 };
 use super::expr::emit_expr;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy, VALUE_WORD_BYTES};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
-use crate::codegen::layout::{
-    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET,
-    ITERATOR_VERSION_OFFSET,
-};
+use crate::codegen::layout::{ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET};
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt};
 use crate::{AliasResult, Span};
@@ -361,9 +360,7 @@ fn emit_for<M: Module>(
         .ins()
         .load(types::I64, MemFlagsData::new(), iter, ITERATOR_INDEX_OFFSET);
     let raw = array_raw(bcx, array);
-    let len = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET);
+    let len = array_len(bcx, raw);
     let more = bcx.ins().icmp(IntCC::UnsignedLessThan, cursor, len);
     bcx.ins().brif(more, body_b, &[], end_b, &[]);
     frame.terminated = true;
@@ -372,11 +369,7 @@ fn emit_for<M: Module>(
     bcx.switch_to_block(body_b);
     frame.terminated = false;
     let raw = array_raw(bcx, array);
-    let data = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
-    let off = bcx.ins().imul_imm_s(cursor, VALUE_WORD_BYTES);
-    let addr = bcx.ins().iadd(data, off);
+    let addr = array_element_addr(bcx, raw, cursor);
     let raw_elem = bcx
         .ins()
         .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);

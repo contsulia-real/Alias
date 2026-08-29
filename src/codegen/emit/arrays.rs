@@ -22,6 +22,26 @@ pub(crate) fn array_raw(bcx: &mut FunctionBuilder, array: Value) -> Value {
     )
 }
 
+pub(super) fn array_len(bcx: &mut FunctionBuilder, raw: Value) -> Value {
+    bcx.ins()
+        .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET)
+}
+
+/// 当前 raw array backing 仍以固定 VALUE_WORD_BYTES 存放元素。所有 emitter 对 backing
+/// element 的寻址必须经过这里；未来 typed stride 替换 universal-word layout 时，若各调用点
+/// 各自保留 `index * VALUE_WORD_BYTES`，会再次形成多个物理布局 owner 并产生读写错位。
+pub(super) fn array_element_addr(
+    bcx: &mut FunctionBuilder,
+    raw: Value,
+    index: Value,
+) -> Value {
+    let data = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
+    let offset = bcx.ins().imul_imm_s(index, VALUE_WORD_BYTES);
+    bcx.ins().iadd(data, offset)
+}
+
 pub(crate) fn array_version(bcx: &mut FunctionBuilder, array: Value) -> Value {
     bcx.ins().load(
         types::I64,
@@ -102,10 +122,8 @@ pub(crate) fn emit_array_lit<M: Module>(
     let raw = c.call_rt(bcx, "alias.arr.new", &[cap])?;
     for (i, el) in elems.iter().enumerate() {
         let v = emit_expr(c, bcx, frame, el)?;
-        let dp = bcx
-            .ins()
-            .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
-        let addr = bcx.ins().iadd_imm_s(dp, (i as i64) * VALUE_WORD_BYTES);
+        let index = bcx.ins().iconst(types::I64, i as i64);
+        let addr = array_element_addr(bcx, raw, index);
         let sv = storage_word(bcx, v, elem_vty);
         store_elem(bcx, sv, addr, elem_vty);
     }

@@ -1,4 +1,4 @@
-use super::arrays::{array_raw, emit_array_lit};
+use super::arrays::{array_element_addr, array_len, array_raw, emit_array_lit};
 use super::calls::{emit_call, emit_method_call, field_offset, field_vty};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
@@ -9,13 +9,10 @@ use super::ops::{
     widen_unsigned,
 };
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
-use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, restore_word, storage_word, VTy, VALUE_WORD_BYTES,
-};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
 use crate::codegen::layout::{
-    result_tag, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET,
-    RESULT_TAG_OFFSET,
+    result_tag, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
 };
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
@@ -195,20 +192,11 @@ pub(crate) fn emit_expr<M: Module>(
             };
             let raw_array = array_raw(bcx, array);
             let idx32 = bcx.ins().ireduce(types::I32, idxw);
-            let len64 =
-                bcx.ins()
-                    .load(types::I64, MemFlagsData::new(), raw_array, ARRAY_LEN_OFFSET);
+            let len64 = array_len(bcx, raw_array);
             let len32 = bcx.ins().ireduce(types::I32, len64);
             emit_index_guard(c, bcx, idx32, len32, *span)?;
-            let dp = bcx.ins().load(
-                types::I64,
-                MemFlagsData::new(),
-                raw_array,
-                ARRAY_DATA_OFFSET,
-            );
             let idx64 = bcx.ins().sextend(types::I64, idx32);
-            let off = bcx.ins().imul_imm_s(idx64, VALUE_WORD_BYTES);
-            let addr = bcx.ins().iadd(dp, off);
+            let addr = array_element_addr(bcx, raw_array, idx64);
             let raw = bcx
                 .ins()
                 .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
