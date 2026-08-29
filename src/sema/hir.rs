@@ -14,6 +14,8 @@ mod visit;
 #[cfg(test)]
 mod contract_tests;
 #[cfg(test)]
+mod deep_clone_tests;
+#[cfg(test)]
 mod storage_relation_tests;
 #[cfg(test)]
 mod tests;
@@ -24,9 +26,9 @@ mod value_category_tests;
 
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
-    CallTarget, CheckedProgram, CtorKind, Expr, ExprCategory, ExprInfo, Item, MatchArm, MethodId,
-    MethodTarget, OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, Stmt,
-    StorageRelation, StrPart, StructDef, StructField, ValueCategory,
+    CallTarget, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, Item,
+    MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern, Place, PlaceInfo,
+    ResolvedConversion, Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 
 use crate::sema::types::Ty;

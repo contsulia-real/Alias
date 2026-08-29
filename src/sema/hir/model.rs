@@ -170,12 +170,30 @@ pub(crate) struct CallArg {
     pub(crate) value: Expr,
 }
 
+/// sema 已经裁决好的 deep-clone 执行计划。codegen 只能逐层执行该 plan，不能根据
+/// `Ty`/VTy 再判断一个类型是否 DeepCloneable，也不能把 aggregate 退化成引用复制。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeepClonePlan {
+    Inline,
+    String,
+    Struct {
+        name: String,
+        fields: Vec<DeepClonePlan>,
+    },
+    Array(Box<DeepClonePlan>),
+    Result {
+        ok: Box<DeepClonePlan>,
+        err: Box<DeepClonePlan>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BuiltinCall {
     Print,
     Println,
     Increase,
     Decrease,
+    DeepClone(DeepClonePlan),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -29,6 +29,12 @@ pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     })
 }
 
+/// ownership intrinsic `clone` 与普通 builtin call 分开分类：它需要携带 sema 已解析的
+/// DeepClonePlan，不能退化成仅靠名字即可决定的 BuiltinCall。
+pub(crate) fn is_clone_builtin(name: &str) -> bool {
+    name == "clone"
+}
+
 pub(crate) fn classify_result_constructor(name: &str) -> Option<CtorKind> {
     Some(match name {
         "ok" => CtorKind::Ok,
@@ -43,7 +49,7 @@ pub(crate) const TYPE_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn is_no_paren_builtin(name: &str) -> bool {
-    classify_call_builtin(name).is_some()
+    classify_call_builtin(name).is_some() || is_clone_builtin(name)
 }
 
 pub(crate) fn is_output_builtin(name: &str) -> bool {
@@ -55,6 +61,7 @@ pub(crate) fn is_output_builtin(name: &str) -> bool {
 
 pub(crate) fn is_reserved_lexical_name(name: &str) -> bool {
     classify_call_builtin(name).is_some()
+        || is_clone_builtin(name)
         || classify_result_constructor(name).is_some()
         || TYPE_NAMES.contains(&name)
 }

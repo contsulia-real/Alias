@@ -5,6 +5,7 @@
 pub(super) mod arrays;
 pub(super) mod calls;
 pub(super) mod cells;
+pub(super) mod clone;
 pub(super) mod control;
 pub(super) mod expr;
 pub(super) mod ops;

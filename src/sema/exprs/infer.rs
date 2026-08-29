@@ -125,7 +125,8 @@ impl Checker {
             }
             Expr::Call { callee, args, span } => {
                 let ty = self.call(callee, args, *span, env)?;
-                self.record_call_target(e, self.resolve_call_target(callee, env));
+                let target = self.resolve_call_target(callee, args, env)?;
+                self.record_call_target(e, target);
                 Ok(ty)
             }
             Expr::Juxtapose { lhs, rhs, span } => {

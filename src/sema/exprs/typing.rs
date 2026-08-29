@@ -3,8 +3,8 @@ use super::operators::{
     require_value,
 };
 use crate::ast::{CtorKind, Expr};
-use crate::builtins::{classify_result_constructor, CallBuiltinName};
-use crate::sema::hir::{BindingId, ResolvedConversion};
+use crate::builtins::{classify_result_constructor, is_clone_builtin, CallBuiltinName};
+use crate::sema::hir::{BindingId, BuiltinCall, ResolvedConversion};
 use crate::sema::types::{types_match, Ty};
 use crate::sema::{Checker, Env, LowerCallTarget, LowerExprInfo, Scope};
 use crate::{AliasError, AliasResult, Span};
@@ -212,6 +212,16 @@ impl Checker {
     }
 
     fn expr_expected_inner(&mut self, e: &Expr, env: &Env, expected: &Ty) -> ExprCheckResult<Ty> {
+        if let Expr::Call { callee, args, span } = e {
+            if matches!(callee.as_ref(), Expr::Ident(name, _) if is_clone_builtin(name)) {
+                let (ty, plan) = self.check_clone_call(args, *span, env, Some(expected))?;
+                self.record_call_target(
+                    e,
+                    LowerCallTarget::Builtin(BuiltinCall::DeepClone(plan)),
+                );
+                return Ok(ty);
+            }
+        }
         if matches!(expected, Ty::Func { .. } | Ty::FuncPoly)
             && matches!(e, Expr::Ident(..) | Expr::This(..))
         {

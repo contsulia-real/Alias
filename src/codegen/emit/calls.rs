@@ -1,5 +1,6 @@
 use super::arrays::{array_len, array_raw, bump_array_version, make_iterator};
 use super::cells::{cell_addr, first_result, read_cell, write_cell};
+use super::clone::emit_deep_clone;
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::strings::display_word;
@@ -35,6 +36,12 @@ pub(crate) fn emit_call<M: Module>(
         }
         CallTarget::Builtin(BuiltinCall::Print) => emit_print(c, bcx, frame, false, args),
         CallTarget::Builtin(BuiltinCall::Println) => emit_print(c, bcx, frame, true, args),
+        CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => {
+            let [arg] = args else {
+                invariant_violation("clone 元数 (sema 已校验)")
+            };
+            emit_deep_clone(c, bcx, frame, &arg.value, plan)
+        }
         CallTarget::StructConstructor {
             name,
             arg_field_indices,

@@ -1,6 +1,6 @@
 use super::{
-    ArmBody, Body, CallTarget, CheckedProgram, Expr, ExprCategory, Item, MatchArm, MethodTarget,
-    Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
+    ArmBody, Body, BuiltinCall, CallTarget, CheckedProgram, DeepClonePlan, Expr, ExprCategory, Item,
+    MatchArm, MethodTarget, Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
@@ -41,6 +41,16 @@ fn carries_dynamic_owner(ty: &Ty) -> bool {
     )
 }
 
+fn deep_clone_creates_owner(plan: &DeepClonePlan) -> bool {
+    match plan {
+        DeepClonePlan::Inline => false,
+        DeepClonePlan::String
+        | DeepClonePlan::Struct { .. }
+        | DeepClonePlan::Array(_)
+        | DeepClonePlan::Result { .. } => true,
+    }
+}
+
 /// 当前阶段能够不依赖 function effects、loan 或 capability dataflow 就证明为新 owner 的
 /// resolved HIR 来源。这里必须保持保守：动态函数/用户方法返回、ternary/match merge、
 /// propagate 等仍交给后续 ownership/effect 阶段，不得仅按结果类型猜成 OwnedTemporary。
@@ -56,10 +66,11 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
             mode: ResolvedConversion::Convert,
             ..
         } => carries_dynamic_owner(expr.ty()),
-        Expr::Call { target, .. } => matches!(
-            target,
-            CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_)
-        ),
+        Expr::Call { target, .. } => match target {
+            CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_) => true,
+            CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => deep_clone_creates_owner(plan),
+            CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
+        },
         Expr::MethodCall { target, .. } => match target {
             MethodTarget::StringUpper
             | MethodTarget::StringLower

@@ -1,8 +1,11 @@
+use super::deep_clone_plan_with;
 use super::operators::require_value;
 use super::typing::ExprCheckError;
 use crate::ast::{CallArg, CtorKind, Expr};
-use crate::builtins::{classify_call_builtin, classify_result_constructor, CallBuiltinName};
-use crate::sema::hir::MethodTarget;
+use crate::builtins::{
+    classify_call_builtin, classify_result_constructor, is_clone_builtin, CallBuiltinName,
+};
+use crate::sema::hir::{BuiltinCall, MethodTarget};
 use crate::sema::types::Ty;
 use crate::sema::{builtin_method, resolved_builtin_call, Checker, Env, LowerCallTarget, Scope};
 use crate::{AliasError, AliasResult, Span};
@@ -34,6 +37,10 @@ impl Checker {
             }
         }
         if let Expr::Ident(name, _) = callee {
+            if is_clone_builtin(name) {
+                let (ty, _) = self.check_clone_call(args, span, env, None)?;
+                return Ok(ty);
+            }
             if let Some(builtin) = classify_call_builtin(name) {
                 match builtin {
                     CallBuiltinName::Increase | CallBuiltinName::Decrease => {
@@ -129,30 +136,60 @@ impl Checker {
         }
     }
 
-    pub(super) fn resolve_call_target(&self, callee: &Expr, env: &Env) -> LowerCallTarget {
+    pub(super) fn resolve_call_target(
+        &self,
+        callee: &Expr,
+        args: &[CallArg],
+        env: &Env,
+    ) -> AliasResult<LowerCallTarget> {
         let Expr::Ident(name, _) = callee else {
-            return LowerCallTarget::FunctionValue;
+            return Ok(LowerCallTarget::FunctionValue);
         };
         // Mirror call(): lexical bindings shadow user struct constructors. Predefined names
         // cannot enter Scope, so their structured classification remains authoritative below.
         if Scope::get(env, name).is_some() {
-            return LowerCallTarget::FunctionValue;
+            return Ok(LowerCallTarget::FunctionValue);
         }
         if self.structs.contains_key(name) {
-            return LowerCallTarget::StructConstructor(name.clone());
+            return Ok(LowerCallTarget::StructConstructor(name.clone()));
         }
         if let Some(kind) = classify_result_constructor(name) {
-            return LowerCallTarget::ResultConstructor(kind);
+            return Ok(LowerCallTarget::ResultConstructor(kind));
+        }
+        if is_clone_builtin(name) {
+            let [arg] = args else {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: 已检查 clone 的元数不是 1".into(),
+                    span: callee.span(),
+                });
+            };
+            let ty = self
+                .expr_facts
+                .get(&Self::expr_key(&arg.value))
+                .map(|info| info.ty.clone())
+                .ok_or_else(|| AliasError {
+                    msg: "内部 sema 不变式被破坏: clone source 缺少静态类型 fact".into(),
+                    span: arg.value.span(),
+                })?;
+            let plan = deep_clone_plan_with(&ty, callee.span(), &|struct_name| {
+                self.structs.get(struct_name).map(|info| {
+                    info.fields
+                        .iter()
+                        .map(|field| field.ty.clone())
+                        .collect::<Vec<_>>()
+                })
+            })?;
+            return Ok(LowerCallTarget::Builtin(BuiltinCall::DeepClone(plan)));
         }
         if let Some(builtin) = resolved_builtin_call(name) {
-            return LowerCallTarget::Builtin(builtin);
+            return Ok(LowerCallTarget::Builtin(builtin));
         }
         if classify_call_builtin(name) == Some(CallBuiltinName::Typeof) {
-            return LowerCallTarget::Typeof;
+            return Ok(LowerCallTarget::Typeof);
         }
         // contextual conversion 成功时已在普通 call-target resolution 前记录 target；
         // 没有 expected type 的 from/try_from 会失败，不能在这里补 fallback target。
-        LowerCallTarget::FunctionValue
+        Ok(LowerCallTarget::FunctionValue)
     }
 
     fn construct(
