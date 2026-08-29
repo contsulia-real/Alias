@@ -5,6 +5,7 @@ mod capture;
 mod lower;
 mod model;
 mod ownership_capabilities;
+mod place_relation;
 mod storage_relations;
 mod typed_contract;
 mod validate;
@@ -15,6 +16,8 @@ mod visit;
 mod contract_tests;
 #[cfg(test)]
 mod deep_clone_tests;
+#[cfg(test)]
+mod place_relation_tests;
 #[cfg(test)]
 mod shallow_clone_tests;
 #[cfg(test)]
@@ -33,6 +36,7 @@ pub(crate) use model::{
     ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef, StructField,
     ValueCategory,
 };
+pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
 use crate::sema::types::Ty;
 use std::collections::HashMap;
@@ -94,12 +98,13 @@ pub(super) fn lower(
 }
 
 /// codegen 前唯一 final-HIR gate。value category、initial ownership capability、binding
-/// storage relation、stable BindingId graph、局部 typed-node 方程和其余 resolved
-/// cross-reference 分责验证，但只允许经这一入口共同通过。
+/// storage relation、Place relation、stable BindingId graph、局部 typed-node 方程和其余
+/// resolved cross-reference 分责验证，但只允许经这一入口共同通过。
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasResult<()> {
     value_categories::validate(program)?;
     ownership_capabilities::validate(program)?;
     storage_relations::validate(program)?;
+    place_relation::validate(program)?;
     binding_contract::validate(program)?;
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)
