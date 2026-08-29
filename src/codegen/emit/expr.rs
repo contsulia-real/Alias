@@ -1,5 +1,5 @@
 use super::arrays::{array_element_addr, array_len, array_raw, emit_array_lit};
-use super::calls::{emit_call, emit_method_call, field_offset, field_vty};
+use super::calls::{emit_call, emit_method_call};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
 };
@@ -8,6 +8,7 @@ use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, emit_index_guard, narrow, widen_signed,
     widen_unsigned,
 };
+use super::places::field_storage;
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
@@ -176,9 +177,10 @@ pub(crate) fn emit_expr<M: Module>(
             recv, field_index, ..
         } => {
             let p = emit_expr(c, bcx, frame, recv)?;
-            let fvty = field_vty(c, recv, *field_index)?;
-            let off = field_offset(c, recv, *field_index)?;
-            let raw = bcx.ins().load(cl_type(&fvty), MemFlagsData::new(), p, off);
+            let (fvty, offset) = field_storage(c, recv, *field_index)?;
+            let raw = bcx
+                .ins()
+                .load(cl_type(&fvty), MemFlagsData::new(), p, offset);
             Ok(norm_load(bcx, raw, &fvty))
         }
         Expr::Index {

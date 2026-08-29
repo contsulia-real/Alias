@@ -247,37 +247,6 @@ pub(crate) fn emit_method_call<M: Module>(
     }
 }
 
-pub(crate) fn field_offset<M: Module>(
-    c: &Compiler<M>,
-    recv: &Expr,
-    field_index: usize,
-) -> AliasResult<i32> {
-    Ok(field_entry(c, recv, field_index)?.1)
-}
-
-pub(crate) fn field_vty<M: Module>(
-    c: &Compiler<M>,
-    recv: &Expr,
-    field_index: usize,
-) -> AliasResult<VTy> {
-    Ok(field_entry(c, recv, field_index)?.0)
-}
-
-fn field_entry<M: Module>(
-    c: &Compiler<M>,
-    recv: &Expr,
-    field_index: usize,
-) -> AliasResult<(VTy, i32)> {
-    if let VTy::Struct(s) = c.vty(recv.ty()) {
-        if let Some(layout) = c.struct_layouts.get(&s) {
-            if let Some(entry) = layout.fields.get(field_index) {
-                return Ok((entry.vty.clone(), entry.offset));
-            }
-        }
-    }
-    invariant_violation("字段访问索引必须由 sema/HIR 解析到结构体布局");
-}
-
 fn emit_incdec<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,

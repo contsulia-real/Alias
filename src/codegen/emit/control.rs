@@ -1,11 +1,11 @@
 use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
-use super::calls::{field_offset, field_vty};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, write_cell,
 };
 use super::expr::emit_expr;
+use super::places::field_storage;
 use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
 use crate::codegen::layout::{ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET};
@@ -92,12 +92,11 @@ pub(crate) fn emit_stmt<M: Module>(
             value,
             ..
         } => {
-            let fvty = field_vty(c, recv, *field_index)?;
+            let (fvty, offset) = field_storage(c, recv, *field_index)?;
             let v = emit_expr(c, bcx, frame, value)?;
             let p = emit_expr(c, bcx, frame, recv)?;
-            let off = field_offset(c, recv, *field_index)?;
             let sv = norm_store(bcx, v, &fvty);
-            bcx.ins().store(MemFlagsData::new(), sv, p, off);
+            bcx.ins().store(MemFlagsData::new(), sv, p, offset);
             Ok(())
         }
         Stmt::Assign {
