@@ -21,8 +21,8 @@ pub(super) fn lower(
             .collect::<AliasResult<Vec<_>>>()?,
     };
     ensure_facts_consumed(&facts)?;
-    // capture 向量属于最终 HIR 合同，因此权威 invariant gate 必须在 capture 写回之后。
-    // 若提前验证，后续 mutation 会让 codegen 消费一个从未通过最终门禁的对象。
+    // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 category；capture 仍需在
+    // 整棵 HIR 建成后统一写回。两者都完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked)?;
     super::validate_resolved_hir(&checked)?;
     Ok(checked)
@@ -278,6 +278,11 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
     })
 }
 
+fn finalize_expr(mut expr: Expr) -> AliasResult<Expr> {
+    super::value_categories::finalize(&mut expr)?;
+    Ok(expr)
+}
+
 fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Expr> {
     // 指针 key 只是 phase 内 identity，不是持久 NodeId。check() 针对这份 Program 的
     // 精确 allocation 记录 fact，并立即把同一对象交给 lower()；中间移动、clone 或替换
@@ -302,7 +307,10 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     }
     let mut call_target = lower_info.call_target.take();
     let implicit_zero_callee = lower_info.implicit_zero_callee.take();
-    let info = ExprInfo { ty: lower_info.ty };
+    let info = ExprInfo {
+        ty: lower_info.ty,
+        category: None,
+    };
 
     if let Some(callee_ty) = implicit_zero_callee {
         if !matches!(call_target.take(), Some(LowerCallTarget::FunctionValue)) {
@@ -311,7 +319,10 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 span: expr.span(),
             });
         }
-        let callee_info = ExprInfo { ty: callee_ty };
+        let callee_info = ExprInfo {
+            ty: callee_ty,
+            category: None,
+        };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(
                 name.clone(),
@@ -327,7 +338,8 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 })
             }
         };
-        return Ok(Expr::Call {
+        let callee = finalize_expr(callee)?;
+        return finalize_expr(Expr::Call {
             callee: Box::new(callee),
             args: Vec::new(),
             target: CallTarget::FunctionValue,
@@ -336,7 +348,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         });
     }
 
-    Ok(match expr {
+    finalize_expr(match expr {
         crate::ast::Expr::Int(value, span) => Expr::Int(*value, *span, info),
         crate::ast::Expr::Float(value, span) => Expr::Float(*value, *span, info),
         crate::ast::Expr::Bool(value, span) => Expr::Bool(*value, *span, info),

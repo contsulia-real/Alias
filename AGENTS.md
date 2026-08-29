@@ -66,7 +66,7 @@ src/
 │   ├── places.rs           # 可赋值 Place 解析、目标可写性与赋值目标类型检查
 │   ├── exprs.rs + exprs/   # 表达式静态语义、调用/方法解析、目标类型传播
 │   ├── types.rs            # Ty 与类型槽检查
-│   └── hir.rs + hir/       # typed HIR、lower、capture、validate、visit
+│   └── hir.rs + hir/       # typed HIR、lower、value category、capture、validate、visit
 ├── codegen/
 │   ├── mod.rs              # compile_to_object(CheckedProgram)
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
@@ -101,16 +101,16 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 
 `CheckedProgram` 是后端入口，也是 sema 的完成态：
 
-- 每个可求值 HIR 表达式有最终 `Ty`；
+- 每个可求值 HIR 表达式有最终 `Ty`，并由 `hir/value_categories.rs` 在 resolved HIR 上固化 `ExprCategory::Place | Value`；Identity conversion 必须继承 inner category；
 - Binding/Method/字段/构造器索引均已结构化解析；
 - 当前赋值统一固化为 resolved `Place`；Local/Field target identity、target `Ty`/span 与绑定/字段可写性都必须在 final gate 中闭合验证；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
-- capture 列表在最终 HIR validation 之前完成写回；
+- value category 与 capture 列表都在最终 HIR validation 之前完成写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作在进入 codegen 前必须已固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target、未完成 ownership/effect/loan fact 或其它未解析状态都必须在进入 codegen 前失败。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target、缺失/错误 value category、未完成 ownership/effect/loan fact 或其它未解析状态都必须在进入 codegen 前失败。
 
 ### codegen
 
@@ -198,7 +198,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 实现要求：
 
 - 对用户输入的深度/规模必须有显式上限；
-- HIR capture/validation 等遍历避免对不可信嵌套使用宿主递归；
+- HIR value-category/capture/validation 等遍历避免对不可信嵌套使用宿主递归；
 - 公开 build/run 管线在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖调用者线程栈承载合法输入；
 - 用户输入超限必须产生 `AliasError`，不能 panic；
 - internal invariant panic 只用于 sema 成功后理论上不可达的编译器内部状态。
@@ -211,7 +211,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 - 不因拆文件而把父模块私有状态批量升级成 `pub(crate)`；仅暴露真实跨模块接口；
 - 无消费者字段、缓存、签名表或未来占位状态应删除，而不是为了“可能以后用”保留；
 - 不通过 accidental transitive import、wildcard re-export 或巨型 facade 获得依赖；
-- 相似遍历不等于同一职责。HIR visit/validate/capture，以及后续 ownership/loan/effect 分析若具有不同状态与失败语义，不为机械 DRY 建立万能 Visitor。
+- 相似遍历不等于同一职责。HIR visit/validate/capture/value-category，以及后续 ownership/loan/effect 分析若具有不同状态与失败语义，不为机械 DRY 建立万能 Visitor。
 
 ## 11. 注释标准
 

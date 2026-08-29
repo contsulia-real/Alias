@@ -210,11 +210,22 @@ pub(crate) enum CallTarget {
     Builtin(BuiltinCall),
 }
 
+/// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。
+/// OwnedTemporary/BorrowedValue/Null 属于 Value 的后续细分类，不与这一层 Place/Value 事实竞争。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExprCategory {
+    Place,
+    Value,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ExprInfo {
     /// sema 已完成全部目标类型传播后的最终静态类型。backend 只能消费该结果，
     /// 不得再次根据运算符、上下文或源码名字决定子表达式应采用什么类型。
     pub(crate) ty: Ty,
+    /// 节点构造期间暂为 None；lower_expr 在返回这个 resolved HIR 节点前立即写回 category。
+    /// final-HIR gate 保证进入 codegen 前必为 Some 且与节点语义形状一致。
+    pub(crate) category: Option<ExprCategory>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,8 +363,39 @@ impl Expr {
         }
     }
 
+    pub(super) fn info_mut(&mut self) -> &mut ExprInfo {
+        match self {
+            Self::Int(_, _, info)
+            | Self::Float(_, _, info)
+            | Self::Bool(_, _, info)
+            | Self::Str(_, _, info)
+            | Self::Ident(_, _, _, info)
+            | Self::This(_, info) => info,
+            Self::Cast { info, .. }
+            | Self::Convert { info, .. }
+            | Self::Typeof { info, .. }
+            | Self::Binary { info, .. }
+            | Self::Neg { info, .. }
+            | Self::Not { info, .. }
+            | Self::BitNot { info, .. }
+            | Self::Ternary { info, .. }
+            | Self::Call { info, .. }
+            | Self::MethodCall { info, .. }
+            | Self::Field { info, .. }
+            | Self::Index { info, .. }
+            | Self::ArrayLit { info, .. }
+            | Self::FuncLit { info, .. }
+            | Self::Match { info, .. }
+            | Self::Propagate { info, .. } => info,
+        }
+    }
+
     pub(crate) fn ty(&self) -> &Ty {
         &self.info().ty
+    }
+
+    pub(crate) fn category(&self) -> Option<ExprCategory> {
+        self.info().category
     }
 
     pub(crate) fn span(&self) -> Span {
