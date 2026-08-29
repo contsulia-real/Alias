@@ -72,6 +72,7 @@ src/
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift 发射
+│   │   └── places.rs       # 已解析字段 Place 的物理 storage 查询 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
