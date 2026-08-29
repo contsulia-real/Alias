@@ -1,4 +1,6 @@
-use super::{ArmBody, BindingId, Body, CheckedProgram, Expr, Item, MatchArm, Stmt, StrPart};
+use super::{
+    ArmBody, BindingId, Body, CheckedProgram, Expr, Item, MatchArm, Place, Stmt, StrPart,
+};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashSet;
 
@@ -154,9 +156,13 @@ fn collect_function_captures(
                 }
             }
             Node::Stmt(stmt) => {
-                if let Stmt::Assign { target_id, .. } = stmt {
+                if let Stmt::Assign {
+                    target: Place::Local { binding_id, .. },
+                    ..
+                } = stmt
+                {
                     if let Some(frame) = frames.last_mut() {
-                        record_use(frame, locals, globals, *target_id)?;
+                        record_use(frame, locals, globals, *binding_id)?;
                     }
                 }
                 push_stmt_children(&mut stack, stmt);
@@ -294,10 +300,12 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(Node::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            stack.push(Node::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                // capture 的确定性 preorder 保持 target receiver 先于 RHS；三遍遍历必须一致。
+                stack.push(Node::Expr(recv));
+            }
         }
         Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value, .. } => {
@@ -428,10 +436,11 @@ fn push_body_mut<'a>(stack: &mut Vec<MutNode<'a>>, body: &'a mut Body) {
 fn push_stmt_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
-        Stmt::Assign { value, .. } => stack.push(MutNode::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(MutNode::Expr(value));
-            stack.push(MutNode::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                stack.push(MutNode::Expr(recv));
+            }
         }
         Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value, .. } => {

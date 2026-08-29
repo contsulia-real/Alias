@@ -18,19 +18,18 @@ mod typed_contract_tests;
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
     CallTarget, CheckedProgram, CtorKind, Expr, ExprInfo, Item, MatchArm, MethodId, MethodTarget,
-    Param, Pattern, ResolvedConversion, Stmt, StrPart, StructDef, StructField,
+    Param, Pattern, Place, PlaceInfo, ResolvedConversion, Stmt, StrPart, StructDef, StructField,
 };
 
 use crate::sema::types::Ty;
 use std::collections::HashMap;
 
-/// check 阶段对一个赋值语句解析出的 Place 身份。该类型只跨越 check → lower，
-/// 不进入最终 HIR；把 local/field 拆成两张 fact 表会让“一个赋值只有一个目标”这一
-/// 不变量分散，后续扩展 Index/Deref 时还会继续制造平行状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// check 阶段对一个赋值语句解析出的 Place 身份与最终 target 类型。该类型只跨越
+/// check → lower，不进入最终 HIR；lowering 会把它固化成 model::Place。
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum LowerPlaceInfo {
-    Local { binding_id: BindingId },
-    Field { field_index: usize },
+    Local { binding_id: BindingId, ty: Ty },
+    Field { field_index: usize, ty: Ty },
 }
 
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时

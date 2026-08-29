@@ -1,7 +1,7 @@
 use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, CallArg, CallTarget, CheckedProgram, Expr,
-    ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Stmt, StrPart, StructDef,
-    StructField,
+    ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Place, PlaceInfo, Stmt, StrPart,
+    StructDef, StructField,
 };
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
@@ -56,7 +56,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
     Ok(())
 }
 
-fn take_required<T: Copy>(
+fn take_required<T>(
     facts: &mut HashMap<usize, T>,
     key: usize,
     span: Span,
@@ -166,13 +166,16 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
         crate::ast::Stmt::Assign { value, span, .. } => {
             // check 已把每个赋值解析成唯一 Place；variant 若与 AST 形状不一致，说明
             // check→lower identity/语义合同已破坏，不能把另一种 Place 重新解释成 local。
-            let target_id = match take_required(
+            let target = match take_required(
                 &mut facts.assignment_places,
                 key,
                 *span,
                 "赋值 Place",
             )? {
-                LowerPlaceInfo::Local { binding_id } => binding_id,
+                LowerPlaceInfo::Local { binding_id, ty } => Place::Local {
+                    binding_id,
+                    info: PlaceInfo { ty, span: *span },
+                },
                 LowerPlaceInfo::Field { .. } => {
                     return Err(AliasError {
                         msg: "内部 sema 不变式被破坏: 普通赋值携带字段 Place".into(),
@@ -181,21 +184,21 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 }
             };
             Stmt::Assign {
-                target_id,
+                target,
                 value: lower_expr(value, facts)?,
             }
         }
         crate::ast::Stmt::FieldAssign {
             recv, value, span, ..
         } => {
-            // 与普通赋值同理：lowering 只消费 sema 已解析 Place，不按字段名重新决策。
-            let field_index = match take_required(
+            // 源码级 FieldAssign 只属于 parser AST；final HIR 统一固化为 Assign + Place。
+            let (field_index, ty) = match take_required(
                 &mut facts.assignment_places,
                 key,
                 *span,
                 "赋值 Place",
             )? {
-                LowerPlaceInfo::Field { field_index } => field_index,
+                LowerPlaceInfo::Field { field_index, ty } => (field_index, ty),
                 LowerPlaceInfo::Local { .. } => {
                     return Err(AliasError {
                         msg: "内部 sema 不变式被破坏: 字段赋值携带 local Place".into(),
@@ -203,9 +206,12 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                     })
                 }
             };
-            Stmt::FieldAssign {
-                recv: Box::new(lower_expr(recv, facts)?),
-                field_index,
+            Stmt::Assign {
+                target: Place::Field {
+                    recv: Box::new(lower_expr(recv, facts)?),
+                    field_index,
+                    info: PlaceInfo { ty, span: *span },
+                },
                 value: lower_expr(value, facts)?,
             }
         }

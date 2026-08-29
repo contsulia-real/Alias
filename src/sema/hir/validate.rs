@@ -1,6 +1,6 @@
 use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget,
-    CheckedProgram, CtorKind, Expr, Item, MethodId, MethodTarget, Stmt, StrPart,
+    CheckedProgram, CtorKind, Expr, Item, MethodId, MethodTarget, Place, Stmt, StrPart,
 };
 use crate::builtins::classify_result_constructor;
 use crate::sema::types::{types_match, IntW, Ty};
@@ -142,10 +142,11 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
 fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(HirValidationNode::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(HirValidationNode::Expr(value));
-            stack.push(HirValidationNode::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                stack.push(HirValidationNode::Expr(recv));
+            }
         }
         Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
         Stmt::Return { value } => {
@@ -951,36 +952,43 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     validate_binding_contract(binding)?;
                     stack.push(HirValidationNode::Expr(&binding.value));
                 }
-                Stmt::Assign { target_id, value } => {
-                    if !known_ids.contains(target_id) {
-                        return Err(invariant(
-                            value.span(),
-                            format!("Assign 引用未知 BindingId {target_id:?}"),
-                        ));
+                Stmt::Assign { target, value } => {
+                    match target {
+                        Place::Local { binding_id, .. } => {
+                            if !known_ids.contains(binding_id) {
+                                return Err(invariant(
+                                    target.span(),
+                                    format!("Assign 引用未知 BindingId {binding_id:?}"),
+                                ));
+                            }
+                        }
+                        Place::Field {
+                            recv, field_index, ..
+                        } => {
+                            let field = resolved_field_contract(
+                                recv,
+                                *field_index,
+                                &structs,
+                                target.span(),
+                            )?;
+                            if !field.mutable {
+                                return Err(invariant(
+                                    target.span(),
+                                    "字段赋值目标指向不可写 val 字段",
+                                ));
+                            }
+                            if !types_match(&field.ty, target.ty()) {
+                                return Err(invariant(
+                                    target.span(),
+                                    "字段 Place 类型与已解析字段声明不一致",
+                                ));
+                            }
+                        }
                     }
                     stack.push(HirValidationNode::Expr(value));
-                }
-                Stmt::FieldAssign {
-                    recv,
-                    field_index,
-                    value,
-                } => {
-                    let field =
-                        resolved_field_contract(recv, *field_index, &structs, value.span())?;
-                    if !field.mutable {
-                        return Err(invariant(
-                            value.span(),
-                            "字段赋值目标指向不可写 val 字段",
-                        ));
+                    if let Place::Field { recv, .. } = target {
+                        stack.push(HirValidationNode::Expr(recv));
                     }
-                    if !types_match(&field.ty, value.ty()) {
-                        return Err(invariant(
-                            value.span(),
-                            "字段赋值 RHS 类型与已解析字段声明不一致",
-                        ));
-                    }
-                    stack.push(HirValidationNode::Expr(value));
-                    stack.push(HirValidationNode::Expr(recv));
                 }
                 Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
                 Stmt::Return { value } => {

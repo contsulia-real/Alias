@@ -1,4 +1,6 @@
-use super::{ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Stmt, StrPart};
+use super::{
+    ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Place, Stmt, StrPart,
+};
 use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
@@ -69,6 +71,58 @@ func i32 main = () -> {
     assert!(saw_field);
     assert!(saw_method);
     assert!(saw_capture);
+}
+
+#[test]
+fn assignments_lower_to_resolved_places() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    var i32 n = 0
+    val cell c = cell()
+    n = 1
+    c.value = 2
+    return n + c.value
+}
+"#;
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let checked = crate::sema::check(program).unwrap();
+    let main = checked
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "main" => Some(binding),
+            _ => None,
+        })
+        .expect("main binding");
+    let Expr::FuncLit { body, .. } = &main.value else {
+        panic!("main value must be function literal")
+    };
+    let Body::Block(stmts) = body.as_ref() else {
+        panic!("fixture main must use block body")
+    };
+
+    let mut saw_local = false;
+    let mut saw_field = false;
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign {
+                target: Place::Local { .. },
+                ..
+            } => saw_local = true,
+            Stmt::Assign {
+                target: Place::Field { field_index, .. },
+                ..
+            } => {
+                saw_field = true;
+                assert_eq!(*field_index, 0);
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_local);
+    assert!(saw_field);
 }
 
 #[test]
@@ -311,10 +365,11 @@ fn push_body<'a>(stack: &mut Vec<TestNode<'a>>, body: &'a Body) {
 fn push_stmt<'a>(stack: &mut Vec<TestNode<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(TestNode::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(TestNode::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(TestNode::Expr(value));
-            stack.push(TestNode::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                stack.push(TestNode::Expr(recv));
+            }
         }
         Stmt::Expr { expr, .. } => stack.push(TestNode::Expr(expr)),
         Stmt::Return { value, .. } => {

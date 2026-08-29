@@ -72,7 +72,7 @@ src/
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift 发射
-│   │   └── places.rs       # 已解析字段 Place 的物理 storage 查询 owner
+│   │   └── places.rs       # resolved Place 物理写入与字段 storage 查询 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
@@ -102,7 +102,8 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 `CheckedProgram` 是后端入口，也是 sema 的完成态：
 
 - 每个可求值 HIR 表达式有最终 `Ty`；
-- Binding/Method/字段/构造器索引与绑定/字段可写性均已结构化固化；
+- Binding/Method/字段/构造器索引均已结构化解析；
+- 当前赋值统一固化为 resolved `Place`；Local/Field target identity、target `Ty`/span 与绑定/字段可写性都必须在 final gate 中闭合验证；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；

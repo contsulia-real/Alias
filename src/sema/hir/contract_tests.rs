@@ -1,4 +1,4 @@
-use super::{Body, BuiltinCall, CallTarget, Expr, Item, Stmt};
+use super::{Body, BuiltinCall, CallTarget, Expr, Item, Place, Stmt};
 use crate::sema::types::{IntW, Ty};
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -134,16 +134,51 @@ fn final_hir_gate_rejects_field_assignment_retargeted_to_val_field() {
     let field_index = stmts
         .iter_mut()
         .find_map(|stmt| match stmt {
-            Stmt::FieldAssign { field_index, .. } => Some(field_index),
+            Stmt::Assign {
+                target: Place::Field { field_index, .. },
+                ..
+            } => Some(field_index),
             _ => None,
         })
-        .expect("fixture must contain field assignment");
+        .expect("fixture must contain field Place assignment");
     *field_index = 0;
 
     let error = super::validate_resolved_hir(&program)
         .expect_err("field assignment retargeted to val field must fail the final HIR gate");
     assert!(
         error.msg.contains("字段赋值目标指向不可写 val 字段"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_field_place_type_drift() {
+    let mut program = checked(
+        "struct cell { var i32 open = 0 }\nfunc i32 main = () -> {\n    val cell c = cell()\n    c.open = 1\n    return c.open\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let (place_ty, rhs_ty) = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Assign {
+                target: Place::Field { info, .. },
+                value: Expr::Int(_, _, rhs_info),
+            } => Some((&mut info.ty, &mut rhs_info.ty)),
+            _ => None,
+        })
+        .expect("fixture must contain field Place assignment");
+    *place_ty = Ty::Int(IntW::W64);
+    *rhs_ty = Ty::Int(IntW::W64);
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("field Place type drift must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("字段 Place 类型与已解析字段声明不一致"),
         "实际: {}",
         error.msg
     );
@@ -165,19 +200,51 @@ fn final_hir_gate_rejects_assignment_retargeted_to_val_binding() {
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")
     };
-    let target_id = stmts
+    let binding_id = stmts
         .iter_mut()
         .find_map(|stmt| match stmt {
-            Stmt::Assign { target_id, .. } => Some(target_id),
+            Stmt::Assign {
+                target: Place::Local { binding_id, .. },
+                ..
+            } => Some(binding_id),
             _ => None,
         })
-        .expect("fixture must contain assignment");
-    *target_id = locked_id;
+        .expect("fixture must contain local Place assignment");
+    *binding_id = locked_id;
 
     let error = super::validate_resolved_hir(&program)
         .expect_err("assignment retargeted to val binding must fail the final HIR gate");
     assert!(
         error.msg.contains("Assign 目标不是可写 var 绑定"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_assign_rhs_type_drift_from_place() {
+    let mut program = checked(
+        "func i32 main = () -> {\n    var i32 n = 0\n    n = 1\n    return n\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let rhs_info = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::Assign {
+                target: Place::Local { .. },
+                value: Expr::Int(_, _, info),
+            } => Some(info),
+            _ => None,
+        })
+        .expect("fixture must contain local Place assignment");
+    rhs_info.ty = Ty::Int(IntW::W64);
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("Assign RHS type drift must fail the typed HIR gate");
+    assert!(
+        error.msg.contains("Assign RHS 类型与 Place 类型不一致"),
         "实际: {}",
         error.msg
     );
@@ -331,21 +398,24 @@ fn final_hir_gate_rejects_assign_target_type_drift() {
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")
     };
-    let target_id = stmts
+    let binding_id = stmts
         .iter_mut()
         .find_map(|stmt| match stmt {
-            Stmt::Assign { target_id, .. } => Some(target_id),
+            Stmt::Assign {
+                target: Place::Local { binding_id, .. },
+                ..
+            } => Some(binding_id),
             _ => None,
         })
-        .expect("fixture must contain assignment");
-    *target_id = text_id;
+        .expect("fixture must contain local Place assignment");
+    *binding_id = text_id;
 
     let error = super::validate_resolved_hir(&program)
         .expect_err("Assign target type drift must fail the final HIR gate");
     assert!(
         error
             .msg
-            .contains("Assign RHS 类型与 BindingId 声明类型不一致"),
+            .contains("Assign Place 类型与 BindingId 声明类型不一致"),
         "实际: {}",
         error.msg
     );

@@ -75,16 +75,48 @@ pub(crate) struct Param {
     pub(crate) ty: Ty,
 }
 
+/// sema 已解析的可写 target。这里只表达当前前端真正支持的 local/field 写入；
+/// codegen 不得再从源码形状恢复 target identity 或 target type。
+#[derive(Debug, Clone)]
+pub(crate) struct PlaceInfo {
+    pub(crate) ty: Ty,
+    pub(crate) span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Place {
+    Local {
+        binding_id: BindingId,
+        info: PlaceInfo,
+    },
+    Field {
+        recv: Box<Expr>,
+        field_index: usize,
+        info: PlaceInfo,
+    },
+}
+
+impl Place {
+    pub(crate) fn info(&self) -> &PlaceInfo {
+        match self {
+            Self::Local { info, .. } | Self::Field { info, .. } => info,
+        }
+    }
+
+    pub(crate) fn ty(&self) -> &Ty {
+        &self.info().ty
+    }
+
+    pub(crate) fn span(&self) -> Span {
+        self.info().span
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Stmt {
     Binding(Binding),
     Assign {
-        target_id: BindingId,
-        value: Expr,
-    },
-    FieldAssign {
-        recv: Box<Expr>,
-        field_index: usize,
+        target: Place,
         value: Expr,
     },
     Expr {

@@ -1,6 +1,6 @@
 use super::{
-    ArmBody, BindKind, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Stmt,
-    StrPart,
+    ArmBody, BindKind, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Place,
+    Stmt, StrPart,
 };
 use crate::sema::types::{types_match, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -135,10 +135,11 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(Node::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            stack.push(Node::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                stack.push(Node::Expr(recv));
+            }
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
@@ -376,19 +377,21 @@ fn validate_uses(
             }
             Node::Stmt(stmt) => {
                 match stmt {
-                    Stmt::Assign { target_id, value } => {
-                        if let Some(declared) = contracts.get(target_id) {
-                            if !types_match(declared, value.ty()) {
-                                return Err(invariant(
-                                    value.span(),
-                                    "Assign RHS 类型与 BindingId 声明类型不一致",
-                                ));
-                            }
-                            if !writable.contains(target_id) {
-                                return Err(invariant(
-                                    value.span(),
-                                    "Assign 目标不是可写 var 绑定",
-                                ));
+                    Stmt::Assign { target, .. } => {
+                        if let Place::Local { binding_id, .. } = target {
+                            if let Some(declared) = contracts.get(binding_id) {
+                                if !types_match(declared, target.ty()) {
+                                    return Err(invariant(
+                                        target.span(),
+                                        "Assign Place 类型与 BindingId 声明类型不一致",
+                                    ));
+                                }
+                                if !writable.contains(binding_id) {
+                                    return Err(invariant(
+                                        target.span(),
+                                        "Assign 目标不是可写 var 绑定",
+                                    ));
+                                }
                             }
                         }
                     }
@@ -419,8 +422,8 @@ fn validate_uses(
 }
 
 /// Stable BindingId graph 的 final-HIR contract：每个声明 ID 全局唯一并绑定唯一静态类型；
-/// 已解析引用必须消费该声明类型，所有当前 binding 写入口还必须指向可写 var 绑定。未知
-/// 引用由 resolved cross-reference validator 拒绝。
+/// local Place 必须与 BindingId 声明类型一致且指向可写 var，所有 Ident use 也必须服从
+/// BindingId 类型合同。未知引用由 resolved cross-reference validator 拒绝。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let (contracts, writable) = collect_contracts(program)?;
     validate_uses(program, &contracts, &writable)

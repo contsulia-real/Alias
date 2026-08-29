@@ -37,6 +37,7 @@ impl Checker {
             stmt as *const Stmt as usize,
             LowerPlaceInfo::Local {
                 binding_id: info.id,
+                ty: info.ty.clone(),
             },
         );
         self.expr_expected(value, env, &info.ty).map_err(|error| {
@@ -81,7 +82,10 @@ impl Checker {
         // LowerPlaceInfo，避免 local/field 各自维护平行 fact 表并在后续 Index/Deref 扩散。
         self.assignment_places.insert(
             stmt as *const Stmt as usize,
-            LowerPlaceInfo::Field { field_index },
+            LowerPlaceInfo::Field {
+                field_index,
+                ty: field_info.ty.clone(),
+            },
         );
         self.expr_expected(value, env, &field_info.ty)
             .map_err(|error| {

@@ -1,4 +1,6 @@
-use super::{ArmBody, Body, CheckedProgram, Expr, Item, ResolvedConversion, Stmt, StrPart};
+use super::{
+    ArmBody, Body, CheckedProgram, Expr, Item, Place, ResolvedConversion, Stmt, StrPart,
+};
 use crate::sema::exprs::{binary_result_type, conversion_exists};
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -110,10 +112,11 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { value, .. } => stack.push(Node::Expr(value)),
-        Stmt::FieldAssign { recv, value, .. } => {
+        Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            stack.push(Node::Expr(recv));
+            if let Place::Field { recv, .. } = target {
+                stack.push(Node::Expr(recv));
+            }
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
@@ -312,6 +315,17 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
 
 fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
     match stmt {
+        Stmt::Assign { target, value } => {
+            if target.ty().contains_unknown() {
+                return Err(invariant(target.span(), "Assign Place 类型未确定"));
+            }
+            if !types_match(target.ty(), value.ty()) {
+                return Err(invariant(
+                    value.span(),
+                    "Assign RHS 类型与 Place 类型不一致",
+                ));
+            }
+        }
         Stmt::If { branches, .. } => {
             if let Some((cond, _)) = branches.iter().find(|(cond, _)| cond.ty() != &Ty::Bool) {
                 return Err(invariant(cond.span(), "If HIR 条件不是 bool"));

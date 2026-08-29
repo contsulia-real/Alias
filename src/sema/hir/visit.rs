@@ -1,5 +1,6 @@
 use super::{
-    ArmBody, Binding, BindingOwner, Body, CheckedProgram, Expr, Item, MethodTarget, Stmt, StrPart,
+    ArmBody, Binding, BindingOwner, Body, CheckedProgram, Expr, Item, MethodTarget, Place, Stmt,
+    StrPart,
 };
 use crate::sema::types::Ty;
 
@@ -40,10 +41,12 @@ impl CheckedProgram {
                 }
                 TypeNode::Stmt(stmt) => match stmt {
                     Stmt::Binding(binding) => stack.push(TypeNode::Binding(binding)),
-                    Stmt::Assign { value, .. } => stack.push(TypeNode::Expr(value)),
-                    Stmt::FieldAssign { recv, value, .. } => {
+                    Stmt::Assign { target, value } => {
+                        visit(target.ty());
                         stack.push(TypeNode::Expr(value));
-                        stack.push(TypeNode::Expr(recv));
+                        if let Place::Field { recv, .. } = target {
+                            stack.push(TypeNode::Expr(recv));
+                        }
                     }
                     Stmt::Expr { expr } => stack.push(TypeNode::Expr(expr)),
                     Stmt::Return { value } => {

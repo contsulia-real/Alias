@@ -2,14 +2,14 @@ use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
 use super::cells::{
-    cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, write_cell,
+    coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope,
 };
 use super::expr::emit_expr;
-use super::places::field_storage;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
+use super::places::emit_place_write;
+use crate::codegen::abi::{cl_type, norm_load, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
 use crate::codegen::layout::{ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET};
-use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
+use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -86,34 +86,11 @@ pub(crate) fn emit_stmt<M: Module>(
             }
             Ok(())
         }
-        Stmt::FieldAssign {
-            recv,
-            field_index,
-            value,
-            ..
-        } => {
-            let (fvty, offset) = field_storage(c, recv, *field_index)?;
-            let v = emit_expr(c, bcx, frame, value)?;
-            let p = emit_expr(c, bcx, frame, recv)?;
-            let sv = norm_store(bcx, v, &fvty);
-            bcx.ins().store(MemFlagsData::new(), sv, p, offset);
-            Ok(())
-        }
-        Stmt::Assign {
-            target_id, value, ..
-        } => {
-            let tvty = bound_vty(c, frame, *target_id);
-            let v = emit_expr(c, bcx, frame, value)?;
-            match cell_addr(c, frame, *target_id) {
-                Some(addr) => {
-                    write_cell(bcx, frame, &addr, v, &tvty);
-                    Ok(())
-                }
-                None => Err(native_err(
-                    Span::default(),
-                    "内部: 赋值目标 BindingId 无存储",
-                )),
-            }
+        Stmt::Assign { target, value } => {
+            // Replacement/ownership 语义尚由上游演进；当前运行时顺序必须保持 RHS 先求值，
+            // Field receiver 后求值。Place emitter 只负责已经 resolved 的物理写入。
+            let value = emit_expr(c, bcx, frame, value)?;
+            emit_place_write(c, bcx, frame, target, value)
         }
         Stmt::Expr { expr, .. } => {
             emit_expr(c, bcx, frame, expr)?;
