@@ -49,6 +49,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - `MethodCall` 携带已解析 `MethodTarget`；
 - `CheckedProgram.main_id` 携带 sema 已解析的入口 `BindingId`；
 - 结构体构造实参与字段索引的对应关系已经固化，不把 label/name 带到后端重新查找；
+- 赋值 target 固化为递归 Place projection；当前可表达 `Local`、`Field(base Place)` 与 `Index(base Place, index fact)`，codegen 不从 receiver Expr 形状恢复 storage identity；
 - 函数字面量返回类型在 sema 合并完成；
 - 名字解析、目标类型传播、Pattern 合法性与覆盖、调用目标解析均在进入后端前完成。
 
@@ -255,6 +256,7 @@ struct User {
 - 已登记结构体名可进入类型槽；
 - **普通**赋值、传参、闭包捕获当前仍共享同一实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
+- 字段赋值的 receiver 链必须解析为已有 storage Place；当前允许从 binding root 经 Field/Index 继续投影，因此 `cells[0].value = 3` 合法，但 constructor/call/ternary 等临时 Value 不能作为字段赋值 receiver，例如 `cell().value = 1` 是编译错误；
 - 构造使用命名实参；
 - 未显式提供的字段使用声明默认值；
 - 字段默认值、构造实参和字段赋值均按字段声明类型进行目标检查；

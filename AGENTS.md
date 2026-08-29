@@ -63,7 +63,7 @@ src/
 ├── sema/
 │   ├── mod.rs              # check(Program) -> CheckedProgram
 │   ├── decls.rs / stmts.rs
-│   ├── places.rs           # 可赋值 Place 解析、目标可写性与赋值目标类型检查
+│   ├── places.rs           # 递归 Place(Local/Field/Index) 解析、终端可写性与赋值目标类型检查
 │   ├── exprs.rs + exprs/   # 表达式静态语义；deep_clone.rs / shallow_clone.rs 分别拥有 capability + plan
 │   ├── types.rs            # Ty 与类型槽检查
 │   └── hir.rs + hir/       # typed HIR、lower、value category、initial capability、storage relation、capture、validate、visit
@@ -109,7 +109,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - 显式 `clone` 固化为 `CallTarget::Builtin(BuiltinCall::DeepClone(DeepClonePlan))`；dynamic ownership-bearing clone 是 `OwnedTemporary + Available`，标量 clone 保持 `InlineValue + None`；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
 - Binding/Method/字段/构造器索引均已结构化解析；
-- 当前赋值统一固化为 resolved `Place`；Local/Field target identity、target `Ty`/span 与绑定/字段可写性都必须在 final gate 中闭合验证；
+- 当前赋值统一固化为递归 resolved `Place`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId 与字段索引/可写合同都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
@@ -133,7 +133,7 @@ codegen 只消费已解析 HIR，不得根据：
 
 重新决定静态语义、ownership 或 borrow relation。
 
-`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address；`codegen/emit/places.rs` 再把 resolved Local/Field Place 映射到 canonical storage address。replacement 以及后续 borrow/refer 都必须复用这条地址 owner，禁止重新拼 capture/global/field 地址规则。
+`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement 以及后续 borrow/refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
 
 `codegen/emit/clone.rs` / `shallow.rs` 可以验证 resolved plan 与既有物理布局的内部不变量并执行递归复制，但不能自行判断静态类型是否允许对应操作。尤其 shallow-safe aggregate 当前即使以 heap pointer 表示，也必须建立新的独立 aggregate root；禁止简单 bit-copy pointer 后让两个语义 owner 指向同一 root。
 
