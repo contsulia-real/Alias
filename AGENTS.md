@@ -102,7 +102,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 `CheckedProgram` 是后端入口，也是 sema 的完成态：
 
 - 每个可求值 HIR 表达式有最终 `Ty`；
-- Binding/Method/字段/构造器索引与结构体字段可写性均已结构化固化；
+- Binding/Method/字段/构造器索引与绑定/字段可写性均已结构化固化；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
