@@ -10,6 +10,9 @@ enum TypeNode<'a> {
 }
 
 impl CheckedProgram {
+    /// 枚举 codegen 单次 Ty→VTy 投影所需的全部类型。显式栈避免重新把不可信 HIR
+    /// 嵌套映射到宿主递归；children 逆序入栈以保持确定的源码前序。新增 HIR payload
+    /// 若未在此登记，会让后端投影表缺项并把已验证程序变成内部 panic。
     pub(crate) fn for_each_ty(&self, visit: &mut impl FnMut(&Ty)) {
         let mut stack = Vec::new();
         for item in self.items.iter().rev() {

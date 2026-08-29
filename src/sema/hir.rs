@@ -1,4 +1,4 @@
-//! typed HIR facade: model, lowering, validation, capture analysis and type traversal.
+//! typed HIR facade：model、lowering、validation、capture analysis 与 type traversal。
 
 mod binding_contract;
 mod capture;

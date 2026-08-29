@@ -1,4 +1,5 @@
 use super::{ArmBody, BindingId, Body, CheckedProgram, Expr, Item, MatchArm, Stmt, StrPart};
+use crate::{AliasError, AliasResult, Span};
 use std::collections::HashSet;
 
 enum Node<'a> {
@@ -18,7 +19,7 @@ struct CaptureFrame {
     ordered: Vec<BindingId>,
 }
 
-pub(super) fn populate_captures(program: &mut CheckedProgram) {
+pub(super) fn populate_captures(program: &mut CheckedProgram) -> AliasResult<()> {
     let globals: HashSet<BindingId> = program
         .items
         .iter()
@@ -28,21 +29,27 @@ pub(super) fn populate_captures(program: &mut CheckedProgram) {
         })
         .collect();
 
-    // Pass 1: determine each function's complete local BindingId set.
-    // FuncLit ordinals are traversal-local bookkeeping, not semantic identity.
-    let locals = collect_function_locals(program);
+    // 第 1 遍收集每个函数的完整局部 BindingId。ordinal 只用于三遍遍历之间对齐，
+    // 不是语言 identity；改变任一遍的 preorder 都会把 capture 写入错误 FuncLit。
+    let locals = collect_function_locals(program)?;
 
-    // Pass 2: source-order use scan with explicit enter/exit events. Child captures
-    // are propagated to the suspended parent at child exit, so transitive capture
-    // semantics are preserved without recursive host calls.
-    let mut captures = collect_function_captures(program, &globals, &locals);
+    // 第 2 遍用显式 enter/exit 事件按源码顺序扫描 use。子函数退出时把其 capture
+    // 传播给暂停的父函数，既保留传递捕获，又不把不可信嵌套交给宿主递归。
+    let mut captures = collect_function_captures(program, &globals, &locals)?;
 
-    // Pass 3: deterministic preorder writes each capture vector back to its FuncLit.
-    // The final HIR validator runs after this mutation and certifies these vectors.
-    apply_captures(program, &mut captures);
+    // 第 3 遍以相同 preorder 写回；最终 HIR gate 在 mutation 完成后验证这些向量。
+    apply_captures(program, &mut captures)?;
+    Ok(())
 }
 
-fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> {
+fn capture_invariant(msg: impl Into<String>) -> AliasError {
+    AliasError {
+        msg: format!("内部 sema capture 不变式被破坏: {}", msg.into()),
+        span: Span::default(),
+    }
+}
+
+fn collect_function_locals(program: &CheckedProgram) -> AliasResult<Vec<HashSet<BindingId>>> {
     let mut locals: Vec<HashSet<BindingId>> = Vec::new();
     let mut function_stack: Vec<usize> = Vec::new();
     let mut stack = root_nodes(program);
@@ -52,20 +59,25 @@ fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> 
             Node::ExitFunc(ordinal) => {
                 let actual = function_stack
                     .pop()
-                    .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: FuncLit locals 栈为空"));
-                assert_eq!(
-                    actual, ordinal,
-                    "内部 sema 不变式被破坏: FuncLit locals 栈错位"
-                );
+                    .ok_or_else(|| capture_invariant("FuncLit locals 栈为空"))?;
+                if actual != ordinal {
+                    return Err(capture_invariant("FuncLit locals 栈错位"));
+                }
             }
             Node::Stmt(stmt) => {
                 if let Some(&ordinal) = function_stack.last() {
                     match stmt {
                         Stmt::Binding(binding) => {
-                            locals[ordinal].insert(binding.binding_id);
+                            locals
+                                .get_mut(ordinal)
+                                .ok_or_else(|| capture_invariant("局部函数 ordinal 越界"))?
+                                .insert(binding.binding_id);
                         }
                         Stmt::For { binding_id, .. } => {
-                            locals[ordinal].insert(*binding_id);
+                            locals
+                                .get_mut(ordinal)
+                                .ok_or_else(|| capture_invariant("for 函数 ordinal 越界"))?
+                                .insert(*binding_id);
                         }
                         _ => {}
                     }
@@ -90,9 +102,12 @@ fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> 
                 }
                 Expr::Match { subject, arms, .. } => {
                     if let Some(&ordinal) = function_stack.last() {
+                        let local = locals
+                            .get_mut(ordinal)
+                            .ok_or_else(|| capture_invariant("match 函数 ordinal 越界"))?;
                         for arm in arms {
                             if let Some(id) = arm.binding_id {
-                                locals[ordinal].insert(id);
+                                local.insert(id);
                             }
                         }
                     }
@@ -103,18 +118,17 @@ fn collect_function_locals(program: &CheckedProgram) -> Vec<HashSet<BindingId>> 
         }
     }
 
-    assert!(
-        function_stack.is_empty(),
-        "内部 sema 不变式被破坏: FuncLit locals 栈未清空"
-    );
-    locals
+    if !function_stack.is_empty() {
+        return Err(capture_invariant("FuncLit locals 栈未清空"));
+    }
+    Ok(locals)
 }
 
 fn collect_function_captures(
     program: &CheckedProgram,
     globals: &HashSet<BindingId>,
     locals: &[HashSet<BindingId>],
-) -> Vec<Vec<BindingId>> {
+) -> AliasResult<Vec<Vec<BindingId>>> {
     let mut captures = vec![Vec::new(); locals.len()];
     let mut frames: Vec<CaptureFrame> = Vec::new();
     let mut next_ordinal = 0usize;
@@ -125,22 +139,24 @@ fn collect_function_captures(
             Node::ExitFunc(ordinal) => {
                 let frame = frames
                     .pop()
-                    .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: FuncLit capture 栈为空"));
-                assert_eq!(
-                    frame.ordinal, ordinal,
-                    "内部 sema 不变式被破坏: FuncLit capture 栈错位"
-                );
-                captures[ordinal] = frame.ordered;
+                    .ok_or_else(|| capture_invariant("FuncLit capture 栈为空"))?;
+                if frame.ordinal != ordinal {
+                    return Err(capture_invariant("FuncLit capture 栈错位"));
+                }
+                let slot = captures
+                    .get_mut(ordinal)
+                    .ok_or_else(|| capture_invariant("FuncLit capture ordinal 越界"))?;
+                *slot = frame.ordered;
                 if let Some(parent) = frames.last_mut() {
-                    for id in captures[ordinal].iter().copied() {
-                        record_use(parent, locals, globals, id);
+                    for id in slot.iter().copied() {
+                        record_use(parent, locals, globals, id)?;
                     }
                 }
             }
             Node::Stmt(stmt) => {
                 if let Stmt::Assign { target_id, .. } = stmt {
                     if let Some(frame) = frames.last_mut() {
-                        record_use(frame, locals, globals, *target_id);
+                        record_use(frame, locals, globals, *target_id)?;
                     }
                 }
                 push_stmt_children(&mut stack, stmt);
@@ -159,7 +175,7 @@ fn collect_function_captures(
                 }
                 Expr::Ident(_, Some(id), ..) => {
                     if let Some(frame) = frames.last_mut() {
-                        record_use(frame, locals, globals, *id);
+                        record_use(frame, locals, globals, *id)?;
                     }
                 }
                 Expr::Match { subject, arms, .. } => {
@@ -170,16 +186,13 @@ fn collect_function_captures(
         }
     }
 
-    assert_eq!(
-        next_ordinal,
-        locals.len(),
-        "内部 sema 不变式被破坏: FuncLit 遍历数量变化"
-    );
-    assert!(
-        frames.is_empty(),
-        "内部 sema 不变式被破坏: FuncLit capture 栈未清空"
-    );
-    captures
+    if next_ordinal != locals.len() {
+        return Err(capture_invariant("FuncLit 遍历数量变化"));
+    }
+    if !frames.is_empty() {
+        return Err(capture_invariant("FuncLit capture 栈未清空"));
+    }
+    Ok(captures)
 }
 
 fn record_use(
@@ -187,13 +200,20 @@ fn record_use(
     locals: &[HashSet<BindingId>],
     globals: &HashSet<BindingId>,
     id: BindingId,
-) {
-    if !locals[frame.ordinal].contains(&id) && !globals.contains(&id) && frame.seen.insert(id) {
+) -> AliasResult<()> {
+    let local = locals
+        .get(frame.ordinal)
+        .ok_or_else(|| capture_invariant("capture use 的函数 ordinal 越界"))?;
+    if !local.contains(&id) && !globals.contains(&id) && frame.seen.insert(id) {
         frame.ordered.push(id);
     }
+    Ok(())
 }
 
-fn apply_captures(program: &mut CheckedProgram, captures: &mut [Vec<BindingId>]) {
+fn apply_captures(
+    program: &mut CheckedProgram,
+    captures: &mut [Vec<BindingId>],
+) -> AliasResult<()> {
     let mut next_ordinal = 0usize;
     let mut stack = root_nodes_mut(program);
     while let Some(node) = stack.pop() {
@@ -207,7 +227,10 @@ fn apply_captures(program: &mut CheckedProgram, captures: &mut [Vec<BindingId>])
                 } => {
                     let ordinal = next_ordinal;
                     next_ordinal += 1;
-                    *target = std::mem::take(&mut captures[ordinal]);
+                    let source = captures
+                        .get_mut(ordinal)
+                        .ok_or_else(|| capture_invariant("FuncLit capture 写回 ordinal 越界"))?;
+                    *target = std::mem::take(source);
                     push_body_mut(&mut stack, body);
                 }
                 Expr::Match { subject, arms, .. } => {
@@ -217,11 +240,10 @@ fn apply_captures(program: &mut CheckedProgram, captures: &mut [Vec<BindingId>])
             },
         }
     }
-    assert_eq!(
-        next_ordinal,
-        captures.len(),
-        "内部 sema 不变式被破坏: FuncLit 写回数量变化"
-    );
+    if next_ordinal != captures.len() {
+        return Err(capture_invariant("FuncLit 写回数量变化"));
+    }
+    Ok(())
 }
 
 fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {

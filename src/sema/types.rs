@@ -224,7 +224,10 @@ pub(crate) fn check_type_slot(
                 "result" => Ok(Ty::Result(Box::new(ts.remove(0)), Box::new(ts.remove(0)))),
                 "array" => Ok(Ty::Array(Box::new(ts.remove(0)))),
                 "iterator" => Ok(Ty::Iterator(Box::new(ts.remove(0)))),
-                _ => unreachable!(),
+                _ => Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: 泛型类型分类漂移".into(),
+                    span,
+                }),
             }
         }
         TypeExpr::Named(n) => match n.as_str() {

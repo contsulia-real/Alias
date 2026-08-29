@@ -5,6 +5,7 @@
 //! array/iterator/closure/result/string 的语言语义。
 
 use super::abi::{value_word_offset, VALUE_WORD_BYTES};
+use crate::sema::hir::CtorKind;
 
 pub(crate) const ARRAY_RAW_WORDS: i64 = 3;
 pub(crate) const ARRAY_RAW_BYTES: i64 = ARRAY_RAW_WORDS * VALUE_WORD_BYTES;
@@ -29,6 +30,17 @@ pub(crate) const CLOSURE_ENV_OFFSET: i32 = value_word_offset(1);
 pub(crate) const RESULT_WORDS: i64 = 2;
 pub(crate) const RESULT_TAG_OFFSET: i32 = value_word_offset(0);
 pub(crate) const RESULT_PAYLOAD_OFFSET: i32 = value_word_offset(1);
+pub(crate) const RESULT_OK_TAG: i64 = 0;
+pub(crate) const RESULT_ERR_TAG: i64 = 1;
+
+/// Result discriminant 是对象物理编码的一部分；构造、Pattern 和 `?` 必须经同一映射。
+/// 若各 emitter 独立约定 0/1，合法对象会被其它路径反向解释为另一 variant。
+pub(crate) const fn result_tag(kind: CtorKind) -> i64 {
+    match kind {
+        CtorKind::Ok => RESULT_OK_TAG,
+        CtorKind::Err => RESULT_ERR_TAG,
+    }
+}
 
 pub(crate) const STRING_WORDS: i64 = 2;
 pub(crate) const STRING_BYTES: i64 = STRING_WORDS * VALUE_WORD_BYTES;

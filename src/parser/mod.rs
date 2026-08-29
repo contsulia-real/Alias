@@ -76,15 +76,19 @@ impl Parser {
             .unwrap_or(self.eof_span)
     }
 
-    fn bump(&mut self) -> Token {
-        let t = self.toks[self.pos].clone();
+    fn bump(&mut self) -> AliasResult<Token> {
+        let Some(token) = self.toks.get(self.pos).cloned() else {
+            return Err(self.err_here("意外的文件结尾"));
+        };
         self.pos += 1;
-        t
+        Ok(token)
     }
 
     fn eat(&mut self, tok: &Tok) -> bool {
         if self.peek() == Some(tok) {
-            self.bump();
+            // 已通过 get-backed peek 证明当前位置存在；直接推进可保持 eat 的 bool API，
+            // 同时避免让不可信 EOF 通过下标或 unwrap 变成 parser panic。
+            self.pos += 1;
             true
         } else {
             false
@@ -93,7 +97,7 @@ impl Parser {
 
     fn expect(&mut self, tok: &Tok) -> AliasResult<Token> {
         if self.peek() == Some(tok) {
-            Ok(self.bump())
+            self.bump()
         } else {
             Err(self.err_here(format!("期望 {:?}, 实际 {:?}", tok, self.peek().cloned())))
         }
@@ -129,7 +133,7 @@ impl Parser {
     fn expect_ident(&mut self) -> AliasResult<String> {
         match self.peek().cloned() {
             Some(Tok::Ident(n)) => {
-                self.bump();
+                self.bump()?;
                 Ok(n)
             }
             other => Err(self.err_here(format!("期望标识符, 实际 {:?}", other))),
@@ -142,16 +146,18 @@ impl Parser {
     }
 
     fn parse_type_at_depth(&mut self, depth: usize) -> AliasResult<TypeExpr> {
+        // 泛型尖括号不计入 delimiter validate_nesting，但本函数会为每层参数递归；这里
+        // 必须独立限深，否则 `array<array<...>>` 可在 token 预算内耗尽宿主栈。
         if depth >= MAX_NESTING {
             return Err(self.err_here(format!("类型嵌套超过 {MAX_NESTING} 层上限")));
         }
         let name = match self.peek().cloned() {
             Some(Tok::Ident(n)) => {
-                self.bump();
+                self.bump()?;
                 n
             }
             Some(Tok::Func) => {
-                self.bump();
+                self.bump()?;
                 "func".to_string()
             }
             Some(Tok::Bool(_)) => return Err(self.err_here("bool 才是布尔类型名")),
@@ -179,7 +185,7 @@ impl Parser {
     fn expect_type_gt(&mut self) -> AliasResult<()> {
         match self.peek() {
             Some(Tok::Gt) => {
-                self.bump();
+                self.bump()?;
                 Ok(())
             }
             Some(Tok::Shr) => {

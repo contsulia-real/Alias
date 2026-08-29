@@ -548,7 +548,12 @@ fn validate_call_target(
                 ));
             }
             if matches!(builtin, BuiltinCall::Increase | BuiltinCall::Decrease) {
-                let [arg] = args else { unreachable!() };
+                let [arg] = args else {
+                    return Err(invariant(
+                        expr.span(),
+                        "increase/decrease target 元数不是 1",
+                    ));
+                };
                 if !matches!(&arg.value, Expr::Ident(_, Some(_), ..))
                     || !arg.value.ty().is_numeric()
                 {
@@ -690,11 +695,9 @@ fn resolved_field_ty(
 }
 
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
-    // The source is untrusted and nesting is bounded but nontrivial; validation uses explicit
-    // stacks so the final authority gate itself does not reintroduce host-recursion risk.
-    // This pass is also the last cross-reference gate before codegen: resolved IDs, call/method
-    // targets and struct field contracts are checked against declarations here so the backend
-    // never has to rediscover or repair them.
+    // 源码不可信，且合法嵌套虽有上限仍不可忽略；最终 authority gate 使用显式栈，
+    // 不能由验证器自己重新引入宿主递归风险。这里也是 codegen 前最后一个 cross-reference
+    // 门：resolved ID、call/method target 与字段合同均对声明核验，后端不得重新发现或修补。
     let known_ids = collect_declared_ids(program);
     let structs = collect_struct_contracts(program)?;
     let user_methods = collect_user_methods(program)?;

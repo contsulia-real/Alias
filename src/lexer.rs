@@ -234,7 +234,9 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let c = self.peek().expect("上方已排除 EOF");
+        let Some(c) = self.peek() else {
+            return Ok(None);
+        };
         let start_span = self.span_here(1);
         let tok = match c {
             b'0'..=b'9' => self.lex_int()?,
@@ -338,7 +340,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_symbol(&mut self) -> AliasResult<Tok> {
-        let c = self.bump().unwrap();
+        let Some(c) = self.bump() else {
+            return self.err("符号起始处意外到达文件结尾");
+        };
         let tok = match c {
             b'=' => {
                 if self.peek() == Some(b'=') {

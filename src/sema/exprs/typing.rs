@@ -144,15 +144,21 @@ impl Checker {
         params: &[crate::ast::Param],
         types: &[Ty],
         ids: &[BindingId],
-    ) {
-        assert_eq!(params.len(), types.len());
-        assert_eq!(params.len(), ids.len());
+    ) -> AliasResult<()> {
+        if params.len() != types.len() || params.len() != ids.len() {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 参数、类型与 BindingId 数量不一致".into(),
+                span: params.first().map_or(Span::default(), |param| param.span),
+            });
+        }
         for ((param, ty), id) in params.iter().zip(types).zip(ids) {
-            // Param facts use the same transient AST-address identity as expression facts.
+            // 参数 fact 与表达式 fact 共用短生命周期 AST 地址 identity；check 与 lower
+            // 之间替换 Param 会让类型或 BindingId 关联到过期节点。
             let key = param as *const crate::ast::Param as usize;
             self.param_types.insert(key, ty.clone());
             self.param_ids.insert(key, *id);
         }
+        Ok(())
     }
 
     /// 取得一个直接函数值引用的原始类型，不触发“零参裸名调用”。

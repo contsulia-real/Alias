@@ -14,7 +14,8 @@ use crate::codegen::abi::{
 };
 use crate::codegen::funcgen::emit_funclit_value;
 use crate::codegen::layout::{
-    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
+    result_tag, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET,
+    RESULT_TAG_OFFSET,
 };
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
@@ -74,7 +75,7 @@ pub(crate) fn emit_expr<M: Module>(
             let dst = c.vty(e.ty());
             let src = c.vty(expr.ty());
             let value = emit_expr(c, bcx, frame, expr)?;
-            emit_convert(c, bcx, frame, *span, value, &src, &dst)
+            emit_convert(c, bcx, *span, value, &src, &dst)
         }
         Expr::Convert {
             expr, mode, span, ..
@@ -84,14 +85,14 @@ pub(crate) fn emit_expr<M: Module>(
                 let src = c.vty(expr.ty());
                 let dst = c.vty(e.ty());
                 let value = emit_expr(c, bcx, frame, expr)?;
-                emit_convert(c, bcx, frame, *span, value, &src, &dst)
+                emit_convert(c, bcx, *span, value, &src, &dst)
             }
         },
         Expr::Typeof { type_name, .. } => str_literal_handle(c, bcx, type_name),
         Expr::Neg { expr, span, .. } => {
-            // Negative integer literals have already been range-checked against the final HIR
-            // type. Emitting the signed bit pattern directly is required for each INT_MIN;
-            // applying runtime unary-neg overflow checks would incorrectly reject the literal.
+            // 负整数字面量已按最终 HIR 类型完成范围检查；必须直接发射其有符号位模式。
+            // 若复用运行期 unary-neg overflow 检查，每种整数宽度的 INT_MIN 字面量都会
+            // 因“对正 magnitude 取负”而被错误拒绝。
             if let Expr::Int(magnitude, ..) = expr.as_ref() {
                 if matches!(c.vty(e.ty()), VTy::I(_)) {
                     return Ok(bcx
@@ -115,7 +116,7 @@ pub(crate) fn emit_expr<M: Module>(
                         },
                     );
                     let overflow = bcx.ins().icmp(IntCC::Equal, red, min);
-                    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", *span)?;
+                    emit_abort_branch(c, bcx, overflow, "alias.abort_overflow", *span)?;
                     let n = bcx.ins().ineg(red);
                     Ok(widen_signed(bcx, n, wt))
                 }
@@ -149,7 +150,7 @@ pub(crate) fn emit_expr<M: Module>(
         } => {
             let l = emit_expr(c, bcx, frame, lhs)?;
             let r = emit_expr(c, bcx, frame, rhs)?;
-            emit_binary(c, bcx, frame, (*op, lhs, l, r, *span))
+            emit_binary(c, bcx, (*op, lhs, l, r, *span))
         }
         Expr::Ternary {
             cond,
@@ -198,7 +199,7 @@ pub(crate) fn emit_expr<M: Module>(
                 bcx.ins()
                     .load(types::I64, MemFlagsData::new(), raw_array, ARRAY_LEN_OFFSET);
             let len32 = bcx.ins().ireduce(types::I32, len64);
-            emit_index_guard(c, bcx, frame, idx32, len32, *span)?;
+            emit_index_guard(c, bcx, idx32, len32, *span)?;
             let dp = bcx.ins().load(
                 types::I64,
                 MemFlagsData::new(),
@@ -234,7 +235,7 @@ pub(crate) fn emit_expr<M: Module>(
             let tag = bcx
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_TAG_OFFSET);
-            let is_err = bcx.ins().icmp_imm_s(IntCC::Equal, tag, 1);
+            let is_err = bcx.ins().icmp_imm_s(IntCC::Equal, tag, RESULT_ERR_TAG);
             let err_b = bcx.create_block();
             let ok_b = bcx.create_block();
             bcx.ins().brif(is_err, err_b, &[], ok_b, &[]);
@@ -435,11 +436,7 @@ fn emit_pattern_test<M: Module>(
             let tag = bcx
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_TAG_OFFSET);
-            let want = match ctor {
-                CtorKind::Ok => 0,
-                CtorKind::Err => 1,
-            };
-            bcx.ins().icmp_imm_s(IntCC::Equal, tag, want)
+            bcx.ins().icmp_imm_s(IntCC::Equal, tag, result_tag(*ctor))
         }
     })
 }

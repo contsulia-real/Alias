@@ -28,7 +28,7 @@ impl Parser {
         let span = self.span();
         match self.peek() {
             Some(Tok::Return) => {
-                self.bump();
+                self.bump()?;
                 let value = match self.peek() {
                     None | Some(Tok::Newline) | Some(Tok::Semi) | Some(Tok::RBrace) => None,
                     Some(_) => Some(self.parse_expr()?),
@@ -37,7 +37,7 @@ impl Parser {
             }
             Some(Tok::If) => self.parse_if_stmt(),
             Some(Tok::For) => {
-                self.bump();
+                self.bump()?;
                 let ty = self.parse_type()?;
                 let name = self.expect_ident()?;
                 self.expect(&Tok::In)?;
@@ -52,18 +52,18 @@ impl Parser {
                 })
             }
             Some(Tok::While) => {
-                self.bump();
+                self.bump()?;
                 let cond = self.parse_expr()?;
                 let body = self.parse_block()?;
                 Ok(Stmt::While { cond, body, span })
             }
             Some(Tok::Break) => {
-                self.bump();
+                self.bump()?;
                 self.require_boundary("break")?;
                 Ok(Stmt::Break { span })
             }
             Some(Tok::Continue) => {
-                self.bump();
+                self.bump()?;
                 self.require_boundary("continue")?;
                 Ok(Stmt::Continue { span })
             }
@@ -76,7 +76,7 @@ impl Parser {
             }
             Some(Tok::Ident(_)) if self.peek_at(1) == Some(&Tok::Assign) => {
                 let target = self.expect_ident()?;
-                self.bump();
+                self.bump()?;
                 let value = self.parse_expr()?;
                 Ok(Stmt::Assign {
                     target,
@@ -85,8 +85,8 @@ impl Parser {
                 })
             }
             Some(Tok::SelfKw) if self.peek_at(1) == Some(&Tok::Assign) => {
-                self.bump();
-                self.bump();
+                self.bump()?;
+                self.bump()?;
                 let value = self.parse_expr()?;
                 Ok(Stmt::Assign {
                     target: "self".into(),
@@ -202,7 +202,7 @@ impl Parser {
     fn assign_from_lvalue(&mut self, expr: Expr, span: Span) -> AliasResult<Stmt> {
         match expr {
             Expr::Field { recv, name, .. } => {
-                self.bump();
+                self.bump()?;
                 let value = self.parse_expr()?;
                 Ok(Stmt::FieldAssign {
                     recv,
@@ -223,15 +223,15 @@ impl Parser {
         self.eat(&Tok::Pub);
         let kind = match self.peek() {
             Some(Tok::Val) => {
-                self.bump();
+                self.bump()?;
                 BindKind::Val
             }
             Some(Tok::Var) => {
-                self.bump();
+                self.bump()?;
                 BindKind::Var
             }
             Some(Tok::Func) => {
-                self.bump();
+                self.bump()?;
                 BindKind::Func
             }
             _ => return Err(self.err_here("绑定声明必须以 val/var/func 开头")),
@@ -257,7 +257,7 @@ impl Parser {
             let save = self.pos;
             match self.parse_type() {
                 Ok(recv_ty) if self.peek() == Some(&Tok::Dot) => {
-                    self.bump();
+                    self.bump()?;
                     let method = self.expect_ident()?;
                     (method, Some(recv_ty))
                 }

@@ -68,7 +68,7 @@ src/
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift 发射
 │   ├── funcgen.rs          # 用户函数/闭包生成
-│   ├── runtime.rs          # RUNTIME_CONTRACTS 机器契约 owner
+│   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
 └── linker.rs               # COFF → exe 与 Windows SDK/rust-lld 定位 owner
 ```

@@ -1,6 +1,6 @@
 use super::strings::{call_str_cmp, display_typed};
 use crate::codegen::abi::{cl_type, ir_type_bits, VTy};
-use crate::codegen::{invariant_violation, Compiler, Frame};
+use crate::codegen::{invariant_violation, Compiler};
 use crate::sema::hir::{BinOp, Expr};
 use crate::sema::types::FloatW;
 use crate::{AliasResult, Span};
@@ -12,18 +12,16 @@ use cranelift_module::Module;
 pub(crate) fn emit_binary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (BinOp, &Expr, Value, Value, Span),
 ) -> AliasResult<Value> {
     let (op, lhs, l, r, span) = input;
     let lt = c.vty(lhs.ty());
-    emit_binary_values(c, bcx, frame, (op, &lt, l, r, span))
+    emit_binary_values(c, bcx, (op, &lt, l, r, span))
 }
 
 pub(crate) fn emit_binary_values<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (BinOp, &VTy, Value, Value, Span),
 ) -> AliasResult<Value> {
     let (op, lt, l, r, span) = input;
@@ -39,15 +37,15 @@ pub(crate) fn emit_binary_values<M: Module>(
                 _ => unreachable!(),
             },
             VTy::I(w) => {
+                // 表达式寄存器中的窄整数已规范化为 I64，但 overflow 指令必须在源码
+                // 声明宽度运行；若直接对 I64 检查，i8/i16/i32 溢出会被错误放行。
                 let wt = cl_type(&VTy::I(*w));
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Add | Sub | Mul => {
-                        emit_checked_int_binary(c, bcx, frame, (op, li, ri, true, span))?
-                    }
-                    Div => emit_divrem_guard(c, bcx, frame, (li, ri, true, w.bits(), span, false))?,
-                    Rem => emit_divrem_guard(c, bcx, frame, (li, ri, true, w.bits(), span, true))?,
+                    Add | Sub | Mul => emit_checked_int_binary(c, bcx, (op, li, ri, true, span))?,
+                    Div => emit_divrem_guard(c, bcx, (li, ri, true, w.bits(), span, false))?,
+                    Rem => emit_divrem_guard(c, bcx, (li, ri, true, w.bits(), span, true))?,
                     _ => unreachable!(),
                 };
                 Ok(widen_signed(bcx, v, wt))
@@ -57,13 +55,9 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Add | Sub | Mul => {
-                        emit_checked_int_binary(c, bcx, frame, (op, li, ri, false, span))?
-                    }
-                    Div => {
-                        emit_divrem_guard(c, bcx, frame, (li, ri, false, w.bits(), span, false))?
-                    }
-                    Rem => emit_divrem_guard(c, bcx, frame, (li, ri, false, w.bits(), span, true))?,
+                    Add | Sub | Mul => emit_checked_int_binary(c, bcx, (op, li, ri, false, span))?,
+                    Div => emit_divrem_guard(c, bcx, (li, ri, false, w.bits(), span, false))?,
+                    Rem => emit_divrem_guard(c, bcx, (li, ri, false, w.bits(), span, true))?,
                     _ => unreachable!(),
                 };
                 Ok(widen_unsigned(bcx, v, wt))
@@ -103,7 +97,7 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => emit_checked_shl(c, bcx, frame, (li, ri, true, w.bits(), span))?,
+                    Shl => emit_checked_shl(c, bcx, (li, ri, true, w.bits(), span))?,
                     Shr => bcx.ins().sshr(li, ri),
                     _ => unreachable!(),
                 };
@@ -114,7 +108,7 @@ pub(crate) fn emit_binary_values<M: Module>(
                 let li = narrow(bcx, l, w.bits());
                 let ri = narrow(bcx, r, w.bits());
                 let v = match op {
-                    Shl => emit_checked_shl(c, bcx, frame, (li, ri, false, w.bits(), span))?,
+                    Shl => emit_checked_shl(c, bcx, (li, ri, false, w.bits(), span))?,
                     Shr => bcx.ins().ushr(li, ri),
                     _ => unreachable!(),
                 };
@@ -161,7 +155,6 @@ pub(crate) fn emit_binary_values<M: Module>(
 fn emit_checked_int_binary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (BinOp, Value, Value, bool, Span),
 ) -> AliasResult<Value> {
     let (op, l, r, signed, span) = input;
@@ -174,17 +167,18 @@ fn emit_checked_int_binary<M: Module>(
         (false, BinOp::Mul) => bcx.ins().umul_overflow(l, r),
         _ => invariant_violation("checked 整数算术仅用于加减乘"),
     };
-    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+    emit_abort_branch(c, bcx, overflow, "alias.abort_overflow", span)?;
     Ok(result)
 }
 
 fn emit_checked_shl<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (Value, Value, bool, u32, Span),
 ) -> AliasResult<Value> {
     let (value, shift, signed, bits, span) = input;
+    // ISA 会掩码过大的 shift count，不能依赖实际 ishl 结果识别 count >= bits；先单独
+    // 标记 count_bad，再通过反向 shift 检查合法 count 是否丢失高位。
     let count_bad = bcx
         .ins()
         .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, shift, bits as i64);
@@ -196,7 +190,7 @@ fn emit_checked_shl<M: Module>(
     };
     let lost = bcx.ins().icmp(IntCC::NotEqual, restored, value);
     let overflow = bcx.ins().bor(count_bad, lost);
-    emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+    emit_abort_branch(c, bcx, overflow, "alias.abort_overflow", span)?;
     Ok(result)
 }
 
@@ -252,7 +246,6 @@ pub(crate) fn widen_unsigned(
 pub(crate) fn emit_convert<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     span: Span,
     v: Value,
     src: &VTy,
@@ -282,12 +275,12 @@ pub(crate) fn emit_convert<M: Module>(
         VTy::I(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, frame, (span, v, src, true, bits, wt))
+            emit_convert_to_int(c, bcx, (span, v, src, true, bits, wt))
         }
         VTy::U(w) => {
             let bits = w.bits();
             let wt = ir_type_bits(bits);
-            emit_convert_to_int(c, bcx, frame, (span, v, src, false, bits, wt))
+            emit_convert_to_int(c, bcx, (span, v, src, false, bits, wt))
         }
         _ => invariant_violation("转换目标为数值族或 string"),
     }
@@ -296,7 +289,6 @@ pub(crate) fn emit_convert<M: Module>(
 fn emit_convert_to_int<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (Span, Value, &VTy, bool, u32, cranelift_codegen::ir::Type),
 ) -> AliasResult<Value> {
     let (span, v, src, signed, bits, wt) = input;
@@ -306,6 +298,8 @@ fn emit_convert_to_int<M: Module>(
             types::F32 => bcx.ins().fpromote(types::F64, v),
             _ => v,
         };
+        // 整数可表示域用 [lo, hi) 检查；hi 取 2^n 而非最大整数，避免最大整数在 f64
+        // 中不可精确表示时把已越界值舍入成同一比较常量。NaN 必须另行拒绝。
         let (lo, hi) = if signed {
             (-(2f64).powi(bits as i32 - 1), (2f64).powi(bits as i32 - 1))
         } else {
@@ -318,7 +312,7 @@ fn emit_convert_to_int<M: Module>(
         let above = bcx.ins().fcmp(FloatCC::GreaterThanOrEqual, f64v, hi_c);
         let bad_lo = bcx.ins().bor(nan, below);
         let bad = bcx.ins().bor(bad_lo, above);
-        emit_abort_branch(c, bcx, frame, bad, "alias.abort_conv", span)?;
+        emit_abort_branch(c, bcx, bad, "alias.abort_conv", span)?;
         let sat = if signed {
             bcx.ins().fcvt_to_sint(types::I64, f64v)
         } else {
@@ -368,7 +362,7 @@ fn emit_convert_to_int<M: Module>(
             }
             _ => invariant_violation("整数转换源为整数 (sema 已校验)"),
         };
-        emit_abort_branch(c, bcx, frame, bad, "alias.abort_conv", span)?;
+        emit_abort_branch(c, bcx, bad, "alias.abort_conv", span)?;
         let red = narrow(bcx, v, bits);
         Ok(if signed {
             widen_signed(bcx, red, wt)
@@ -378,15 +372,28 @@ fn emit_convert_to_int<M: Module>(
     }
 }
 
-pub(crate) fn emit_abort_branch<M: Module>(
+pub(crate) fn emit_runtime_abort<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    _frame: &Frame,
-    trap: Value,
     sym: &str,
     span: Span,
 ) -> AliasResult<()> {
     let span_id = new_span_id(c, span);
+    let aid = bcx.ins().iconst(types::I32, span_id as i64);
+    c.call_rt_void(bcx, sym, &[aid])?;
+    // abort runtime 最终调用 ExitProcess，但 Cranelift 不知道外部函数不返回；保留 trap
+    // 才能从 IR 层终止错误 block，防止其意外返回后落入正常路径。
+    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+    Ok(())
+}
+
+pub(crate) fn emit_abort_branch<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    trap: Value,
+    sym: &str,
+    span: Span,
+) -> AliasResult<()> {
     let abort_b = bcx.create_block();
     let ok_b = bcx.create_block();
     bcx.ins().brif(trap, abort_b, &[], ok_b, &[]);
@@ -394,9 +401,7 @@ pub(crate) fn emit_abort_branch<M: Module>(
     bcx.seal_block(ok_b);
 
     bcx.switch_to_block(abort_b);
-    let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt_void(bcx, sym, &[aid])?;
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+    emit_runtime_abort(c, bcx, sym, span)?;
 
     bcx.switch_to_block(ok_b);
     Ok(())
@@ -410,15 +415,16 @@ pub(crate) fn new_span_id<M: Module>(c: &mut Compiler<M>, span: Span) -> i32 {
 pub(crate) fn emit_divrem_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    frame: &Frame,
     input: (Value, Value, bool, u32, Span, bool),
 ) -> AliasResult<Value> {
     let (l, r, signed, bits, span, remainder) = input;
     let wt = ir_type_bits(bits);
     let zero = bcx.ins().iconst(wt, 0);
     let by_zero = bcx.ins().icmp(IntCC::Equal, r, zero);
-    emit_abort_branch(c, bcx, frame, by_zero, "alias.abort_div", span)?;
+    emit_abort_branch(c, bcx, by_zero, "alias.abort_div", span)?;
     if signed {
+        // signed MIN / -1 是唯一非零除数仍会机器溢出的组合，必须在发出 sdiv/srem 前
+        // 截获；只检查除零会把该输入交给目标 ISA 的异常行为。
         let m1 = bcx.ins().iconst(wt, -1);
         let mini = bcx.ins().iconst(
             wt,
@@ -432,7 +438,7 @@ pub(crate) fn emit_divrem_guard<M: Module>(
         let by_m1 = bcx.ins().icmp(IntCC::Equal, r, m1);
         let is_min = bcx.ins().icmp(IntCC::Equal, l, mini);
         let overflow = bcx.ins().band(by_m1, is_min);
-        emit_abort_branch(c, bcx, frame, overflow, "alias.abort_overflow", span)?;
+        emit_abort_branch(c, bcx, overflow, "alias.abort_overflow", span)?;
     }
     Ok(match (signed, remainder) {
         (true, false) => bcx.ins().sdiv(l, r),
@@ -445,12 +451,10 @@ pub(crate) fn emit_divrem_guard<M: Module>(
 pub(crate) fn emit_index_guard<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    _frame: &Frame,
     idx32: Value,
     len32: Value,
     span: Span,
 ) -> AliasResult<()> {
-    let span_id = new_span_id(c, span);
     let zero = bcx.ins().iconst(types::I32, 0);
     let neg = bcx.ins().icmp(IntCC::SignedLessThan, idx32, zero);
     let oob_hi = bcx
@@ -458,17 +462,5 @@ pub(crate) fn emit_index_guard<M: Module>(
         .icmp(IntCC::SignedGreaterThanOrEqual, idx32, len32);
     let trap = bcx.ins().bor(neg, oob_hi);
 
-    let abort_b = bcx.create_block();
-    let ok_b = bcx.create_block();
-    bcx.ins().brif(trap, abort_b, &[], ok_b, &[]);
-    bcx.seal_block(abort_b);
-    bcx.seal_block(ok_b);
-
-    bcx.switch_to_block(abort_b);
-    let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt_void(bcx, "alias.abort_oob", &[aid])?;
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
-
-    bcx.switch_to_block(ok_b);
-    Ok(())
+    emit_abort_branch(c, bcx, trap, "alias.abort_oob", span)
 }

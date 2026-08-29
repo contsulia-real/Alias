@@ -9,19 +9,19 @@ impl Parser {
         let span = self.span();
         match self.peek().cloned() {
             Some(Tok::Int(v)) => {
-                self.bump();
+                self.bump()?;
                 Ok(Expr::Int(v, span))
             }
             Some(Tok::Float(v)) => {
-                self.bump();
+                self.bump()?;
                 Ok(Expr::Float(v, span))
             }
             Some(Tok::Bool(b)) => {
-                self.bump();
+                self.bump()?;
                 Ok(Expr::Bool(b, span))
             }
             Some(Tok::Str(parts)) => {
-                self.bump();
+                self.bump()?;
                 let mut ast_parts = Vec::new();
                 for p in parts {
                     match p {
@@ -53,7 +53,7 @@ impl Parser {
                 if self.looks_like_func_lit() {
                     self.parse_func_lit()
                 } else if self.looks_like_cast() {
-                    self.bump();
+                    self.bump()?;
                     let target = self.parse_type()?;
                     self.expect(&Tok::RParen)?;
                     let expr = self.parse_unary()?;
@@ -63,9 +63,9 @@ impl Parser {
                         span,
                     })
                 } else {
-                    self.bump();
+                    self.bump()?;
                     if self.peek() == Some(&Tok::RParen) {
-                        self.bump();
+                        self.bump()?;
                         return Err(AliasError {
                             msg: "() 不是值；unit 只表示函数不返回值".into(),
                             span,
@@ -81,11 +81,11 @@ impl Parser {
                 Ok(Expr::Ident(name, span))
             }
             Some(Tok::SelfKw) => {
-                self.bump();
+                self.bump()?;
                 Ok(Expr::Ident("self".into(), span))
             }
             Some(Tok::ThisKw) => {
-                self.bump();
+                self.bump()?;
                 Ok(Expr::This(span))
             }
             Some(Tok::Match) => self.parse_match_expr(),
@@ -97,7 +97,7 @@ impl Parser {
 
     fn parse_array_lit(&mut self) -> AliasResult<Expr> {
         let span = self.span();
-        self.bump();
+        self.bump()?;
         let mut elems = Vec::new();
         loop {
             self.skip_newlines();
@@ -118,7 +118,7 @@ impl Parser {
 
     fn parse_match_expr(&mut self) -> AliasResult<Expr> {
         let span = self.span();
-        self.bump();
+        self.bump()?;
         let subject = self.parse_expr()?;
         self.expect(&Tok::LBrace)?;
         let mut arms = Vec::new();
@@ -167,13 +167,14 @@ impl Parser {
                 if classify_result_constructor(&name).is_some()
                     && self.peek_at(1) == Some(&Tok::LParen) =>
             {
-                self.bump();
-                let ctor = classify_result_constructor(&name)
-                    .expect("pattern guard 已确认 result 构造器名字");
+                self.bump()?;
+                let ctor = classify_result_constructor(&name).ok_or_else(|| {
+                    self.err_here("内部 parser 不变式被破坏: result Pattern 分类漂移")
+                })?;
                 self.expect(&Tok::LParen)?;
                 let binding = match self.peek().cloned() {
                     Some(Tok::Ident(n)) => {
-                        self.bump();
+                        self.bump()?;
                         if n == "_" {
                             None
                         } else {
@@ -195,7 +196,7 @@ impl Parser {
                 })
             }
             Some(Tok::Ident(name)) => {
-                self.bump();
+                self.bump()?;
                 if name == "_" {
                     Ok(Pattern::Wildcard { span })
                 } else {
@@ -203,27 +204,27 @@ impl Parser {
                 }
             }
             Some(Tok::Minus) if matches!(self.peek_at(1), Some(Tok::Int(_))) => {
-                self.bump();
+                self.bump()?;
                 let Some(Tok::Int(v)) = self.peek().cloned() else {
-                    unreachable!()
+                    return Err(self.err_here("负整数 Pattern 缺少整数字面量"));
                 };
-                self.bump();
+                self.bump()?;
                 let value = -(v as i128);
                 Ok(Pattern::Int { value, span })
             }
             Some(Tok::Int(value)) => {
-                self.bump();
+                self.bump()?;
                 Ok(Pattern::Int {
                     value: value as i128,
                     span,
                 })
             }
             Some(Tok::Bool(value)) => {
-                self.bump();
+                self.bump()?;
                 Ok(Pattern::Bool { value, span })
             }
             Some(Tok::Str(parts)) => {
-                self.bump();
+                self.bump()?;
                 let mut value = String::new();
                 for part in parts {
                     match part {

@@ -9,6 +9,9 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
 
+// 反向写入需要容纳 u64 的 20 位十进制数字和可选负号；额外余量让 cursor 始终从
+// 缓冲区末端开始。分配、初始 cursor 与最终长度必须共同引用此值，否则会产生越界写
+// 或把未初始化前缀纳入 string。
 const INTEGER_BUFFER_BYTES: i64 = 32;
 
 pub(super) fn emit_integer_display_shim<M: Module>(
@@ -38,6 +41,8 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     } else {
         bcx.ins().iconst(types::I8, 0)
     };
+    // `0 - i64::MIN` 的位模式仍是 2^63；后续必须按无符号 magnitude 做除余，才能
+    // 正确显示最小有符号整数。改成 sdiv/srem 会让该边界溢出或生成错误数字。
     let neg_mag = bcx.ins().isub(zero, value);
     let mag = bcx.ins().select(neg, neg_mag, value);
     let pos = bcx.declare_var(types::I64);

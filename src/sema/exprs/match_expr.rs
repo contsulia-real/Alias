@@ -203,8 +203,9 @@ impl Checker {
         let local = Scope::child(env);
         if let Some((name, bind_ty)) = binding {
             ensure_user_lexical_name(name, arm.pattern.span())?;
-            let id = self.fresh_binding_id();
-            // MatchArm facts use the same transient check→lower AST-address identity.
+            let id = self.fresh_binding_id()?;
+            // MatchArm fact 与其它 check→lower fact 共用短生命周期 AST 地址 identity；
+            // lowering 前移动 arm 会让 BindingId 写到错误 Pattern。
             self.match_binding_ids
                 .insert(arm as *const MatchArm as usize, id);
             Scope::insert(

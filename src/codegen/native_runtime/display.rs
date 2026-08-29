@@ -9,6 +9,9 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, Sta
 use cranelift_module::Module;
 use std::collections::HashMap;
 
+// 两个反向十进制 writer 都先递减 cursor 再写字节，并以最后一个字节作为不写入的
+// 尾哨兵；长度也必须从同一哨兵计算。分配大小、初始 cursor 和长度基准若各自写裸值，
+// 任一处单独修改都会造成少算字符或向缓冲区起点之前写入。
 const DECIMAL_BUFFER_BYTES: i64 = 24;
 const DECIMAL_LAST_INDEX: i64 = DECIMAL_BUFFER_BYTES - 1;
 
@@ -33,6 +36,8 @@ pub(super) fn emit_display_runtime<M: Module>(
     }
 
     shim!(c, "rt.write.dec", |bcx, a| {
+        // 该 shim 只编码 abort span 表中 u32 扩展得到的非负行列号；它故意不处理负号。
+        // 若增加其它调用方，必须先扩大这里的输入合同，而不能让负余数变成非数字字节。
         let buf = call_rt_m!(
             bcx,
             "rt.heap.alloc",
@@ -95,6 +100,8 @@ pub(super) fn emit_display_runtime<M: Module>(
     });
 
     shim!(c, "alias.display.int", |bcx, a| {
+        // i32 先提升到 i64 再取绝对值，避免最小 i32 在原宽度取负时溢出；反向写入
+        // 与上方诊断数字 writer 共享同一尾哨兵不变量，但产物最终封装为 Alias string。
         let buf = call_rt_m!(
             bcx,
             "rt.heap.alloc",

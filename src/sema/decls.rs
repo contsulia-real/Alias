@@ -38,7 +38,8 @@ impl Checker {
                 });
             }
             let ty = check_value_type_slot(&f.ty, f.span, &self.structs)?;
-            // StructField facts share the transient check→lower AST-address identity.
+            // StructField fact 与其它 check→lower fact 共用短生命周期 AST 地址 identity；
+            // lowering 前替换字段节点会让默认值类型关联到过期地址。
             self.field_types
                 .insert(f as *const crate::ast::StructField as usize, ty.clone());
             if let Some(d) = &f.default {
@@ -70,7 +71,7 @@ impl Checker {
     /// 扩展函数定义: pub? func <Ret> <ReceiverType>.<name> = (params) -> 体。
     /// 签名第一次登记即固化 MethodId；self 第一次进入函数作用域即固化 BindingId。
     pub(super) fn method_def(&mut self, b: &Binding, env: &Env) -> AliasResult<()> {
-        let _binding_id = self.binding_id_for(b);
+        let _binding_id = self.binding_id_for(b)?;
         let Some(recv_expr) = b.receiver.clone() else {
             return Err(AliasError {
                 msg: "内部: 无接收者的方法定义".into(),
@@ -117,7 +118,7 @@ impl Checker {
                 span: b.span,
             });
         }
-        let method_id = self.fresh_method_id();
+        let method_id = self.fresh_method_id()?;
         self.methods.entry(recv.clone()).or_default().insert(
             mname.clone(),
             MethodInfo::User {
@@ -144,14 +145,20 @@ impl Checker {
             ..
         } = &method_ty
         else {
-            unreachable!("funclit 必须产生函数类型")
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: funclit 未产生函数类型".into(),
+                span: *fspan,
+            });
         };
         let Some(self_id) = all_param_ids.first().copied() else {
-            unreachable!("方法至少包含隐式 self 参数")
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 方法缺少隐式 self 参数".into(),
+                span: *fspan,
+            });
         };
         self.method_self_ids
             .insert(b as *const Binding as usize, self_id);
-        self.record_params(params, &all_param_types[1..], &all_param_ids[1..]);
+        self.record_params(params, &all_param_types[1..], &all_param_ids[1..])?;
         self.record_expr_type(&b.value, method_ty.clone());
         self.binding_types
             .insert(b as *const Binding as usize, method_ty);

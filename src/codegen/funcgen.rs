@@ -3,7 +3,6 @@ use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
 use crate::codegen::emit::expr::emit_expr;
 use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
-use crate::codegen::runtime::runtime_contract;
 use crate::codegen::{
     bound_vty, invariant_violation, native_err, Compiler, Frame, PendingFn, Slot,
 };
@@ -11,7 +10,7 @@ use crate::sema::hir::{BindKind, BindingId, Body, Expr, Item, Param};
 use crate::sema::types::{IntW, Ty};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::{
-    types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, TrapCode, UserFuncName, Value,
+    types, Function, InstBuilder, MemFlagsData, Signature, TrapCode, UserFuncName, Value,
 };
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -21,21 +20,6 @@ use std::collections::HashMap;
 impl<'m, M: Module> Compiler<'m, M> {
     pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
         user_signature(self.cc, params, ret)
-    }
-
-    pub(crate) fn external_signature(
-        &self,
-        params: &[cranelift_codegen::ir::Type],
-        ret: Option<cranelift_codegen::ir::Type>,
-    ) -> Signature {
-        let mut s = Signature::new(self.cc);
-        for p in params {
-            s.params.push(AbiParam::new(*p));
-        }
-        if let Some(r) = ret {
-            s.returns.push(AbiParam::new(r));
-        }
-        s
     }
 
     pub(crate) fn declare_user_func_typed(
@@ -48,114 +32,6 @@ impl<'m, M: Module> Compiler<'m, M> {
         self.module
             .declare_function(&name, Linkage::Local, &sig)
             .map_err(|e| native_err(Span::default(), format!("内部: 函数声明失败 {e}")))
-    }
-
-    pub(crate) fn import_external(
-        &mut self,
-        name: &str,
-        params: &[cranelift_codegen::ir::Type],
-        ret: Option<cranelift_codegen::ir::Type>,
-    ) -> AliasResult<FuncId> {
-        if name.starts_with("alias.") || name.starts_with("rt.") {
-            return Err(native_err(
-                Span::default(),
-                format!("内部: runtime 符号 '{name}' 必须经契约表声明"),
-            ));
-        }
-        self.module
-            .declare_function(name, Linkage::Import, &self.external_signature(params, ret))
-            .map_err(|e| native_err(Span::default(), format!("内部: 符号声明失败 {e}")))
-    }
-
-    pub(crate) fn import_runtime(&mut self, name: &str) -> AliasResult<FuncId> {
-        let contract = runtime_contract(name)?;
-        let sig = contract.signature(self.cc, self.ptr_ty);
-        self.module
-            .declare_function(contract.symbol, Linkage::Import, &sig)
-            .map_err(|e| native_err(Span::default(), format!("内部: runtime 声明失败 {e}")))
-    }
-
-    pub(crate) fn call_rt(
-        &mut self,
-        bcx: &mut FunctionBuilder,
-        name: &str,
-        args: &[Value],
-    ) -> AliasResult<Value> {
-        if runtime_contract(name)?.ret.is_none() {
-            return Err(native_err(
-                Span::default(),
-                format!("内部: 无返回值 runtime '{name}' 被当作值调用"),
-            ));
-        }
-        let inst = self.call_rt_inst(bcx, name, args)?;
-        match bcx.inst_results(inst) {
-            [value] => Ok(*value),
-            _ => Err(native_err(
-                Span::default(),
-                format!("内部: 有返回值 runtime '{name}' 未产生唯一结果"),
-            )),
-        }
-    }
-
-    pub(crate) fn call_rt_void(
-        &mut self,
-        bcx: &mut FunctionBuilder,
-        name: &str,
-        args: &[Value],
-    ) -> AliasResult<()> {
-        if runtime_contract(name)?.ret.is_some() {
-            return Err(native_err(
-                Span::default(),
-                format!("内部: 有返回值 runtime '{name}' 被当作 unit 调用"),
-            ));
-        }
-        let inst = self.call_rt_inst(bcx, name, args)?;
-        if !bcx.inst_results(inst).is_empty() {
-            return Err(native_err(
-                Span::default(),
-                format!("内部: 无返回值 runtime '{name}' 意外产生结果"),
-            ));
-        }
-        Ok(())
-    }
-
-    fn call_rt_inst(
-        &mut self,
-        bcx: &mut FunctionBuilder,
-        name: &str,
-        args: &[Value],
-    ) -> AliasResult<cranelift_codegen::ir::Inst> {
-        let contract = runtime_contract(name)?;
-        if args.len() != contract.params.len() {
-            return Err(native_err(
-                Span::default(),
-                format!(
-                    "内部: runtime '{}' 参数数量不匹配，契约 {}，调用点 {}",
-                    name,
-                    contract.params.len(),
-                    args.len()
-                ),
-            ));
-        }
-        for (index, (arg, expected)) in args.iter().zip(contract.params).enumerate() {
-            let actual = bcx.func.dfg.value_type(*arg);
-            let expected = expected.ty.resolve(self.ptr_ty);
-            if actual != expected {
-                return Err(native_err(
-                    Span::default(),
-                    format!(
-                        "内部: runtime '{}' 第 {} 个参数类型不匹配，契约 {}，调用点 {}",
-                        name,
-                        index + 1,
-                        expected,
-                        actual
-                    ),
-                ));
-            }
-        }
-        let fid = self.import_runtime(name)?;
-        let fref = self.module.declare_func_in_func(fid, bcx.func);
-        Ok(bcx.ins().call(fref, args))
     }
 
     pub(crate) fn define_user_func(
@@ -178,6 +54,8 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.switch_to_block(entry);
         bcx.seal_block(entry);
 
+        // user_signature 的前两个参数固定为 globals 与 closure env。显式参数从索引 2
+        // 开始；这里若与 call_closure 的前缀顺序漂移，函数体会把环境指针当成全局区。
         let globals_v = bcx.declare_var(types::I64);
         bcx.def_var(globals_v, bcx.block_params(entry)[0]);
         let env_v = bcx.declare_var(types::I64);
@@ -287,6 +165,8 @@ impl<'m, M: Module> Compiler<'m, M> {
         };
         frame.init_ctx = true;
 
+        // 顶层初始化必须保持源码顺序：sema 的可见性不允许前向引用，globals slot 表也
+        // 以同一过滤顺序建立。改变排序会让 BindingId 与物理 slot 对应关系错位。
         for (binding_index, b) in items
             .iter()
             .filter_map(|i| match i {
@@ -352,6 +232,8 @@ impl<'m, M: Module> Compiler<'m, M> {
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
         let epr = self.module.declare_func_in_func(ep, bcx.func);
         bcx.ins().call(epr, &[exit_code]);
+        // ExitProcess 的不返回语义不在 Cranelift 外部签名中；trap 防止入口在异常返回时
+        // 穿透到后续 block。下方编译期 abort return 汇合路径同样必须显式终止。
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
         bcx.switch_to_block(abort_ret);
@@ -400,6 +282,8 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         .iter()
         .map(|id| (*id, bound_vty(c, frame, *id)))
         .collect();
+    // 先声明并排队，当前函数继续只发射 closure 对象；nested body 在外层 builder
+    // 完成后定义，避免同时持有两个 FunctionBuilder。FuncId 已足以安全写入 code pointer。
     c.pending.push_back(PendingFn {
         fid,
         params: params.to_vec(),
@@ -408,6 +292,8 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         ret_vty,
     });
 
+    // capture env 保存 cell 指针而不是当前值，闭包才能观察后续赋值。无捕获时使用
+    // runtime contract 明确允许的 null env，且下方循环为空，绝不能解引用该 null。
     let env_word = if captures.is_empty() {
         bcx.ins().iconst(types::I64, 0)
     } else {

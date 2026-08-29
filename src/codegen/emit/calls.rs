@@ -1,11 +1,11 @@
 use super::arrays::{array_raw, bump_array_version, make_iterator};
 use super::cells::{cell_addr, first_result, read_cell, write_cell};
 use super::expr::emit_expr;
-use super::ops::{emit_binary_values, new_span_id};
+use super::ops::{emit_abort_branch, emit_binary_values};
 use super::strings::display_word;
 use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, user_signature, VTy};
 use crate::codegen::layout::{
-    ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET,
+    result_tag, ARRAY_LEN_OFFSET, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET,
     RESULT_TAG_OFFSET, RESULT_WORDS,
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
@@ -13,7 +13,7 @@ use crate::sema::hir::{BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, 
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, TrapCode, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -71,6 +71,8 @@ fn call_closure<M: Module>(
     let env = bcx
         .ins()
         .load(types::I64, MemFlagsData::new(), clo, CLOSURE_ENV_OFFSET);
+    // user_signature 固定要求 [globals, closure env, 显式参数...]。这里逆序插入两个
+    // 隐藏值以保持该前缀；若与被调方各自维护顺序，所有显式参数都会整体错位。
     words.insert(0, env);
     words.insert(0, bcx.use_var(frame.globals));
     let sig = user_signature(c.cc, param_vtys, ret_vty);
@@ -127,11 +129,7 @@ pub(crate) fn emit_result_ctor<M: Module>(
     let pw = storage_word(bcx, payload, &pvty);
     let words = bcx.ins().iconst(types::I32, RESULT_WORDS);
     let blk = c.call_rt(bcx, "alias.env.new", &[words])?;
-    let tag = match kind {
-        CtorKind::Ok => 0i64,
-        CtorKind::Err => 1i64,
-    };
-    let tagw = bcx.ins().iconst(types::I64, tag);
+    let tagw = bcx.ins().iconst(types::I64, result_tag(kind));
     bcx.ins()
         .store(MemFlagsData::new(), tagw, blk, RESULT_TAG_OFFSET);
     bcx.ins()
@@ -157,7 +155,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
             };
             let r = emit_expr(c, bcx, frame, &arg.value)?;
-            emit_binary_values(c, bcx, frame, (*op, &svt, rv, r, span))
+            emit_binary_values(c, bcx, (*op, &svt, rv, r, span))
         }
         MethodTarget::BoolNot => {
             if !args.is_empty() {
@@ -204,17 +202,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 .ins()
                 .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET);
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
-            let span_id = new_span_id(c, span);
-            let abort_b = bcx.create_block();
-            let ok_b = bcx.create_block();
-            bcx.ins().brif(empty, abort_b, &[], ok_b, &[]);
-            bcx.seal_block(abort_b);
-            bcx.seal_block(ok_b);
-            bcx.switch_to_block(abort_b);
-            let aid = bcx.ins().iconst(types::I32, span_id as i64);
-            c.call_rt_void(bcx, "alias.abort_pop", &[aid])?;
-            bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
-            bcx.switch_to_block(ok_b);
+            emit_abort_branch(c, bcx, empty, "alias.abort_pop", span)?;
             let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
             bump_array_version(bcx, rv);
             Ok(restore_word(bcx, raw_value, elem))
@@ -318,7 +306,7 @@ fn emit_incdec<M: Module>(
         VTy::F(FloatW::F64) => bcx.ins().f64const(1.0),
         _ => bcx.ins().iconst(types::I64, 1),
     };
-    let next = emit_binary_values(c, bcx, frame, (op, &vty, cur, one, span))?;
+    let next = emit_binary_values(c, bcx, (op, &vty, cur, one, span))?;
     write_cell(bcx, frame, &addr, next, &vty);
     Ok(bcx.ins().iconst(types::I64, 0))
 }

@@ -7,21 +7,27 @@ use crate::{AliasError, AliasResult};
 
 impl Parser {
     pub(in crate::parser) fn parse_expr(&mut self) -> AliasResult<Expr> {
-        self.parse_ternary()
+        self.parse_ternary_at_depth(0)
     }
 
     /// ?: 最低优先级、右结合。后缀 result `?` 在 parse_postfix_on 中只在
     /// `?` 后不能开始表达式时消费；若后面能开始表达式，则留给本层并要求 `:`。
-    fn parse_ternary(&mut self) -> AliasResult<Expr> {
+    fn parse_ternary_at_depth(&mut self, depth: usize) -> AliasResult<Expr> {
         let cond = self.parse_or()?;
         if self.peek() != Some(&Tok::Question) {
             return Ok(cond);
         }
+        // 三元表达式的右结合递归不增加任何括号/方括号/花括号深度，因此通用
+        // validate_nesting 无法约束它。这里必须独立应用表达式链预算，否则纯 token
+        // 链可以在到达 token 上限前耗尽编译器工作线程栈。
+        if depth >= MAX_EXPR_CHAIN {
+            return Err(self.err_here(format!("三元表达式超过 {MAX_EXPR_CHAIN} 层上限")));
+        }
         let span = cond.span();
-        self.bump();
-        let then_expr = self.parse_ternary()?;
+        self.bump()?;
+        let then_expr = self.parse_ternary_at_depth(depth + 1)?;
         self.expect(&Tok::Colon)?;
-        let else_expr = self.parse_ternary()?;
+        let else_expr = self.parse_ternary_at_depth(depth + 1)?;
         Ok(Expr::Ternary {
             cond: Box::new(cond),
             then_expr: Box::new(then_expr),
@@ -34,7 +40,7 @@ impl Parser {
         let mut lhs = self.parse_and()?;
         let mut chain = 0usize;
         while self.peek() == Some(&Tok::OrOr) {
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("逻辑或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -55,7 +61,7 @@ impl Parser {
         let mut lhs = self.parse_no_paren()?;
         let mut chain = 0usize;
         while self.peek() == Some(&Tok::AndAnd) {
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("逻辑与表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -113,7 +119,7 @@ impl Parser {
                         continue;
                     }
                     if self.starts_unary_at(1) {
-                        self.bump();
+                        self.bump()?;
                         let a = self.parse_unary()?;
                         let a_span = a.span();
                         let span = lhs.span();
@@ -181,7 +187,7 @@ impl Parser {
         let mut lhs = self.parse_bit_xor()?;
         let mut chain = 0usize;
         while self.peek() == Some(&Tok::Pipe) {
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("位或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -202,7 +208,7 @@ impl Parser {
         let mut lhs = self.parse_bit_and()?;
         let mut chain = 0usize;
         while self.peek() == Some(&Tok::Caret) {
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("位异或表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -223,7 +229,7 @@ impl Parser {
         let mut lhs = self.parse_equality()?;
         let mut chain = 0usize;
         while self.peek() == Some(&Tok::Amp) {
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("位与表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -249,7 +255,7 @@ impl Parser {
                 Some(Tok::NotEq) => BinOp::NotEq,
                 _ => break,
             };
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("相等比较表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -275,7 +281,7 @@ impl Parser {
             Some(Tok::Ge) => BinOp::Ge,
             _ => return Ok(lhs),
         };
-        self.bump();
+        self.bump()?;
         let rhs = self.parse_shift()?;
         let span = lhs.span();
         Ok(Expr::Binary {
@@ -295,7 +301,7 @@ impl Parser {
                 Some(Tok::Shr) => BinOp::Shr,
                 _ => break,
             };
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("移位表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -321,7 +327,7 @@ impl Parser {
                 Some(Tok::Minus) => BinOp::Sub,
                 _ => break,
             };
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("加减表达式超过 {MAX_EXPR_CHAIN} 项上限")));
@@ -348,7 +354,7 @@ impl Parser {
                 Some(Tok::Percent) => BinOp::Rem,
                 _ => break,
             };
-            self.bump();
+            self.bump()?;
             chain += 1;
             if chain > MAX_EXPR_CHAIN {
                 return Err(self.err_here(format!("乘除余表达式超过 {MAX_EXPR_CHAIN} 项上限")));

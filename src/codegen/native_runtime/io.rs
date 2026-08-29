@@ -42,6 +42,8 @@ pub(super) fn emit_io_runtime<M: Module>(
     }
 
     shim!(c, "rt.write.stdout", |bcx, a| {
+        // 空 string 以 null data + 0 length 表示，runtime contract 因而只在此参数上允许
+        // nullable。该指针仅透传给零长度 WriteFile，不能在 shim 内预读或做地址运算。
         let h = call_ext_m!(
             bcx,
             ext.get_std_handle,

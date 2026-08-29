@@ -65,7 +65,10 @@ pub(in crate::sema) fn binary_result_type(
             (Ty::Bool, Ty::Bool) if matches!(op, EqEq | NotEq) => Ok(Ty::Bool),
             _ => Err(mixed(span)),
         },
-        And | Or => unreachable!(),
+        And | Or => Err(AliasError {
+            msg: "内部 sema 不变式被破坏: 短路逻辑运算绕过前置分支".into(),
+            span,
+        }),
     }
 }
 

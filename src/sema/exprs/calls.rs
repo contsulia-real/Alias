@@ -16,9 +16,8 @@ impl Checker {
         env: &Env,
     ) -> AliasResult<Ty> {
         if let Expr::Ident(name, _) = callee {
-            // User-defined struct constructors live in the top-level namespace, but current
-            // language semantics allow a lexical binding to shadow that constructor name.
-            // Scope lookup must therefore win before constructor classification.
+            // 用户 struct 构造器位于顶层命名空间，但当前语义允许词法绑定 shadow 同名
+            // 构造器。因此必须先查 Scope，再做构造器分类；顺序反转会绕过局部绑定。
             if Scope::get(env, name).is_none() && self.structs.contains_key(name) {
                 return self.construct(name, args, span, env);
             }
@@ -151,8 +150,8 @@ impl Checker {
         if classify_call_builtin(name) == Some(CallBuiltinName::Typeof) {
             return LowerCallTarget::Typeof;
         }
-        // Successful contextual conversion checks record their resolved target before ordinary
-        // call-target resolution. Without an expected type these calls fail.
+        // contextual conversion 成功时已在普通 call-target resolution 前记录 target；
+        // 没有 expected type 的 from/try_from 会失败，不能在这里补 fallback target。
         LowerCallTarget::FunctionValue
     }
 
@@ -185,8 +184,8 @@ impl Checker {
                 });
             }
             covered[idx] = true;
-            // CallArg facts share the check→lower AST-address lifetime invariant documented
-            // in Checker::expr_key/binding_id_for; no AST rewrite may occur between phases.
+            // CallArg fact 遵守 Checker::expr_key/binding_id_for 的 check→lower 地址
+            // identity；两个 phase 之间不得 rewrite AST，否则字段索引会关联到旧实参。
             self.ctor_arg_indices
                 .insert(a as *const CallArg as usize, idx);
             let want = &info.fields[idx].ty;
@@ -296,12 +295,11 @@ impl Checker {
         env: &Env,
     ) -> AliasResult<Ty> {
         let rt = self.expr(recv, env)?;
-        self.method_call_with_receiver_ty(recv, rt, name, args, span, env)
+        self.method_call_with_receiver_ty(rt, name, args, span, env)
     }
 
     pub(super) fn method_call_with_receiver_ty(
         &mut self,
-        _recv: &Expr,
         rt: Ty,
         name: &str,
         args: &[CallArg],

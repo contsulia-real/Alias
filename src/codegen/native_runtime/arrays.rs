@@ -8,6 +8,9 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData};
 use cranelift_module::{FuncId, Module};
 
+// raw array 始终保持 0 <= len <= cap；cap = 0 时 data 才允许为 null。push 必须先
+// 扩容再按 len 写槽，pop 则只接受 emitter 已证明非空的输入。破坏该顺序或前置条件会
+// 把 null/越界地址交给生成代码中的裸 load/store。
 pub(super) fn emit_array_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
     rtl_move_memory: FuncId,
@@ -79,6 +82,8 @@ pub(super) fn emit_array_runtime<M: Module>(
         let cap = bcx
             .ins()
             .load(types::I64, MemFlagsData::new(), hdr, ARRAY_CAP_OFFSET);
+        // data/cap 只有在新缓冲区分配并复制完成后才一起发布；提前覆盖 data 会丢失
+        // RtlMoveMemory 的旧来源，提前覆盖 cap 则会制造暂时不一致的 raw header。
         let full = bcx.ins().icmp(IntCC::Equal, len, cap);
         let grow_b = bcx.create_block();
         let ok_b = bcx.create_block();
@@ -130,6 +135,8 @@ pub(super) fn emit_array_runtime<M: Module>(
     });
 
     shim!(c, "alias.arr.pop", |bcx, a| {
+        // 空数组诊断需要源码 span，因此由 resolved method emitter 在调用前检查并终止；
+        // 这里依赖该前置条件后再递减。新增调用点若绕过检查会让 len 下溢并越界读取。
         let hdr = a[0];
         let len = bcx
             .ins()

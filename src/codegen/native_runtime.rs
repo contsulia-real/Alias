@@ -1,16 +1,49 @@
-//! Native runtime facade. Runtime contracts remain the single ABI source.
+//! 产物内 native runtime facade；所有 shim 签名仍由 runtime contract 唯一生成。
 
 use crate::codegen::runtime::{
     runtime_contract, validate_contract_table, RuntimeContract, RUNTIME_CONTRACTS,
 };
 use crate::codegen::{native_err, Compiler};
 use crate::{AliasResult, Span};
+use cranelift_codegen::ir::{AbiParam, Signature, Type};
 use cranelift_module::{FuncId, Linkage, Module};
 
 pub(super) struct NativeExterns {
     pub(super) get_std_handle: FuncId,
     pub(super) write_file: FuncId,
     pub(super) exit_process: FuncId,
+}
+
+impl<M: Module> Compiler<'_, M> {
+    fn external_signature(&self, params: &[Type], ret: Option<Type>) -> Signature {
+        let mut signature = Signature::new(self.cc);
+        signature
+            .params
+            .extend(params.iter().copied().map(AbiParam::new));
+        if let Some(ret) = ret {
+            signature.returns.push(AbiParam::new(ret));
+        }
+        signature
+    }
+
+    /// 平台 extern 与 Alias runtime 是两条不同 authority 边界；`alias.*`/`rt.*`
+    /// 必须经 runtime owner 生成签名，不能借普通 extern 绕过 contract 检查。
+    pub(crate) fn import_external(
+        &mut self,
+        name: &str,
+        params: &[Type],
+        ret: Option<Type>,
+    ) -> AliasResult<FuncId> {
+        if name.starts_with("alias.") || name.starts_with("rt.") {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: runtime 符号 '{name}' 必须经契约表声明"),
+            ));
+        }
+        self.module
+            .declare_function(name, Linkage::Import, &self.external_signature(params, ret))
+            .map_err(|error| native_err(Span::default(), format!("内部: 符号声明失败 {error}")))
+    }
 }
 
 macro_rules! shim {

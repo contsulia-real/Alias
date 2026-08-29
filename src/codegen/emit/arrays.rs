@@ -1,5 +1,5 @@
 use super::expr::emit_expr;
-use super::ops::new_span_id;
+use super::ops::emit_runtime_abort;
 use crate::codegen::abi::{storage_word, store_elem, VTy, VALUE_WORD_BYTES};
 use crate::codegen::layout::{
     ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_WRAPPER_RAW_OFFSET, ARRAY_WRAPPER_VERSION_OFFSET,
@@ -9,7 +9,7 @@ use crate::codegen::layout::{
 use crate::codegen::{Compiler, Frame};
 use crate::sema::hir::Expr;
 use crate::{AliasResult, Span};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, TrapCode, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -31,6 +31,9 @@ pub(crate) fn array_version(bcx: &mut FunctionBuilder, array: Value) -> Value {
     )
 }
 
+/// 版本属于共享 wrapper，而不是可能在扩容时替换的 raw backing store；因此所有别名
+/// 和既有 iterator 都观察同一计数。push/pop 成功后必须调用，遗漏会让结构修改绕过
+/// for 的 fail-fast 检查，把旧 cursor 继续用于已变化的集合。
 pub(crate) fn bump_array_version(bcx: &mut FunctionBuilder, array: Value) {
     let old = array_version(bcx, array);
     let next = bcx.ins().iadd_imm_s(old, 1);
@@ -84,11 +87,7 @@ pub(crate) fn emit_iterator_abort<M: Module>(
     bcx: &mut FunctionBuilder,
     span: Span,
 ) -> AliasResult<()> {
-    let span_id = new_span_id(c, span);
-    let aid = bcx.ins().iconst(types::I32, span_id as i64);
-    c.call_rt_void(bcx, "alias.abort_iter", &[aid])?;
-    bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
-    Ok(())
+    emit_runtime_abort(c, bcx, "alias.abort_iter", span)
 }
 
 pub(crate) fn emit_array_lit<M: Module>(

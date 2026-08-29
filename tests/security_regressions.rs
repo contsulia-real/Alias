@@ -181,6 +181,22 @@ fn excessive_expression_nesting_is_rejected() {
 }
 
 #[test]
+fn ternary_depth_limit_accepts_the_boundary_and_rejects_excess() {
+    let boundary = format!("{}0{}", "true ? ".repeat(256), " : 0".repeat(256));
+    let src = format!("func i32 main = () -> return {boundary}\n");
+    assert_eq!(run(&src).unwrap(), 0);
+
+    let excessive = format!("{}0{}", "true ? ".repeat(257), " : 0".repeat(257));
+    let src = format!("func i32 main = () -> return {excessive}\n");
+    let err = run(&src).expect_err("超深右结合三元表达式必须拒绝");
+    assert!(
+        err.msg.contains("三元表达式超过 256 层上限"),
+        "实际诊断: {}",
+        err.msg
+    );
+}
+
+#[test]
 fn excessive_generic_type_nesting_is_rejected() {
     let ty = format!("{}i32{}", "array<".repeat(129), ">".repeat(129));
     let src = format!("func i32 main = () -> {{\n    val {ty} x = []\n    return 0\n}}\n");

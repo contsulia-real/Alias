@@ -11,6 +11,8 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Module};
 
+// 空字符串的物理表示允许 data = null，但必须同时满足 len = 0。下方所有复制和逐字节
+// 路径都要先按长度分支；即使长度为零，也不能把 null 交给内存复制或先做地址运算。
 const TRIM_SET: &[u8] = b" \t\r\n";
 
 fn emit_is_trim_byte(bcx: &mut FunctionBuilder, b: Value) -> Value {
@@ -50,6 +52,7 @@ fn emit_case_shim<M: Module>(
     let hi_c = bcx.ins().iconst(types::I8, hi);
     let delta_c = bcx.ins().iconst(types::I8, delta);
 
+    // 非空分支才允许解引用 pa；else 必须继续产出规范的 null + 0 string block。
     let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, la, 0);
     let then_b = bcx.create_block();
     let else_b = bcx.create_block();
@@ -151,6 +154,8 @@ pub(super) fn emit_string_runtime<M: Module>(
             vec![bcx.ins().iconst(types::I64, STRING_BYTES)]
         );
         let len64 = bcx.ins().sextend(types::I64, a[1]);
+        // str.new 的 data 参数按 runtime contract 可空；只有正长度才能进入复制分支。
+        // 删除此门会让合法空字面量把 null 传给 RtlMoveMemory。
         let has = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len64, 0);
         let then_b = bcx.create_block();
         let else_b = bcx.create_block();
@@ -213,6 +218,8 @@ pub(super) fn emit_string_runtime<M: Module>(
         bcx.switch_to_block(data_b);
         bcx.seal_block(data_b);
 
+        // concat 对两侧分别按长度守卫复制，因为任一空操作数都可能携带 null data。
+        // 不能把两个分支合成无条件的零长度 copy。
         let copy_a_b = bcx.create_block();
         let after_a_b = bcx.create_block();
         let has_a = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, la, 0);

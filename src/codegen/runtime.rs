@@ -3,8 +3,11 @@
 //! 调用点和原生 runtime 实现都只引用符号名；参数、返回值与可空性
 //! 从本表生成并在构建/测试时校验。
 
+use crate::codegen::{native_err, Compiler};
 use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::{types, AbiParam, Signature, Type};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature, Type, Value};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::{FuncId, Linkage, Module};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeTy {
@@ -142,6 +145,101 @@ pub(crate) fn runtime_contract(symbol: &str) -> AliasResult<&'static RuntimeCont
             msg: format!("内部: 未登记 runtime 符号 '{symbol}'"),
             span: Span::default(),
         })
+}
+
+impl<M: Module> Compiler<'_, M> {
+    /// runtime import 的签名只能由 RUNTIME_CONTRACTS 生成；调用点统一经过这里后，
+    /// 参数数量、机器类型及 value-vs-unit 形态才不会在 emitter 中形成平行合同。
+    pub(crate) fn import_runtime(&mut self, name: &str) -> AliasResult<FuncId> {
+        let contract = runtime_contract(name)?;
+        let sig = contract.signature(self.cc, self.ptr_ty);
+        self.module
+            .declare_function(contract.symbol, Linkage::Import, &sig)
+            .map_err(|error| native_err(Span::default(), format!("内部: runtime 声明失败 {error}")))
+    }
+
+    pub(crate) fn call_rt(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        args: &[Value],
+    ) -> AliasResult<Value> {
+        if runtime_contract(name)?.ret.is_none() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 无返回值 runtime '{name}' 被当作值调用"),
+            ));
+        }
+        let inst = self.call_rt_inst(bcx, name, args)?;
+        match bcx.inst_results(inst) {
+            [value] => Ok(*value),
+            _ => Err(native_err(
+                Span::default(),
+                format!("内部: 有返回值 runtime '{name}' 未产生唯一结果"),
+            )),
+        }
+    }
+
+    pub(crate) fn call_rt_void(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        args: &[Value],
+    ) -> AliasResult<()> {
+        if runtime_contract(name)?.ret.is_some() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 有返回值 runtime '{name}' 被当作 unit 调用"),
+            ));
+        }
+        let inst = self.call_rt_inst(bcx, name, args)?;
+        if !bcx.inst_results(inst).is_empty() {
+            return Err(native_err(
+                Span::default(),
+                format!("内部: 无返回值 runtime '{name}' 意外产生结果"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn call_rt_inst(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        name: &str,
+        args: &[Value],
+    ) -> AliasResult<cranelift_codegen::ir::Inst> {
+        let contract = runtime_contract(name)?;
+        if args.len() != contract.params.len() {
+            return Err(native_err(
+                Span::default(),
+                format!(
+                    "内部: runtime '{}' 参数数量不匹配，契约 {}，调用点 {}",
+                    name,
+                    contract.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        for (index, (arg, expected)) in args.iter().zip(contract.params).enumerate() {
+            let actual = bcx.func.dfg.value_type(*arg);
+            let expected = expected.ty.resolve(self.ptr_ty);
+            if actual != expected {
+                return Err(native_err(
+                    Span::default(),
+                    format!(
+                        "内部: runtime '{}' 第 {} 个参数类型不匹配，契约 {}，调用点 {}",
+                        name,
+                        index + 1,
+                        expected,
+                        actual
+                    ),
+                ));
+            }
+        }
+        let fid = self.import_runtime(name)?;
+        let fref = self.module.declare_func_in_func(fid, bcx.func);
+        Ok(bcx.ins().call(fref, args))
+    }
 }
 
 pub(crate) fn validate_contract_table() -> Result<(), String> {

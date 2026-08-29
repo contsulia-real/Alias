@@ -325,8 +325,8 @@ fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -
         match node {
             Node::Expr(expr) => {
                 if let Expr::Ident(_, Some(id), ..) = expr {
-                    // Unknown-ID rejection belongs to the resolved cross-reference validator.
-                    // This pass only checks the type relation once an ID resolves to a declaration.
+                    // 未知 ID 由 resolved cross-reference validator 统一拒绝；本 pass 只在
+                    // ID 能解析到声明后检查类型关系，避免形成第二套存在性验证 owner。
                     if let Some(declared) = contracts.get(id) {
                         if !types_match(declared, expr.ty()) {
                             return Err(invariant(

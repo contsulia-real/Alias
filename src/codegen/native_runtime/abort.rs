@@ -11,8 +11,8 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
 use std::collections::HashMap;
 
-/// Packed runtime diagnostic record: little-endian u32 line followed by u32 column.
-/// Producer and abort shim must share these offsets; changing one side alone corrupts diagnostics.
+/// packed runtime 诊断记录：little-endian u32 行号后接 u32 列号。
+/// producer 与 abort shim 必须共享这些偏移；单独修改任一侧都会破坏诊断坐标。
 const SPAN_LINE_OFFSET: i32 = 0;
 const SPAN_COL_OFFSET: i32 = 4;
 const SPAN_RECORD_BYTES: i64 = 8;
@@ -120,9 +120,8 @@ fn emit_span_abort<M: Module>(
     let code1 = bcx.ins().iconst(types::I32, 1);
     let ep = c.module.declare_func_in_func(ext.exit_process, bcx.func);
     bcx.ins().call(ep, &[code1]);
-    // ExitProcess is semantically non-returning, but Cranelift does not infer that external
-    // contract. A trap keeps the generated block terminated even if the OS call unexpectedly
-    // returns, so runtime abort can never fall through into user code.
+    // ExitProcess 在语义上不返回，但 Cranelift 不推断外部合同。即使 OS 调用异常返回，
+    // trap 仍保证 block 已终止，runtime abort 绝不能穿透到用户代码。
     bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
 
     bcx.finalize(c.module.target_config());

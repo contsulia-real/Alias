@@ -122,9 +122,9 @@ pub fn build(src: &str, out_exe: &Path) -> AliasResult<()> {
     let output = out_exe.to_owned();
     let worker = std::thread::Builder::new()
         .name("alias-compiler".into())
-        // Frontend and Cranelift emission still contain bounded recursive descents. Provisioning
-        // the stack here keeps the public build/run contract independent of the caller thread's
-        // stack while retaining the language's explicit nesting limits.
+        // 前端与 Cranelift 发射仍含受输入上限约束的递归下降。工作线程必须由公开
+        // build/run 边界统一创建；若只在 CLI 扩栈，嵌入方的小栈调用线程仍会让合法
+        // 输入触发宿主栈溢出，而不是得到 AliasResult。
         .stack_size(COMPILER_STACK_BYTES)
         .spawn(move || compile_on_worker(&source, &output))
         .map_err(|error| AliasError {

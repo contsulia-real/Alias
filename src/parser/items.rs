@@ -43,7 +43,7 @@ impl Parser {
     /// struct <名字> { (val|var) <类型> <名字> (= 表达式)? ... }
     fn parse_struct_def(&mut self) -> AliasResult<Item> {
         let span = self.span();
-        self.bump(); // struct
+        self.bump()?;
         let name = self.expect_ident()?;
         self.expect(&Tok::LBrace)?;
         let mut fields = Vec::new();
@@ -74,7 +74,7 @@ impl Parser {
             Some(Tok::Var) => true,
             _ => false, // 调用方已保证 Val | Var
         };
-        self.bump(); // val | var
+        self.bump()?;
         let ty = self.parse_type()?;
         let name = self.expect_ident()?;
         let default = if self.eat(&Tok::Assign) {

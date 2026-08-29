@@ -30,7 +30,10 @@ impl Checker {
                 }
                 Ok(Ty::Str)
             }
-            Expr::Ident(..) | Expr::This(..) => unreachable!("直接名字由 expr 统一处理"),
+            Expr::Ident(..) | Expr::This(..) => Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 直接名字绕过统一解析入口".into(),
+                span: e.span(),
+            }),
             Expr::Cast { target, expr, span } => {
                 let target_ty = check_value_type_slot(target, *span, &self.structs)?;
                 let source_ty = require_value(self.expr(expr, env)?, expr.span())?;
@@ -83,6 +86,8 @@ impl Checker {
             }
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.expr(lhs, env)?;
+                // 整数字面量先采用已确定的 lhs 槽宽，再记录到 rhs fact；若先按默认 i32
+                // 检查，合法的 i64/u64 运算会在 binary type comparison 前被错误拒绝。
                 let r = if matches!(&l, Ty::Int(_) | Ty::UInt(_)) {
                     match literal_slot_unify(&l, rhs) {
                         Some(r) => {
@@ -157,7 +162,6 @@ impl Checker {
                             });
                         };
                         let ty = self.method_call_with_receiver_ty(
-                            lhs,
                             lhs_ty.clone(),
                             name,
                             &[],
@@ -177,6 +181,8 @@ impl Checker {
                 span,
             } => {
                 let ty = self.method_call(recv, name, args, *span, env)?;
+                // method_call 必须先完成 receiver 检查并写入 fact，再据同一静态类型固化
+                // MethodTarget；反过来按名字猜 target 会把 sema 决策泄漏给 lowering/backend。
                 let recv_ty = self.expr_facts[&Self::expr_key(recv)].ty.clone();
                 let target = resolve_method_target(self, &recv_ty, name, *span)?;
                 self.record_call_target(e, LowerCallTarget::Method(target));
@@ -259,7 +265,7 @@ impl Checker {
                     ..
                 } = &ty
                 {
-                    self.record_params(params, param_types, &param_ids);
+                    self.record_params(params, param_types, &param_ids)?;
                 }
                 Ok(ty)
             }

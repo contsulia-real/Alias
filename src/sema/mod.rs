@@ -288,35 +288,41 @@ struct Checker {
 }
 
 impl Checker {
-    fn fresh_binding_id(&mut self) -> BindingId {
+    fn fresh_binding_id(&mut self) -> AliasResult<BindingId> {
         let id = BindingId(self.next_binding_id);
         self.next_binding_id = self
             .next_binding_id
             .checked_add(1)
-            .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: BindingId 耗尽"));
-        id
+            .ok_or_else(|| AliasError {
+                msg: "内部 sema 不变式被破坏: BindingId 耗尽".into(),
+                span: Span::default(),
+            })?;
+        Ok(id)
     }
 
-    fn fresh_method_id(&mut self) -> MethodId {
+    fn fresh_method_id(&mut self) -> AliasResult<MethodId> {
         let id = MethodId(self.next_method_id);
         self.next_method_id = self
             .next_method_id
             .checked_add(1)
-            .unwrap_or_else(|| panic!("内部 sema 不变式被破坏: MethodId 耗尽"));
-        id
+            .ok_or_else(|| AliasError {
+                msg: "内部 sema 不变式被破坏: MethodId 耗尽".into(),
+                span: Span::default(),
+            })?;
+        Ok(id)
     }
 
-    fn binding_id_for(&mut self, binding: &Binding) -> BindingId {
+    fn binding_id_for(&mut self, binding: &Binding) -> AliasResult<BindingId> {
         // facts 的 identity 只在同一次 check(program) → hir::lower(program) 调用链内有效。
         // 这段期间 AST 仍由原 Program 持有且不得 move/clone-replace 节点；lower 会用同一
         // 地址消费 fact。若未来在两阶段之间加入 AST 重写，必须先改成稳定 NodeId。
         let key = binding as *const Binding as usize;
         if let Some(id) = self.binding_ids.get(&key) {
-            return *id;
+            return Ok(*id);
         }
-        let id = self.fresh_binding_id();
+        let id = self.fresh_binding_id()?;
         self.binding_ids.insert(key, id);
-        id
+        Ok(id)
     }
 }
 
@@ -373,7 +379,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                                     &ck.structs,
                                 )?);
                             }
-                            let id = ck.binding_id_for(b);
+                            let id = ck.binding_id_for(b)?;
                             Scope::insert(
                                 &top,
                                 b.name.clone(),

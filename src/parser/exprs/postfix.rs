@@ -34,7 +34,7 @@ impl Parser {
             match self.peek().cloned() {
                 Some(Tok::Dot) => {
                     chain += 1;
-                    self.bump();
+                    self.bump()?;
                     let name = self.expect_ident()?;
                     if self.peek() == Some(&Tok::LParen) {
                         let args = self.parse_args()?;
@@ -54,7 +54,7 @@ impl Parser {
                 }
                 Some(Tok::LBracket) => {
                     chain += 1;
-                    self.bump();
+                    self.bump()?;
                     let idx = self.parse_expr()?;
                     self.expect(&Tok::RBracket)?;
                     expr = Expr::Index {
@@ -77,7 +77,7 @@ impl Parser {
                         break;
                     }
                     chain += 1;
-                    self.bump();
+                    self.bump()?;
                     expr = Expr::Propagate {
                         expr: Box::new(expr),
                         span,
@@ -105,7 +105,7 @@ impl Parser {
                 return Err(self.err_here(format!("一元表达式超过 {MAX_EXPR_CHAIN} 层上限")));
             }
             prefixes.push((tok, self.span()));
-            self.bump();
+            self.bump()?;
         }
         let mut expr = self.parse_postfix()?;
         for (tok, span) in prefixes.into_iter().rev() {
@@ -122,7 +122,9 @@ impl Parser {
                     expr: Box::new(expr),
                     span,
                 },
-                _ => unreachable!(),
+                _ => {
+                    return Err(self.err_here("一元运算符分类与表达式构造不一致"));
+                }
             };
         }
         Ok(expr)
@@ -138,7 +140,7 @@ impl Parser {
         let mut args = Vec::new();
         self.skip_newlines();
         if self.peek() == Some(&Tok::RParen) {
-            self.bump();
+            self.bump()?;
             return Ok(args);
         }
         loop {
@@ -162,8 +164,8 @@ impl Parser {
         if let Some(Tok::Ident(label)) = self.peek().cloned() {
             if self.peek_at(1) == Some(&Tok::Assign) {
                 let span = self.span();
-                self.bump();
-                self.bump();
+                self.bump()?;
+                self.bump()?;
                 let value = self.parse_expr()?;
                 return Ok(CallArg {
                     label: Some(label),

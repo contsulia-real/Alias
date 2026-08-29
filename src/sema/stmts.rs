@@ -19,15 +19,15 @@ impl Checker {
             });
         }
         ensure_user_lexical_name(&b.name, b.span)?;
-        // Struct names share the top-level namespace with ordinary bindings, but the language
-        // explicitly permits lexical child scopes to shadow constructor names.
+        // struct 名只在顶层与普通绑定共享命名空间；子词法作用域仍允许 shadow 构造器。
+        // 把该检查下放到所有 Scope 会错误拒绝当前规范允许的局部 shadow。
         if env.parent.is_none() && self.structs.contains_key(&b.name) {
             return Err(AliasError {
                 msg: format!("'{}' 已定义为结构体, 不能再定义为绑定", b.name),
                 span: b.span,
             });
         }
-        let binding_id = self.binding_id_for(b);
+        let binding_id = self.binding_id_for(b)?;
         if Scope::get_here(env, &b.name).is_some_and(|existing| existing.id != binding_id) {
             return Err(AliasError {
                 msg: format!("同一词法作用域不能重复声明绑定 '{}'", b.name),
@@ -52,7 +52,7 @@ impl Checker {
                 ..
             } = &init_ty
             {
-                self.record_params(params, param_types, &param_ids);
+                self.record_params(params, param_types, &param_ids)?;
             }
             self.record_expr_type(&b.value, init_ty.clone());
             self.binding_types
@@ -120,8 +120,8 @@ impl Checker {
         let mut param_tys = Vec::with_capacity(params.len());
         let mut param_ids = Vec::with_capacity(params.len());
         for p in params {
-            // Synthetic `self` is a keyword-owned method parameter; all user-written names
-            // still pass through the predefined-name gate.
+            // synthetic `self` 是关键字拥有的方法参数；只有它绕过用户名字门禁，避免
+            // 同时放开源码参数对预定义名字的重声明。
             if p.name != "self" {
                 ensure_user_lexical_name(&p.name, p.span)?;
             }
@@ -132,7 +132,7 @@ impl Checker {
                 });
             }
             let pt = check_value_type_slot(&p.ty, p.span, &self.structs)?;
-            let id = self.fresh_binding_id();
+            let id = self.fresh_binding_id()?;
             param_tys.push(pt.clone());
             param_ids.push(id);
             Scope::insert(
@@ -148,7 +148,7 @@ impl Checker {
 
         let ret_ty = expected.cloned().unwrap_or(Ty::Unknown);
         // `this` 是特殊当前函数引用，不进入普通 HIR BindingId 存储模型。
-        let this_scope_id = self.fresh_binding_id();
+        let this_scope_id = self.fresh_binding_id()?;
         if Scope::get_here(&local, "this").is_some() {
             return Err(AliasError {
                 msg: "参数名不能使用函数内保留名 'this'".into(),
@@ -204,10 +204,12 @@ impl Checker {
             Ok(())
         })();
         self.loop_depth = outer_loop_depth;
-        let checked_ret = self
-            .fn_ret
-            .pop()
-            .unwrap_or_else(|| unreachable!("funclit 已压入返回类型"));
+        let Some(checked_ret) = self.fn_ret.pop() else {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: funclit 返回类型栈为空".into(),
+                span: fspan,
+            });
+        };
         check_result?;
 
         let inferred_ret = expected.cloned().unwrap_or_else(|| {
@@ -243,10 +245,13 @@ impl Checker {
                 Some(expr) => require_value(self.expr(expr, env)?, expr.span())?,
                 None => Ty::Unit,
             };
-            *self
-                .fn_ret
-                .last_mut()
-                .unwrap_or_else(|| unreachable!("上方已确认函数返回栈非空")) = inferred.clone();
+            let Some(slot) = self.fn_ret.last_mut() else {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: 推断 return 时函数栈为空".into(),
+                    span,
+                });
+            };
+            *slot = inferred.clone();
             return Ok(inferred);
         }
         match value {
@@ -444,7 +449,7 @@ impl Checker {
                         span: *span,
                     });
                 }
-                let id = self.fresh_binding_id();
+                let id = self.fresh_binding_id()?;
                 self.for_ids.insert(s as *const Stmt as usize, id);
                 let child = Scope::child(env);
                 Scope::insert(

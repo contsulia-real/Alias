@@ -33,9 +33,8 @@ pub(super) fn emit_alloc_runtime<M: Module>(
 
     shim!(c, "rt.heap.alloc", |bcx, a| {
         let h = call_ext_m!(bcx, get_process_heap, vec![]);
-        // Cells/env/object headers rely on newly allocated words starting at zero. Removing
-        // HEAP_ZERO_MEMORY would expose uninitialized pointers/lengths before constructors write
-        // their explicitly initialized fields.
+        // cell/env/object header 依赖新分配 word 初始为零。移除 HEAP_ZERO_MEMORY 会在
+        // constructor 写入显式字段前暴露未初始化指针和长度。
         let flags = bcx.ins().iconst(types::I32, HEAP_ZERO_MEMORY);
         let p = call_ext_m!(bcx, heap_alloc, vec![h, flags, a[0]]);
         let failed = bcx.ins().icmp_imm_s(IntCC::Equal, p, 0);
@@ -48,6 +47,8 @@ pub(super) fn emit_alloc_runtime<M: Module>(
         let one = bcx.ins().iconst(types::I32, 1);
         let ep = c.module.declare_func_in_func(ext.exit_process, bcx.func);
         bcx.ins().call(ep, &[one]);
+        // 外部分配失败必须终止；trap 防止 Cranelift 把 ExitProcess 当作可返回调用后
+        // 继续携带 null 指针进入正常分配路径。
         bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
         bcx.switch_to_block(ok_b);
         bcx.ins().return_(&[p]);

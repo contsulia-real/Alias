@@ -20,10 +20,9 @@ pub(super) fn lower(
             .collect::<AliasResult<Vec<_>>>()?,
     };
     ensure_facts_consumed(&facts)?;
-    // Capture vectors are part of the final HIR contract, so the authoritative invariant gate
-    // must run after capture population. Validating before this mutation would certify an object
-    // different from the one codegen actually consumes.
-    super::capture::populate_captures(&mut checked);
+    // capture 向量属于最终 HIR 合同，因此权威 invariant gate 必须在 capture 写回之后。
+    // 若提前验证，后续 mutation 会让 codegen 消费一个从未通过最终门禁的对象。
+    super::capture::populate_captures(&mut checked)?;
     super::validate_resolved_hir(&checked)?;
     Ok(checked)
 }
@@ -78,8 +77,8 @@ fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<It
                 .fields
                 .iter()
                 .map(|field| {
-                    // These addresses are the transient fact identity established during check;
-                    // no AST-moving phase exists between check and this lowering pass.
+                    // 这些地址是 check 建立的短生命周期 fact identity；check 与本次
+                    // lowering 之间不得存在移动 AST 节点的 phase。
                     let key = field as *const crate::ast::StructField as usize;
                     Ok(StructField {
                         ty: facts.fields.remove(&key).ok_or_else(|| AliasError {
@@ -248,10 +247,10 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
 }
 
 fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Expr> {
-    // Pointer keys are a phase-local identity, not a persistent node ID. check() records facts
-    // against this exact Program allocation and immediately hands the same Program to lower();
-    // moving/cloning/replacing any AST node in between would make every lookup below stale.
-    // Any future AST rewrite phase must introduce stable NodeId first rather than adding fallbacks.
+    // 指针 key 只是 phase 内 identity，不是持久 NodeId。check() 针对这份 Program 的
+    // 精确 allocation 记录 fact，并立即把同一对象交给 lower()；中间移动、clone 或替换
+    // 任一 AST 节点都会让下方 lookup 全部失效。未来若引入 AST rewrite，必须先改为稳定
+    // NodeId，不能用 fallback 掩盖 identity 断裂。
     let key = expr as *const crate::ast::Expr as usize;
     let mut lower_info = facts.exprs.remove(&key).ok_or_else(|| AliasError {
         msg: "内部 sema 不变式被破坏: 表达式缺少静态类型".into(),
