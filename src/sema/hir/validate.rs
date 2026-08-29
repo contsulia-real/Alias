@@ -22,6 +22,7 @@ struct UserMethodContract {
 #[derive(Clone)]
 struct StructFieldContract {
     ty: Ty,
+    mutable: bool,
     has_default: bool,
 }
 
@@ -268,6 +269,7 @@ fn collect_struct_contracts(
                 .iter()
                 .map(|field| StructFieldContract {
                     ty: field.ty.clone(),
+                    mutable: field.mutable,
                     has_default: field.default.is_some(),
                 })
                 .collect(),
@@ -676,12 +678,12 @@ fn validate_funclit_contract(
     Ok(())
 }
 
-fn resolved_field_ty(
+fn resolved_field_contract(
     recv: &Expr,
     field_index: usize,
     structs: &HashMap<String, StructContract>,
     span: Span,
-) -> AliasResult<Ty> {
+) -> AliasResult<StructFieldContract> {
     let Ty::Struct(name) = recv.ty() else {
         return Err(invariant(span, "字段索引的接收者不是 struct"));
     };
@@ -691,7 +693,7 @@ fn resolved_field_ty(
     let Some(field) = contract.fields.get(field_index) else {
         return Err(invariant(span, "已解析字段索引越界"));
     };
-    Ok(field.ty.clone())
+    Ok(field.clone())
 }
 
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
@@ -899,9 +901,9 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Field {
                         recv, field_index, ..
                     } => {
-                        let field_ty =
-                            resolved_field_ty(recv, *field_index, &structs, expr.span())?;
-                        if !types_match(&field_ty, expr.ty()) {
+                        let field =
+                            resolved_field_contract(recv, *field_index, &structs, expr.span())?;
+                        if !types_match(&field.ty, expr.ty()) {
                             return Err(invariant(
                                 expr.span(),
                                 "字段表达式类型与已解析字段声明不一致",
@@ -963,8 +965,15 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     field_index,
                     value,
                 } => {
-                    let field_ty = resolved_field_ty(recv, *field_index, &structs, value.span())?;
-                    if !types_match(&field_ty, value.ty()) {
+                    let field =
+                        resolved_field_contract(recv, *field_index, &structs, value.span())?;
+                    if !field.mutable {
+                        return Err(invariant(
+                            value.span(),
+                            "字段赋值目标指向不可写 val 字段",
+                        ));
+                    }
+                    if !types_match(&field.ty, value.ty()) {
                         return Err(invariant(
                             value.span(),
                             "字段赋值 RHS 类型与已解析字段声明不一致",

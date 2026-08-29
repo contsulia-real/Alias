@@ -124,6 +124,32 @@ fn resolved_hir_rejects_field_result_type_drift() {
 }
 
 #[test]
+fn final_hir_gate_rejects_field_assignment_retargeted_to_val_field() {
+    let mut program = checked(
+        "struct cell { val i32 locked = 0 var i32 open = 0 }\nfunc i32 main = () -> {\n    val cell c = cell()\n    c.open = 1\n    return c.open\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let field_index = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::FieldAssign { field_index, .. } => Some(field_index),
+            _ => None,
+        })
+        .expect("fixture must contain field assignment");
+    *field_index = 0;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("field assignment retargeted to val field must fail the final HIR gate");
+    assert!(
+        error.msg.contains("字段赋值目标指向不可写 val 字段"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
 fn final_hir_gate_rejects_duplicate_binding_id() {
     let mut program =
         checked("val i32 left = 1\nval i32 right = 2\nfunc i32 main = () -> return left + right\n");

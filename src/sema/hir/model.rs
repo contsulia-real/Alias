@@ -31,6 +31,7 @@ pub(crate) struct StructDef {
 #[derive(Debug, Clone)]
 pub(crate) struct StructField {
     pub(crate) ty: Ty,
+    pub(crate) mutable: bool,
     pub(crate) default: Option<Expr>,
     pub(crate) span: Span,
 }

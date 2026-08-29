@@ -85,6 +85,7 @@ fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<It
                             msg: "内部 sema 不变式被破坏: 结构体字段缺少静态类型".into(),
                             span: field.span,
                         })?,
+                        mutable: field.mutable,
                         default: field
                             .default
                             .as_ref()
