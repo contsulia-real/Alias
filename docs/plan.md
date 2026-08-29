@@ -666,6 +666,24 @@ ReadLoan
 WriteLoan
 ```
 
+borrowed alias 的 loan kind **不由 `val` / `var` 或创建语法固定**，而由该 alias 在其 NLL live region 内对 referent 的实际使用推导：
+
+```text
+只读取 referent
+-> ReadLoan
+
+存在任意 write-through 到 referent
+-> WriteLoan
+```
+
+这里必须严格区分“修改 borrowed slot 本身”和“经 alias 修改 referent”：
+
+* `var` borrowed slot 重新绑定到另一个 BorrowedValue，只修改该 borrowed slot 自身，**不算**对旧 referent 的 write-through；
+* 重新绑定会结束/替换旧 borrowed binding 对应的 loan，并按新的 referent 与后续实际使用建立新的 loan；
+* 只有经该 alias 对 referent 做字段写、元素写、解引用写或其它语义上修改 referent 的操作，才要求 `WriteLoan`。
+
+因此 slot mutability 与 loan mutability 正交：`var` borrowed slot 可以最终只需要 `ReadLoan`；`val` borrowed slot 若其可达使用会 write-through 到 referent，则必须得到 `WriteLoan`。
+
 规则：
 
 * 多个互不冲突的 ReadLoan 可以共存；
@@ -673,7 +691,7 @@ WriteLoan
 * WriteLoan 对冲突区域必须独占；
 * live WriteLoan 存在时不能建立冲突 loan；
 * owner 在任何冲突 live loan 存在时不能 move、free 或结束生命周期；
-* borrow 使用非词法生命周期，loan 在最后一次实际使用后结束。
+* borrow 使用非词法生命周期，loan 在最后一次实际使用后结束；对发生重新绑定的 borrowed slot，旧 loan 的最后一次实际使用不包含对新 referent 的后续使用。
 
 loan conflict 使用第 10 节的 Place overlap 三态模型。
 
@@ -2085,6 +2103,8 @@ closure capture loan
 borrowed return source
 ```
 
+其中 borrowed alias 的 `loan kind` 必须来自其 NLL live region 内对 referent 的实际 use；不得把 borrowed slot 的 `val` / `var` 直接映射成 ReadLoan / WriteLoan，也不得把 `var` slot 的 rebinding 误判为旧 referent 的 write-through。
+
 codegen 不执行 borrow checker。
 
 ## 34.4 Pointer facts
@@ -2316,6 +2336,10 @@ compile-time ownership capability
 
 borrow 不拥有对象
 borrow 不延长 owner 生命周期
+borrowed alias 的 ReadLoan / WriteLoan 由 referent 的实际 use 推导
+borrowed slot 的 val / var 与 loan kind 正交
+var borrowed slot rebinding 不等于对旧 referent write-through
+loan 使用 NLL，在最后一次实际使用后结束
 stored borrow 禁止
 
 ownership / borrow exclusivity 静态保证
