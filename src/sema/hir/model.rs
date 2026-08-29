@@ -221,6 +221,16 @@ pub(crate) enum ValueCategory {
     OwnedTemporary,
 }
 
+/// 当前 phase 已实际可达的 compile-time ownership capability 状态。
+///
+/// `Moved` / `Consumed` 只有在对应消费操作进入 resolved HIR 后才会成为真实程序点状态；
+/// 在那之前不创建永远不可达的占位 variant。category 与 capability 是正交事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnershipCapability {
+    None,
+    Available,
+}
+
 /// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。
 /// Value 内部再由 `ValueCategory` 逐步固化 InlineValue/OwnedTemporary/BorrowedValue/Null
 /// 等最终语义；当前尚未实现的 borrowed/null/effect 语义不得由 codegen 猜测。
@@ -238,6 +248,10 @@ pub(crate) struct ExprInfo {
     /// 节点构造期间暂为 None；lower_expr 在返回这个 resolved HIR 节点前立即写回 category。
     /// final-HIR gate 保证进入 codegen 前必为 Some 且与节点语义形状一致。
     pub(crate) category: Option<ExprCategory>,
+    /// 只保存当前 phase 已经证明的 capability：InlineValue=None，OwnedTemporary=Available。
+    /// `Option::None` 表示该 Expr 当前没有可固化的 capability fact（例如 Place/General），
+    /// 不是 `OwnershipCapability::None` 的别名，也不得被后端当作 fallback。
+    pub(crate) ownership_capability: Option<OwnershipCapability>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +429,10 @@ impl Expr {
             ExprCategory::Place => None,
             ExprCategory::Value(category) => Some(category),
         }
+    }
+
+    pub(crate) fn ownership_capability(&self) -> Option<OwnershipCapability> {
+        self.info().ownership_capability
     }
 
     pub(crate) fn span(&self) -> Span {

@@ -4,6 +4,7 @@ mod binding_contract;
 mod capture;
 mod lower;
 mod model;
+mod ownership_capabilities;
 mod typed_contract;
 mod validate;
 mod value_categories;
@@ -21,8 +22,8 @@ mod value_category_tests;
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
     CallTarget, CheckedProgram, CtorKind, Expr, ExprCategory, ExprInfo, Item, MatchArm, MethodId,
-    MethodTarget, Param, Pattern, Place, PlaceInfo, ResolvedConversion, Stmt, StrPart, StructDef,
-    StructField, ValueCategory,
+    MethodTarget, OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, Stmt,
+    StrPart, StructDef, StructField, ValueCategory,
 };
 
 use crate::sema::types::Ty;
@@ -65,10 +66,12 @@ pub(super) fn lower(
     lower::lower(program, facts, main_id)
 }
 
-/// codegen 前唯一 final-HIR gate。value category、stable BindingId graph、局部 typed-node
-/// 方程和其余 resolved cross-reference 分责验证，但只允许经这一入口共同通过。
+/// codegen 前唯一 final-HIR gate。value category、initial ownership capability、stable
+/// BindingId graph、局部 typed-node 方程和其余 resolved cross-reference 分责验证，但只允许
+/// 经这一入口共同通过。
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasResult<()> {
     value_categories::validate(program)?;
+    ownership_capabilities::validate(program)?;
     binding_contract::validate(program)?;
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)

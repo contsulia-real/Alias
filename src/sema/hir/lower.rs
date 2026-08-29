@@ -21,8 +21,9 @@ pub(super) fn lower(
             .collect::<AliasResult<Vec<_>>>()?,
     };
     ensure_facts_consumed(&facts)?;
-    // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 category；capture 仍需在
-    // 整棵 HIR 建成后统一写回。两者都完成后才允许权威 gate 把程序交给 codegen。
+    // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 value category 与当前可证明的
+    // initial ownership capability；capture 仍需在整棵 HIR 建成后统一写回。三者都完成后才
+    // 允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked)?;
     super::validate_resolved_hir(&checked)?;
     Ok(checked)
@@ -280,6 +281,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
 
 fn finalize_expr(mut expr: Expr) -> AliasResult<Expr> {
     super::value_categories::finalize(&mut expr)?;
+    super::ownership_capabilities::finalize(&mut expr)?;
     Ok(expr)
 }
 
@@ -310,6 +312,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     let info = ExprInfo {
         ty: lower_info.ty,
         category: None,
+        ownership_capability: None,
     };
 
     if let Some(callee_ty) = implicit_zero_callee {
@@ -322,6 +325,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         let callee_info = ExprInfo {
             ty: callee_ty,
             category: None,
+            ownership_capability: None,
         };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(

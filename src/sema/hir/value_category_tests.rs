@@ -1,4 +1,6 @@
-use super::{Body, Expr, ExprCategory, Item, ResolvedConversion, Stmt, ValueCategory};
+use super::{
+    Body, Expr, ExprCategory, Item, OwnershipCapability, ResolvedConversion, Stmt, ValueCategory,
+};
 
 fn checked(source: &str) -> super::CheckedProgram {
     let tokens = crate::lexer::lex(source).unwrap();
@@ -45,12 +47,24 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
         Some(ExprCategory::Value(ValueCategory::InlineValue))
     );
     assert_eq!(
+        binding_value(stmts, "n").ownership_capability(),
+        Some(OwnershipCapability::None)
+    );
+    assert_eq!(
         binding_value(stmts, "p").category(),
         Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
     );
     assert_eq!(
+        binding_value(stmts, "p").ownership_capability(),
+        Some(OwnershipCapability::Available)
+    );
+    assert_eq!(
         binding_value(stmts, "xs").category(),
         Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+    );
+    assert_eq!(
+        binding_value(stmts, "xs").ownership_capability(),
+        Some(OwnershipCapability::Available)
     );
     assert_eq!(
         binding_value(stmts, "from_func").category(),
@@ -58,8 +72,18 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
         "动态函数返回必须等待 return effect，不能只按结果类型猜 owner"
     );
     assert_eq!(
+        binding_value(stmts, "from_func").ownership_capability(),
+        None,
+        "General Value 在 effect 分析前不能伪造 capability"
+    );
+    assert_eq!(
         binding_value(stmts, "from_local").category(),
         Some(ExprCategory::Place)
+    );
+    assert_eq!(
+        binding_value(stmts, "from_local").ownership_capability(),
+        None,
+        "Place capability 必须等待 slot relation/dataflow"
     );
     assert_eq!(
         binding_value(stmts, "from_field").category(),
@@ -82,6 +106,8 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     };
     assert_eq!(inner.category(), Some(ExprCategory::Place));
     assert_eq!(info.category, Some(ExprCategory::Place));
+    assert_eq!(inner.ownership_capability(), None);
+    assert_eq!(info.ownership_capability, None);
 
     let identity_owned = binding_value(stmts, "identity_owned");
     let Expr::Convert {
@@ -100,6 +126,14 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     assert_eq!(
         info.category,
         Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+    );
+    assert_eq!(
+        inner.ownership_capability(),
+        Some(OwnershipCapability::Available)
+    );
+    assert_eq!(
+        info.ownership_capability,
+        Some(OwnershipCapability::Available)
     );
 }
 
@@ -146,6 +180,30 @@ fn final_hir_gate_rejects_owned_temporary_drift() {
         error
             .msg
             .contains("Expr category 与 resolved HIR ownership 形状不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_initial_capability_drift() {
+    let mut program = checked(
+        "struct point { val i32 x = 1 }\nfunc i32 main = () -> {\n    val point p = point()\n    return 0\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let Expr::Call { info, .. } = binding_value(stmts, "p") else {
+        panic!("point initializer must be resolved constructor Call")
+    };
+    info.ownership_capability = Some(OwnershipCapability::None);
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("capability drift must fail the final HIR gate");
+    assert!(
+        error
+            .msg
+            .contains("Expr ownership capability 与 resolved HIR value category 不一致"),
         "实际: {}",
         error.msg
     );
