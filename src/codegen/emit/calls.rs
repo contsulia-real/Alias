@@ -3,6 +3,7 @@ use super::cells::{cell_addr, first_result, read_cell, write_cell};
 use super::clone::emit_deep_clone;
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
+use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
 use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, user_signature, VTy};
 use crate::codegen::layout::{
@@ -41,6 +42,12 @@ pub(crate) fn emit_call<M: Module>(
                 invariant_violation("clone 元数 (sema 已校验)")
             };
             emit_deep_clone(c, bcx, frame, &arg.value, plan)
+        }
+        CallTarget::Builtin(BuiltinCall::ShallowClone(plan)) => {
+            let [arg] = args else {
+                invariant_violation("shallow 元数 (sema 已校验)")
+            };
+            emit_shallow_clone(c, bcx, frame, &arg.value, plan)
         }
         CallTarget::StructConstructor {
             name,

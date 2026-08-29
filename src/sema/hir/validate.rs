@@ -2,8 +2,8 @@ use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg, CallTarget,
     CheckedProgram, CtorKind, Expr, Item, MethodId, MethodTarget, Place, Stmt, StrPart,
 };
-use crate::builtins::{classify_result_constructor, is_clone_builtin};
-use crate::sema::exprs::deep_clone_plan_with;
+use crate::builtins::{classify_result_constructor, is_clone_builtin, is_shallow_builtin};
+use crate::sema::exprs::{deep_clone_plan_with, shallow_clone_root_plan_with};
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
@@ -565,6 +565,40 @@ fn validate_call_target(
                 return Err(invariant(
                     expr.span(),
                     "DeepClone plan 与 resolved 静态类型不一致",
+                ));
+            }
+        }
+        CallTarget::Builtin(BuiltinCall::ShallowClone(plan)) => {
+            let callee_name = direct_resolved_callee_name(callee)?;
+            if !is_shallow_builtin(callee_name) {
+                return Err(invariant(
+                    callee.span(),
+                    "ShallowClone callee 不是 shallow intrinsic",
+                ));
+            }
+            let [arg] = args else {
+                return Err(invariant(expr.span(), "ShallowClone target 元数不是 1"));
+            };
+            if !types_match(arg.value.ty(), expr.ty()) {
+                return Err(invariant(
+                    expr.span(),
+                    "ShallowClone source 与结果静态类型不一致",
+                ));
+            }
+            let expected = shallow_clone_root_plan_with(expr.ty(), expr.span(), &|name| {
+                structs.get(name).map(|contract| {
+                    contract
+                        .fields
+                        .iter()
+                        .map(|field| field.ty.clone())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .map_err(|_| invariant(expr.span(), "ShallowClone target 使用不可 shallow 类型"))?;
+            if &expected != plan {
+                return Err(invariant(
+                    expr.span(),
+                    "ShallowClone plan 与 resolved 静态类型不一致",
                 ));
             }
         }

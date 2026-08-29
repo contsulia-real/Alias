@@ -10,4 +10,5 @@ pub(super) mod control;
 pub(super) mod expr;
 pub(super) mod ops;
 pub(super) mod places;
+pub(super) mod shallow;
 pub(super) mod strings;

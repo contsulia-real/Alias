@@ -16,6 +16,8 @@ mod contract_tests;
 #[cfg(test)]
 mod deep_clone_tests;
 #[cfg(test)]
+mod shallow_clone_tests;
+#[cfg(test)]
 mod storage_relation_tests;
 #[cfg(test)]
 mod tests;
@@ -28,7 +30,8 @@ pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
     CallTarget, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, Item,
     MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern, Place, PlaceInfo,
-    ResolvedConversion, Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
+    ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef, StructField,
+    ValueCategory,
 };
 
 use crate::sema::types::Ty;

@@ -52,7 +52,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - 函数字面量返回类型在 sema 合并完成；
 - 名字解析、目标类型传播、Pattern 合法性与覆盖、调用目标解析均在进入后端前完成。
 
-显式 `clone` 的 DeepCloneable 判定与递归执行计划同样在 sema 完成，并固化为 `DeepClonePlan`；codegen 只能执行该 plan，不能按 `Ty` / `VTy` 重新决定一个类型是否允许 clone。
+显式 `clone` / `shallow` 的 capability 判定与递归执行计划同样在 sema 完成，并分别固化为 `DeepClonePlan` / `ShallowClonePlan`；codegen 只能执行已解析 plan，不能按 `Ty` / `VTy` 重新决定一个类型是否允许 clone/shallow。
 
 禁止后端通过 AST 形态、名字、函数体、诊断字符串或 fallback 重新推断静态语义。
 
@@ -133,7 +133,43 @@ clone expr
 
 sema 会把显式 clone 固化为递归 `DeepClonePlan`；final-HIR gate 会重新以同一 DeepCloneable 规则验证该 plan。后端只能执行 plan，不能把 aggregate clone 退化成引用 bit-copy。
 
-这一节只描述**当前已经实现的显式 `clone`**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / move / borrow / free 等目标语义尚未因此被提前视为已实现。
+### 3.3 显式 shallow clone
+
+当前已实现显式 shallow clone intrinsic：
+
+```alias
+shallow(expr)
+shallow expr
+```
+
+`ShallowCloneable(T)` 与“用户可以直接写 `shallow(T-value)`”是两个不同概念。递归 capability 谓词允许 inline 标量作为安全叶子，但标量本身没有需要新建的独立 aggregate ownership root，因此直接 `shallow(1)` / `shallow(true)` 不开放。
+
+规则：
+
+- 恰好接受一个实参，不接受命名实参；
+- shallow 结果的静态类型与 source 相同；
+- 外层已知目标类型会向 source 传播；
+- `shallow(f)` 中直接函数名 `f` 按函数值本身读取，不触发零参数裸名隐式调用；
+- `shallow` 是预定义保留名，不能被用户声明 shadow；
+- 每个合法 user-level shallow 都创建新的 aggregate root，因此结果是 `OwnedTemporary`，capability 为 `Available`。
+
+当前递归 `ShallowCloneable(T)` / user-level root 规则：
+
+| 类型 | 递归 shallow 安全性 / 当前入口 |
+|---|---|
+| integer / unsigned / float / bool | 递归叶子安全；**不能作为 user-level shallow 根** |
+| `struct S` | 仅当全部字段递归 shallow-safe；可作为 shallow 根 |
+| `result<T,E>` | 仅当 `T` 与 `E` 都递归 shallow-safe；可作为 shallow 根，只复制 active payload 路径 |
+| `string` | 不支持 |
+| `array<T>` | 不支持 |
+| `iterator<T>` | 不支持 |
+| 函数 / closure / `func` 槽 | 不支持 |
+
+当前 struct/result 的物理表示仍是 heap pointer root，因此后端执行合法 `ShallowClonePlan` 时会为每个需要独立 ownership 的 shallow-safe aggregate 层建立新的 root；它不会简单复制旧 pointer bit pattern。这样当前实现与目标 ownership 语义保持一致，不会把一个旧 root 指针复制成两个未来 owner。
+
+sema 会把显式 shallow 固化为递归 `ShallowClonePlan`；final-HIR gate 会用同一 capability owner 重新验证 plan。codegen 不重新判断 ShallowCloneable。
+
+3.2/3.3 只描述**当前已经实现的显式 copy intrinsics**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / move / borrow / free 等目标语义尚未因此被提前视为已实现。
 
 ---
 
@@ -158,11 +194,11 @@ sema 会把显式 clone 固化为递归 `DeepClonePlan`；final-HIR gate 会重�
 
 预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
 
-- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`；
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`；
 - result 构造器：`ok`、`err`；
 - 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
 
-用户定义的 struct 名不属于上述预定义集合：它与顶层 binding/func 冲突，但词法子作用域中的普通 binding、参数或 Pattern 绑定可以 shadow 其 constructor 名；调用解析必须先服从当前 lexical scope，再考虑用户 struct constructor。
+用户定义的 struct 名不属于上述预定义集合：它与顶层 binding/func 冲突，但词法子作用域中的普通 binding、参数或 Pattern binding 可遮蔽 constructor 名字。
 
 当前 `func` 绑定 RHS 必须直接是函数字面量；不能用既有函数值初始化另一个 `func` 绑定。
 
@@ -217,7 +253,7 @@ struct User {
 - `struct` 只能顶层定义；
 - 字段独立声明 `val` 或 `var`；
 - 已登记结构体名可进入类型槽；
-- **普通**赋值、传参、闭包捕获当前仍共享同一实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；
+- **普通**赋值、传参、闭包捕获当前仍共享同一实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
 - 构造使用命名实参；
 - 未显式提供的字段使用声明默认值；
@@ -265,7 +301,7 @@ pub func Ret Receiver.method = (Args...) -> body
 
 单侧构造可暂含 `Unknown`，但必须在目标上下文或后续统一中确定为完整可用类型后才能进入需要 ABI 的路径。
 
-显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan；普通 result 传递的其余 ownership 语义仍受当前尚未完成的整体 ownership 迁移限制。
+显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan。若 `T/E` 都满足当前 shallow-safe 规则，显式 `shallow(result)` 同样建立新的 result root，并只对 active payload 执行 `ShallowClonePlan`。普通 result 传递的其余 ownership 语义仍受当前尚未完成的整体 ownership 迁移限制。
 
 result 值显示为 `<ok>` / `<err>`。
 
@@ -313,7 +349,7 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值当前使用 wrapper 引用表示。**普通**赋值、传参和闭包捕获共享同一 wrapper；显式 `clone(array)` 按 3.2 节创建独立 wrapper/backing，并递归 clone 元素。
+数组值当前使用 wrapper 引用表示。**普通**赋值、传参和闭包捕获共享同一 wrapper；显式 `clone(array)` 按 3.2 节创建独立 wrapper/backing，并递归 clone 元素。`array<T>` 当前不支持显式 shallow。
 
 ### 8.1 数组
 
@@ -326,7 +362,7 @@ err(_)
 - `push(v)` 无返回值；
 - `pop()` 返回元素，空数组中止；
 - `iterator()` 返回 `iterator<T>`；
-- `iterator<T>` 当前不支持显式 clone；
+- `iterator<T>` 当前不支持显式 clone/shallow；
 - 数组值显示为 `<array>`。
 
 当前元素 runtime 载荷槽统一为 8 字节 word；具体静态类型与 ABI 装箱/拆箱由 `abi.rs` 负责。这是当前实现事实，不覆盖 `docs/plan.md` 已冻结的未来 typed stride 目标。
@@ -388,7 +424,7 @@ for T item in iterable {
 
 ### 10.2 类型一致性
 
-不同数值类型之间不做隐式混算。已有变量的静态类型不会因为外层目标而被改型；目标类型只允许影响字面量、`from/try_from`、显式 `clone` source 和可递归传播的复合表达式。
+不同数值类型之间不做隐式混算。已有变量的静态类型不会因为外层目标而被改型；目标类型只允许影响字面量、`from/try_from`、显式 `clone/shallow` source 和可递归传播的复合表达式。
 
 ### 10.3 运算符
 
@@ -475,7 +511,7 @@ try_from(value)
 | array 元素 | `T` |
 | result payload | `T` 或 `E` |
 | match / 三元 | 外层目标类型 |
-| `clone(expr)` source | clone 表达式的外层目标类型 |
+| `clone(expr)` / `shallow(expr)` source | copy intrinsic 表达式的外层目标类型 |
 | 字符串插值孔 | `string` |
 | 数值/位复合表达式 | 外层数值目标向字面量与转换递归传播 |
 
@@ -506,12 +542,13 @@ val i32 y = dup 5
 value plus 1
 println fact 0
 val string copied = clone original
+val Leaf copied_leaf = shallow original_leaf
 ```
 
 关键规则：
 
 - 静态签名为零参数函数的直接标识符或 `this` 可省略调用括号，例如 `val i32 n = five`；`five()` 仍合法；
-- 预定义 `clone` 支持 `clone value`，语义与 `clone(value)` 相同；
+- 预定义 `clone` / `shallow` 支持无括号单参写法，语义分别与 `clone(value)` / `shallow(value)` 相同；
 - 函数值作为值传递时使用显式括号，例如 `f(g)`；
 - `dup 5 + 1` 不解释为 `(dup 5) + 1`，需要显式写 `(dup 5) + 1`；
 - `println f 0` / `print f 0` 允许其唯一输出实参本身为普通单参数无括号调用。
@@ -611,7 +648,7 @@ line / col / len
 - 闭包环境保存捕获单元格指针；
 - 字符串为复制后的泄漏块；
 - struct/result/array/iterator 等对象也由原生 runtime/调用端分配并不回收；
-- 显式 dynamic `clone` 会分配新的 string/struct/array/result storage，但当前仍不会在生命周期结束时回收这些 block。
+- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root，但当前仍不会在生命周期结束时回收这些 block。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 
@@ -647,8 +684,10 @@ line / col / len
 - 下标赋值；
 - 复合赋值；
 - unit 值；
-- `iterator` / function/closure 的显式 clone；
-- `shallow` / `borrow` / `move` 等其余计划内显式 ownership 操作；
+- `iterator` / function/closure 的显式 clone/shallow；
+- string/array 的显式 shallow；
+- 标量作为 user-level shallow 根；
+- `borrow` / `move` 等其余计划内显式 ownership 操作；
 - 稳定 dynamic Place 普通读取自动 DeepClone；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；

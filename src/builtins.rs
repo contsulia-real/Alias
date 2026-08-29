@@ -16,6 +16,12 @@ pub(crate) enum CallBuiltinName {
     Decrease,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnershipBuiltinName {
+    Clone,
+    Shallow,
+}
+
 pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     Some(match name {
         "print" => CallBuiltinName::Print,
@@ -29,10 +35,22 @@ pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     })
 }
 
-/// ownership intrinsic `clone` 与普通 builtin call 分开分类：它需要携带 sema 已解析的
-/// DeepClonePlan，不能退化成仅靠名字即可决定的 BuiltinCall。
+/// ownership copy intrinsics 与普通 builtin call 分开分类：它们需要携带 sema 已解析的
+/// capability execution plan，不能退化成仅靠名字即可决定的普通 BuiltinCall。
+pub(crate) fn classify_ownership_builtin(name: &str) -> Option<OwnershipBuiltinName> {
+    Some(match name {
+        "clone" => OwnershipBuiltinName::Clone,
+        "shallow" => OwnershipBuiltinName::Shallow,
+        _ => return None,
+    })
+}
+
 pub(crate) fn is_clone_builtin(name: &str) -> bool {
-    name == "clone"
+    classify_ownership_builtin(name) == Some(OwnershipBuiltinName::Clone)
+}
+
+pub(crate) fn is_shallow_builtin(name: &str) -> bool {
+    classify_ownership_builtin(name) == Some(OwnershipBuiltinName::Shallow)
 }
 
 pub(crate) fn classify_result_constructor(name: &str) -> Option<CtorKind> {
@@ -49,7 +67,7 @@ pub(crate) const TYPE_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn is_no_paren_builtin(name: &str) -> bool {
-    classify_call_builtin(name).is_some() || is_clone_builtin(name)
+    classify_call_builtin(name).is_some() || classify_ownership_builtin(name).is_some()
 }
 
 pub(crate) fn is_output_builtin(name: &str) -> bool {
@@ -61,7 +79,7 @@ pub(crate) fn is_output_builtin(name: &str) -> bool {
 
 pub(crate) fn is_reserved_lexical_name(name: &str) -> bool {
     classify_call_builtin(name).is_some()
-        || is_clone_builtin(name)
+        || classify_ownership_builtin(name).is_some()
         || classify_result_constructor(name).is_some()
         || TYPE_NAMES.contains(&name)
 }

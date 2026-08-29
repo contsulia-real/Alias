@@ -4,7 +4,7 @@ use super::operators::{
 };
 use super::typing::ExprCheckError;
 use crate::ast::{Expr, StrPartAst};
-use crate::builtins::is_clone_builtin;
+use crate::builtins::{classify_ownership_builtin, OwnershipBuiltinName};
 use crate::sema::hir::BuiltinCall;
 use crate::sema::types::{
     check_value_type_slot, default_negative_int_ty, default_positive_int_ty, types_match, FloatW,
@@ -126,14 +126,24 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, span } => {
-                if matches!(callee.as_ref(), Expr::Ident(name, _) if is_clone_builtin(name)) {
-                    // clone 的 DeepCloneable 判定与 plan 在同一次解析中完成并直接写入 fact；
-                    // 不先经过普通 call 再重新计算 plan，避免一个语义节点在 check 阶段重复解析。
-                    let (ty, plan) = self.check_clone_call(args, *span, env, None)?;
-                    self.record_call_target(
-                        e,
-                        LowerCallTarget::Builtin(BuiltinCall::DeepClone(plan)),
-                    );
+                let ownership_intrinsic = match callee.as_ref() {
+                    Expr::Ident(name, _) => classify_ownership_builtin(name),
+                    _ => None,
+                };
+                if let Some(intrinsic) = ownership_intrinsic {
+                    // ownership-copy capability 与 execution plan 在同一次解析中完成并写入 fact；
+                    // generic call resolution 永远不重新计算 clone/shallow 的语义计划。
+                    let (ty, target) = match intrinsic {
+                        OwnershipBuiltinName::Clone => {
+                            let (ty, plan) = self.check_clone_call(args, *span, env, None)?;
+                            (ty, BuiltinCall::DeepClone(plan))
+                        }
+                        OwnershipBuiltinName::Shallow => {
+                            let (ty, plan) = self.check_shallow_call(args, *span, env, None)?;
+                            (ty, BuiltinCall::ShallowClone(plan))
+                        }
+                    };
+                    self.record_call_target(e, LowerCallTarget::Builtin(target));
                     Ok(ty)
                 } else {
                     let ty = self.call(callee, args, *span, env)?;

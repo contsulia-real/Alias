@@ -187,6 +187,21 @@ pub(crate) enum DeepClonePlan {
     },
 }
 
+/// sema 已经裁决好的 shallow-clone 执行计划。`Inline` 只作为递归安全叶存在；
+/// user-level shallow 根必须是 Struct/Result，从而确实产生一个新的独立 aggregate owner。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShallowClonePlan {
+    Inline,
+    Struct {
+        name: String,
+        fields: Vec<ShallowClonePlan>,
+    },
+    Result {
+        ok: Box<ShallowClonePlan>,
+        err: Box<ShallowClonePlan>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BuiltinCall {
     Print,
@@ -194,6 +209,7 @@ pub(crate) enum BuiltinCall {
     Increase,
     Decrease,
     DeepClone(DeepClonePlan),
+    ShallowClone(ShallowClonePlan),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

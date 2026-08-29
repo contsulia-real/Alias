@@ -69,6 +69,9 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
         Expr::Call { target, .. } => match target {
             CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_) => true,
             CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => deep_clone_creates_owner(plan),
+            // final-HIR validation guarantees user-level shallow never carries an Inline root plan;
+            // every valid shallow call therefore creates a fresh aggregate owner.
+            CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
             CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
         },
         Expr::MethodCall { target, .. } => match target {

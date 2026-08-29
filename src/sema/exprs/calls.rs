@@ -1,11 +1,10 @@
-use super::deep_clone_plan_with;
 use super::operators::require_value;
 use super::typing::ExprCheckError;
 use crate::ast::{CallArg, CtorKind, Expr};
 use crate::builtins::{
-    classify_call_builtin, classify_result_constructor, is_clone_builtin, CallBuiltinName,
+    classify_call_builtin, classify_ownership_builtin, classify_result_constructor, CallBuiltinName,
 };
-use crate::sema::hir::{BuiltinCall, MethodTarget};
+use crate::sema::hir::MethodTarget;
 use crate::sema::types::Ty;
 use crate::sema::{builtin_method, resolved_builtin_call, Checker, Env, LowerCallTarget, Scope};
 use crate::{AliasError, AliasResult, Span};
@@ -37,9 +36,11 @@ impl Checker {
             }
         }
         if let Expr::Ident(name, _) = callee {
-            if is_clone_builtin(name) {
-                let (ty, _) = self.check_clone_call(args, span, env, None)?;
-                return Ok(ty);
+            if classify_ownership_builtin(name).is_some() {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: ownership intrinsic 绕过专用语义解析".into(),
+                    span,
+                });
             }
             if let Some(builtin) = classify_call_builtin(name) {
                 match builtin {
@@ -139,7 +140,7 @@ impl Checker {
     pub(super) fn resolve_call_target(
         &self,
         callee: &Expr,
-        args: &[CallArg],
+        _args: &[CallArg],
         env: &Env,
     ) -> AliasResult<LowerCallTarget> {
         let Expr::Ident(name, _) = callee else {
@@ -156,30 +157,11 @@ impl Checker {
         if let Some(kind) = classify_result_constructor(name) {
             return Ok(LowerCallTarget::ResultConstructor(kind));
         }
-        if is_clone_builtin(name) {
-            let [arg] = args else {
-                return Err(AliasError {
-                    msg: "内部 sema 不变式被破坏: 已检查 clone 的元数不是 1".into(),
-                    span: callee.span(),
-                });
-            };
-            let ty = self
-                .expr_facts
-                .get(&Self::expr_key(&arg.value))
-                .map(|info| info.ty.clone())
-                .ok_or_else(|| AliasError {
-                    msg: "内部 sema 不变式被破坏: clone source 缺少静态类型 fact".into(),
-                    span: arg.value.span(),
-                })?;
-            let plan = deep_clone_plan_with(&ty, callee.span(), &|struct_name| {
-                self.structs.get(struct_name).map(|info| {
-                    info.fields
-                        .iter()
-                        .map(|field| field.ty.clone())
-                        .collect::<Vec<_>>()
-                })
-            })?;
-            return Ok(LowerCallTarget::Builtin(BuiltinCall::DeepClone(plan)));
+        if classify_ownership_builtin(name).is_some() {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: ownership intrinsic target 未在专用入口固化".into(),
+                span: callee.span(),
+            });
         }
         if let Some(builtin) = resolved_builtin_call(name) {
             return Ok(LowerCallTarget::Builtin(builtin));

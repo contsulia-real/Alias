@@ -203,13 +203,15 @@ pointer value 仍属于 Value。
 struct / array / result 等新构造结果
 函数 owned return
 对携带独立动态 ownership 的值执行 clone(...)
-shallow(...)
+合法 user-level shallow(...) 产生的新 aggregate root
 move(place)
 malloc(...) 成功产生的新 allocation root
 其它未来产生新 owner 的表达式
 ```
 
 对 `InlineValue` 执行 `clone(...)` 仍产生 `InlineValue`，不会仅因使用 clone 语法而制造 ownership capability。
+
+`ShallowCloneable(scalar) = true` 只表示 scalar 可作为递归 shallow-safe 叶；它不意味着 `shallow(scalar)` 是合法 user-level root 操作。合法 `shallow(...)` 必须确实建立一个新的独立 aggregate root，因此其结果才是 `OwnedTemporary`。
 
 `malloc` 不具有特殊赋值规则；它只是 `OwnedTemporary` 的一种来源。
 
@@ -277,6 +279,8 @@ Borrowed return   -> borrowed
 ```
 
 这里 `clone(...) -> owning` 描述的是 target slot relation；它不表示所有 clone 结果都必须是 `OwnedTemporary`。标量 clone 仍可作为 `InlineValue` 进入 owning slot。
+
+这里 `shallow(...) -> owning` 只适用于合法 user-level shallow root；递归 `ShallowCloneable(scalar)=true` 不创建一个可独立绑定的 shallow scalar owner。
 
 仅由 `null` 初始化的 nullable local：
 
@@ -395,25 +399,47 @@ deep clone：
 * 对携带 ownership subtree 的值递归复制 ownership subtree；
 * 不取得 source ownership；
 * 不改变 source 既有 loan；
-* 只有动态 ownership-bearing clone 结果才拥有新的独立 ownership capability。
+* 只有 dynamic ownership-bearing clone 结果才拥有新的独立 ownership capability。
 
 只有 `DeepCloneable(T)` 为真时才合法。
 
 ## 7.2 `shallow(x)`
 
-`shallow(x)` 产生新的 root owner，但只复制允许安全 shallow-copy 的直接 representation。
+`shallow(x)` 产生新的独立 aggregate root，但只允许出现在复制该 root 的语义结构不会复制任何既有唯一 ownership capability 的类型上。
 
-结果是：
+合法 user-level `shallow(x)` 的结果固定为：
 
 ```text
 OwnedTemporary
+ownership capability = Available
 ```
 
-是否允许由 `ShallowCloneable(T)` 决定。
+必须区分：
 
-判定必须递归考虑 inline 子对象是否包含 ownership capability，不能只检查“当前层是否直接有 dynamic child”。
+```text
+ShallowCloneable(T)
+!=
+user-level shallow(T-value) 一定存在
+```
 
-如果 shallow copy 会复制任何唯一 ownership capability，则非法。
+`ShallowCloneable(T)` 是递归安全性谓词。scalar 可以作为 shallow-safe 叶，因此：
+
+```text
+ShallowCloneable(scalar) = true
+```
+
+但 scalar 自身没有需要建立的新 aggregate ownership root，所以：
+
+```alias
+shallow(1)      // 非法
+shallow(true)   // 非法
+```
+
+user-level shallow 根必须是一个本身具有独立 aggregate ownership root 的类型，并且其全部递归子结构都满足 `ShallowCloneable`。当前核心模型中典型可用根是满足谓词的 `struct` / `result`；string、array、iterator、function/closure、ptr 均不允许作为 shallow root。
+
+实现不能把“当前物理表示可复制”误当成“shallow 安全”。若某个 shallow-safe aggregate 当前后端仍用 heap pointer 表示，codegen 也必须建立新的独立 aggregate root，而不能简单复制旧 pointer bit pattern 后让两个 owner 指向同一 root。
+
+如果 shallow 会复制任何唯一 ownership capability，则非法。
 
 ## 7.3 `borrow(x)`
 
@@ -466,14 +492,14 @@ borrowed Place 不能 move。
 fresh owned constructor result
 function owned return
 dynamic ownership-bearing clone result
-shallow result
+合法 shallow aggregate root result
 move result
 malloc allocation root
 ```
 
 都统一为 `OwnedTemporary`，进入 owning target 时直接 transfer。
 
-InlineValue 的 clone 仍是 InlineValue，并继续采用普通值复制；它不进入上述 owner-transfer 集合。
+InlineValue 的 clone 仍是 InlineValue，并继续采用普通值复制；它不进入上述 owner-transfer 集合。scalar 的递归 ShallowCloneable 也不产生 standalone shallow owner。
 
 不存在 `malloc` 专属 transfer 规则。
 
@@ -732,7 +758,7 @@ callee 取得 ownership capability。
 OwnedTemporary
 move(place)
 对动态 ownership-bearing 值执行 clone(place)
-shallow(place)
+合法 shallow aggregate root
 其它明确产生新 owner 的表达式
 ```
 
@@ -825,14 +851,14 @@ Destroy
 
 | 类型 | DeepClone | ShallowClone | Move | Borrow | Destroy |
 |---|---|---|---|---|---|
-| integer / float / bool | 值复制 | 不提供 | 等价普通值传递 | 可借用 Place | no-op |
+| integer / float / bool | 值复制 | 递归 safe leaf；不提供 standalone `shallow(scalar)` | 等价普通值传递 | 可借用 Place | no-op |
 | `string` | 独立复制内容 | 不允许 | 允许 | 允许 | 销毁内容 storage |
-| `struct` | 仅当所有 owning fields 可 deep clone | 仅当 `ShallowCloneable` | 允许 | 允许 | owning fields 逆声明顺序销毁 |
+| `struct` | 仅当所有 owning fields 可 deep clone | 仅当 `ShallowCloneable`；可作为 aggregate root | 允许 | 允许 | owning fields 逆声明顺序销毁 |
 | `array<T>` | 仅当 `DeepCloneable(T)` | 不允许 | 允许 | 允许 | elements 逆索引销毁后释放 backing |
-| `result<T,E>` | 仅当 payload 类型均可 deep clone | 仅当 payload 可 shallow | 允许 | 允许 | 销毁 active payload |
+| `result<T,E>` | 仅当 payload 类型均可 deep clone | 仅当 payload 可 shallow；可作为 aggregate root | 允许 | 允许 | 销毁 active payload |
 | `iterator<T>` | 不允许 | 不允许 | 允许 | 允许 | 销毁自身状态，不拥有 array elements |
 | closure / executable function value | 不允许 | 不允许 | 允许 | 允许 | 结束自身 capture obligations / storage |
-| `T?` | 继承 payload 能力 | 继承 payload 能力 | 允许 | 允许 | non-null 时销毁 payload |
+| `T?` | 继承 payload 能力 | 继承 payload 递归能力；standalone root 仍须满足 root 规则 | 允许 | 允许 | non-null 时销毁 payload |
 | `ptr<T>` | **不开放普通 DeepClone** | 不允许 | owning relation 时允许 | 允许 | root owner 由 `free` / parent destruction 结束；borrowed view 不销毁 storage |
 
 ## 14.1 `DeepCloneable(T)`
@@ -869,9 +895,9 @@ shallow capability 必须递归计算。
 
 原则：
 
-> 复制 T 的 root representation 时，不得复制任何唯一 ownership capability。
+> 对一个 aggregate root 建立 shallow copy 时，不得复制任何既有唯一 ownership capability。
 
-例如：
+递归安全性：
 
 ```text
 ShallowCloneable(scalar) = true
@@ -881,6 +907,18 @@ ShallowCloneable(array<T>) = false
 ShallowCloneable(struct S) = every field is ShallowCloneable
 ShallowCloneable(result<T,E>) = T and E are ShallowCloneable
 ```
+
+这里 `ShallowCloneable(scalar)=true` 的唯一含义是 scalar 可以作为 aggregate 内的安全递归叶子；它**不**开放 standalone `shallow(scalar)`。user-level shallow 还必须满足 root 类型本身具有可新建的独立 aggregate ownership root。
+
+因此：
+
+```text
+recursive shallow-safe leaf
+!=
+legal user-level shallow root
+```
+
+合法 user-level shallow root 产生新的 `OwnedTemporary + Available`。若当前物理 ABI 用 pointer 代表该 aggregate，backend 必须建立新的 root storage，而不是 bit-copy pointer。
 
 若 inline child 内部包含 dynamic owner，则 parent 也不可 shallow。
 
@@ -898,7 +936,7 @@ ShallowCloneable(result<T,E>) = T and E are ShallowCloneable
 InlineValue
 OwnedTemporary
 clone(...)（若类型允许）
-shallow(...)（若类型允许）
+shallow(...)（若类型允许且是合法 root）
 move(...)
 null（nullable）
 ```
@@ -1804,7 +1842,7 @@ view_end   : I64
 32 bytes, align 8
 ```
 
-是否能物理复制这 32 bytes 由 HIR 的已解析 value operation 决定；codegen 不得因为 pointer layout 可 memcpy 就绕过 ownership / DeepClone 规则。
+是否能物理复制这 32 bytes 由 HIR 的已解析 value operation 决定；codegen 不得因为 pointer layout 可 memcpy 就绕过 ownership / DeepClone / ShallowClone 规则。
 
 ## 31.3 Parameter passing
 
@@ -2022,7 +2060,9 @@ Null
 
 codegen 不能通过“这个表达式看起来像 constructor / malloc”重新判断 transfer。
 
-对显式 `DeepClone`，HIR 同样必须冻结 clone capability/plan；标量 clone 固化为 InlineValue，动态 ownership-bearing clone 固化为 OwnedTemporary，后端不得按物理表示重新分类。
+对显式 `DeepClone`，HIR 必须冻结 clone capability/plan；标量 clone 固化为 InlineValue，dynamic ownership-bearing clone 固化为 OwnedTemporary，后端不得按物理表示重新分类。
+
+对显式 `ShallowClone`，HIR 必须冻结递归 `ShallowClonePlan` 与 root legality。合法 user-level shallow 一律固化为 `OwnedTemporary + Available`；`Inline` 只允许作为递归 plan 叶，不能被后端提升成 standalone shallow root。
 
 ## 34.2 Ownership facts
 
@@ -2196,7 +2236,7 @@ v1 明确不提供。
 16. ptr<T> / ptr<T>? type + static relation rules
 ```
 
-第 5 项可以按独立、完整的纵切逐个落地，但每个操作一旦公开，就必须同时具备 semantic resolution、resolved HIR、fail-closed validation 与真实 codegen 行为；不能只加入语法壳。
+第 5 项可以按独立、完整的纵切逐个落地，但每个操作一旦公开，就必须同时具备 semantic resolution、resolved HIR、fail-closed validation 与真实 codegen 行为；不能只加入语法壳。`ShallowCloneable` 的递归 leaf predicate 与 user-level shallow-root legality 必须由同一 sema owner 统一裁决，不能让 parser/backend 另建类型白名单。
 
 ## 38.2 ABI / codegen 基础重构
 
@@ -2284,8 +2324,10 @@ bounds / provenance / raw-init 必要时可 runtime check
 move 消费 ownership capability
 dynamic ownership-bearing clone 创建独立 owner
 InlineValue clone 保持 InlineValue 且不产生 ownership capability
-shallow 只在不会复制 ownership capability 时合法
-ptr<T> 当前不可 DeepClone
+ShallowCloneable(scalar) 只表示递归 safe leaf，不开放 shallow(scalar)
+合法 shallow aggregate root 创建新的 OwnedTemporary + Available
+shallow backend 不得通过复制旧 aggregate pointer 制造两个 owner
+ptr<T> 当前不可 DeepClone / ShallowClone
 
 普通用户对象图只包含 owning edges
 raw allocation 可以部分初始化
