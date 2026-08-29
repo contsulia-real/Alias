@@ -236,18 +236,7 @@ impl Checker {
                 }
                 match rt {
                     Ty::Struct(s) => {
-                        let info = &self.structs[&s];
-                        let Some((index, field)) = info
-                            .fields
-                            .iter()
-                            .enumerate()
-                            .find(|(_, field)| field.name == *name)
-                        else {
-                            return Err(AliasError {
-                                msg: format!("结构体 {s} 没有字段 '{name}'"),
-                                span: *span,
-                            });
-                        };
+                        let (index, field) = self.struct_field(&s, name, *span)?;
                         let ty = field.ty.clone();
                         self.field_indices.insert(Self::expr_key(e), index);
                         Ok(ty)

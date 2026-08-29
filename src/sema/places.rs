@@ -69,19 +69,7 @@ impl Checker {
                 span,
             });
         };
-        let info = &self.structs[&struct_name];
-        let Some((field_index, field_info)) = info
-            .fields
-            .iter()
-            .enumerate()
-            .find(|(_, candidate)| candidate.name == field)
-            .map(|(index, field)| (index, field.clone()))
-        else {
-            return Err(AliasError {
-                msg: format!("结构体 {struct_name} 没有字段 '{field}'"),
-                span,
-            });
-        };
+        let (field_index, field_info) = self.struct_field(&struct_name, field, span)?;
         if !field_info.mutable {
             return Err(AliasError {
                 msg: format!("'{field}' 是 val 字段, 不可赋值"),

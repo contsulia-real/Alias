@@ -1,6 +1,6 @@
 //! sema::decls — 顶层声明登记与校验。
 //!
-//! 拥有: struct 表构建、扩展方法签名注册、main 校验。
+//! 拥有: struct 表构建、字段 metadata 查询、扩展方法签名注册、main 校验。
 //! 单一命名空间的重名拦截在此收口；用户方法在第一次签名登记时同时分配 MethodId，
 //! 后续 HIR/codegen 不再按接收者名字 + 方法名字重新解析。
 
@@ -66,6 +66,32 @@ impl Checker {
         }
         self.structs.insert(sd.name.clone(), StructInfo { fields });
         Ok(())
+    }
+
+    /// struct 字段名字解析的唯一 metadata owner。字段读取与 Place 写入必须都走这里；
+    /// 否则字段索引、类型和不存在字段的诊断会在两个语义路径中漂移。
+    pub(super) fn struct_field(
+        &self,
+        struct_name: &str,
+        field_name: &str,
+        span: Span,
+    ) -> AliasResult<(usize, FieldInfo)> {
+        let info = self.structs.get(struct_name).ok_or_else(|| AliasError {
+            msg: format!("内部 sema 不变式被破坏: 结构体类型 {struct_name} 未登记"),
+            span,
+        })?;
+        let Some((index, field)) = info
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name == field_name)
+        else {
+            return Err(AliasError {
+                msg: format!("结构体 {struct_name} 没有字段 '{field_name}'"),
+                span,
+            });
+        };
+        Ok((index, field.clone()))
     }
 
     /// 扩展函数定义: pub? func <Ret> <ReceiverType>.<name> = (params) -> 体。
