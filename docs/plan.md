@@ -2,19 +2,27 @@
 
 ## 0. 文档状态
 
-本文定义 Alias 下一阶段的内存、所有权、借用、销毁、raw allocation 与 pointer 语义设计。
+本文定义 Alias 下一阶段的内存、所有权、借用、销毁、raw allocation 与 pointer 语义及其当前目标 ABI。
 
 本文不是对当前实现的兼容说明。当前实现中与本文冲突、语义错误、仅为历史阶段服务或无法支撑本文不变量的结构都可以重构或删除。
 
-本文的目标是先冻结**语言语义与编译器合同**，再决定具体机器表示。
+本文先冻结语言语义与编译器合同，再由实现服从这些合同。现有“一切复杂值都是一个 I64 word”之类实现假设不是长期约束。
 
-当前唯一明确保留为未决设计闸门的是：
+`ptr<T>` 的 runtime representation 与当前 Windows x64 ABI 已在本文中冻结：
 
 ```text
-ptr<T> 的最终 runtime representation 与 ABI
+4-word inline fat capability pointer
+= provenance + address + view_start + view_end
 ```
 
-在该闸门关闭前，sema、HIR 与中间层不得假设 pointer 是一个机器字、两个机器字、裸地址、句柄或其它具体表示。
+当前目标 `x86_64-pc-windows-msvc` 下：
+
+```text
+size(ptr<T>)  = 32 bytes
+align(ptr<T>) = 8 bytes
+```
+
+`ptr<T>?` 使用同一表示，不增加额外 tag。
 
 ---
 
@@ -33,6 +41,7 @@ Alias 使用编译期可验证的 ownership / borrow 模型，同时保留受控
 * 支持受控的 `malloc` / `free`、pointer arithmetic、`refer` / `deref` / `reinterpret`；
 * 普通语言对象由编译器自动管理销毁；
 * raw allocation 可以部分初始化，但初始化状态必须可验证；
+* pointer provenance / bounds 是正式语言语义，不退化成裸地址语义；
 * sema 决定最终内存语义，HIR 固化结果，codegen 不重新猜测。
 
 ---
@@ -43,8 +52,8 @@ Alias 的实现必须严格区分：
 
 ```text
 compile-time ownership capability
-runtime allocation identity / provenance
-runtime initialization metadata
+runtime storage identity / provenance
+runtime raw-initialization metadata
 ```
 
 它们不是同一个概念。
@@ -68,27 +77,43 @@ Consumed
 
 具体内部表示由实现决定，但 capability 不可复制。
 
-## 2.2 Runtime allocation identity / provenance
+ownership capability **不编码进 `ptr<T>` 的机器 bit pattern**。
 
-一次真实程序执行中的每次 allocation 都具有自己的 runtime identity / provenance。
+因此 allocation-root owner pointer 与 borrowed pointer view 可以拥有完全相同的 32-byte pointer representation，但只有前者在静态语义上携带可消费 ownership capability。
 
-同一个 `malloc` 语法节点可以在循环、递归或多次调用中产生任意多个不同 allocation。
+## 2.2 Runtime storage identity / provenance
+
+一次真实程序执行中的每个可寻址 storage root 都具有 canonical runtime storage identity / provenance。
+
+storage root 可以来自：
+
+```text
+raw malloc allocation
+address-taken stack/local storage
+global/static storage
+heap language object
+其它具有稳定地址范围的 storage root
+```
+
+同一个 `malloc` 语法节点可以在循环、递归或多次调用中产生任意多个不同 runtime identity。
 
 因此：
 
 ```text
 compile-time ownership capability
 !=
-runtime allocation identity
+runtime storage identity
 ```
 
-sema 只能静态决定 ownership flow、pointer operation 与哪些 runtime check 必须存在；不能把某个动态 allocation identity 当成编译期常量。
+sema 只能静态决定 ownership flow、pointer operation 与哪些 runtime check 必须存在；不能把某个动态 storage identity 当成编译期常量。
 
-## 2.3 Runtime initialization metadata
+## 2.3 Runtime raw-initialization metadata
 
 raw allocation 允许部分初始化和 hole，因此运行时可能需要维护哪些 byte range 当前承载合法对象。
 
-这属于 allocation runtime metadata，不属于用户类型，也不是 ownership capability 本身。
+这属于 raw allocation 的 runtime metadata，不属于用户类型，也不是 ownership capability 本身。
+
+普通已经由语言静态布局管理的 local / struct / array object 不因为可 `refer` 就自动需要 raw initialized-region table。
 
 ---
 
@@ -145,7 +170,7 @@ BorrowedValue
 Null
 ```
 
-pointer value 仍属于 Value，但其最终机器表示由 pointer ABI 设计闸门决定。
+pointer value 仍属于 Value。
 
 ### InlineValue
 
@@ -278,7 +303,7 @@ expression temporary
 closure capture
 ```
 
-这意味着 Alias v1 不提供通过普通字段/容器长期保存 parent pointer、observer pointer、weak back-reference 等 stored borrow 能力。
+Alias v1 不提供通过普通字段/容器长期保存 parent pointer、observer pointer、weak back-reference 等 stored borrow 能力。
 
 未来如果需要此类能力，必须作为独立设计引入稳定 handle / weak handle 或新的受控机制，不能偷偷放宽普通 field 的 relation。
 
@@ -420,11 +445,7 @@ malloc allocation root
 
 都统一为 `OwnedTemporary`，进入 owning target 时直接 transfer。
 
-不存在：
-
-```text
-malloc 专属 transfer 规则
-```
+不存在 `malloc` 专属 transfer 规则。
 
 例如：
 
@@ -707,7 +728,7 @@ Global(binding)
 
 v1 不允许同一个函数的 borrowed return 在不同路径最终依赖多个不同 source。
 
-例如若：
+若：
 
 ```text
 then -> borrow(param0)
@@ -774,16 +795,43 @@ Destroy
 |---|---|---|---|---|---|
 | integer / float / bool | 值复制 | 不提供 | 等价普通值传递 | 可借用 Place | no-op |
 | `string` | 独立复制内容 | 不允许 | 允许 | 允许 | 销毁内容 storage |
-| `struct` | 递归 clone owning fields | 仅当 `ShallowCloneable` | 允许 | 允许 | owning fields 逆声明顺序销毁 |
-| `array<T>` | 复制容器与所有元素 | 不允许 | 允许 | 允许 | elements 逆索引销毁后释放 backing |
-| `result<T,E>` | clone active payload | 仅当 payload 可 shallow | 允许 | 允许 | 销毁 active payload |
+| `struct` | 仅当所有 owning fields 可 deep clone | 仅当 `ShallowCloneable` | 允许 | 允许 | owning fields 逆声明顺序销毁 |
+| `array<T>` | 仅当 `DeepCloneable(T)` | 不允许 | 允许 | 允许 | elements 逆索引销毁后释放 backing |
+| `result<T,E>` | 仅当 active payload 类型可 deep clone | 仅当 payload 可 shallow | 允许 | 允许 | 销毁 active payload |
 | `iterator<T>` | 不允许 | 不允许 | 允许 | 允许 | 销毁自身状态，不拥有 array elements |
 | closure / executable function value | 不允许 | 不允许 | 允许 | 允许 | 结束自身 capture obligations / storage |
 | `T?` | 继承 payload 能力 | 继承 payload 能力 | 允许 | 允许 | non-null 时销毁 payload |
-| allocation-root `ptr<T>` | **暂不开放普通 DeepClone** | 不允许 | 允许 | 允许 | 由 `free` 或 parent destruction 结束 allocation |
-| borrowed `ptr<T>` view | 不拥有 allocation | 不允许 | 不存在 ownership move | 允许 | 不销毁 allocation |
+| `ptr<T>` | **不开放普通 DeepClone** | 不允许 | owning relation 时允许 | 允许 | root owner 由 `free` / parent destruction 结束；borrowed view 不销毁 storage |
 
-## 14.1 `ShallowCloneable(T)`
+## 14.1 `DeepCloneable(T)`
+
+DeepClone capability 必须递归计算。
+
+至少：
+
+```text
+DeepCloneable(scalar) = true
+DeepCloneable(string) = true
+DeepCloneable(ptr<T>) = false
+DeepCloneable(array<T>) = DeepCloneable(T)
+DeepCloneable(struct S) = every owning field is DeepCloneable
+DeepCloneable(result<T,E>) = T and E are DeepCloneable
+DeepCloneable(T?) = DeepCloneable(T)
+```
+
+raw pointer allocation 的任意 deep clone 牵涉 holes、heterogeneous initialized regions、pointer provenance、interior references 与对象图复制策略；在未来单独设计前不开放。
+
+因此：
+
+```alias
+val ptr<T> b = a
+```
+
+如果 `a` 是稳定 owning pointer Place 且该语境需要普通 DeepClone，则编译失败。用户必须显式 move 或建立 borrow。
+
+任何包含 owning `ptr<T>` 的 aggregate 也会据此失去普通 DeepClone 能力，除非未来为 raw allocation 定义正式 clone 语义。
+
+## 14.2 `ShallowCloneable(T)`
 
 shallow capability 必须递归计算。
 
@@ -796,30 +844,13 @@ shallow capability 必须递归计算。
 ```text
 ShallowCloneable(scalar) = true
 ShallowCloneable(string) = false
+ShallowCloneable(ptr<T>) = false
 ShallowCloneable(array<T>) = false
 ShallowCloneable(struct S) = every field is ShallowCloneable
 ShallowCloneable(result<T,E>) = T and E are ShallowCloneable
 ```
 
 若 inline child 内部包含 dynamic owner，则 parent 也不可 shallow。
-
-## 14.2 allocation-root pointer clone gate
-
-raw allocation 的任意 deep clone 牵涉：
-
-```text
-holes
-heterogeneous initialized regions
-pointer provenance
-interior references
-对象图复制策略
-```
-
-在单独完成该语义设计前，allocation-root `ptr<T>` 不开放普通 `DeepClone`。
-
-因此对稳定 owning raw pointer Place 使用普通 `=` 时，若该操作需要 DeepClone，应编译拒绝；用户必须显式 move 或建立 borrow。
-
-这与 pointer runtime ABI 未决是两个不同的设计闸门。
 
 ---
 
@@ -834,7 +865,7 @@ interior references
 ```text
 InlineValue
 OwnedTemporary
-clone(...)
+clone(...)（若类型允许）
 shallow(...)（若类型允许）
 move(...)
 null（nullable）
@@ -916,7 +947,7 @@ array elements 按索引逆序销毁。
 
 # 17. Raw allocation
 
-`malloc<T>(count)` 创建一段独立 provenance 的 raw allocation。
+`malloc<T>(count)` 创建一段独立 storage provenance 的 raw allocation。
 
 `malloc<T>()` 等价于 `malloc<T>(1)`。
 
@@ -925,7 +956,7 @@ array elements 按索引逆序销毁。
 成功：
 
 ```text
-OwnedTemporary<allocation root pointer>
+OwnedTemporary<allocation-root ptr<T>>
 ```
 
 失败：
@@ -938,6 +969,8 @@ null
 
 `count * stride(T)` 必须按数学精确结果检查，不能先在 Alias 整数宽度内回绕。
 
+为了保证合法 `ptr<T>` difference 可以由 `i64` 表示，初始 element count 不得超过 `i64::MAX`；违反时同样视为 allocation failure。
+
 新 allocation 初始全部为：
 
 ```text
@@ -946,11 +979,20 @@ Uninitialized raw storage
 
 `malloc` 不自动构造 `T`。
 
+成功时初始 pointer view：
+
+```text
+provenance = new StorageDescriptor
+address    = allocation base
+view_start = allocation base
+view_end   = allocation base + count * stride(T)
+```
+
 ---
 
 # 18. Allocation root ownership
 
-allocation ownership 属于整个 allocation，不属于某个 element 或当前 pointer offset。
+allocation ownership 属于整个 raw allocation，不属于某个 element 或当前 pointer offset。
 
 独立 allocation root owner：
 
@@ -962,6 +1004,8 @@ allocation ownership 属于整个 allocation，不属于某个 element 或当前
 一旦 allocation root ownership transfer 进 struct field、container payload 或其它 owning parent，该 allocation 变成 parent ownership subtree 的 child，由 parent destruction / replacement 管理。
 
 borrowed interior pointer 永远不能 `free`。
+
+pointer arithmetic、`refer`、`reinterpret` 都不能因为最终 address 回到 allocation base 而重新制造 allocation-root ownership capability。
 
 ---
 
@@ -998,14 +1042,64 @@ consumed owner
 
 ```text
 1. destroy 所有仍 live 的 initialized regions
-2. deallocate allocation storage
-3. 标记 allocation identity dead
-4. consume ownership capability
+2. deallocate raw allocation storage
+3. destroy raw initialization metadata
+4. end / release the StorageDescriptor
+5. consume ownership capability
 ```
+
+不需要在 pointer bit pattern 中维护 `is_owner` flag；`Free` HIR 只有在 sema 已证明 root ownership capability 后才能生成。
 
 ---
 
-# 20. Raw allocation initialization metadata
+# 20. StorageDescriptor 与 provenance
+
+每个可寻址 storage root 在其可被 pointer 观察的生命周期内都有一个 canonical `StorageDescriptor` identity。
+
+pointer 的 `provenance` lane 保存该 descriptor 的稳定地址/handle；在当前 Windows x64 ABI 中它是一个 64-bit runtime pointer value。
+
+概念职责至少包括：
+
+```text
+StorageDescriptor {
+    base
+    extent
+    storage identity / provenance
+    storage kind
+    optional raw-initialization metadata
+}
+```
+
+具体 descriptor 内部 byte layout **不是用户语言 ABI**，可以由 runtime/codegen 在保持本文语义合同的前提下调整。
+
+关键不变量：
+
+* 一个 live storage root 只有一个 canonical descriptor identity；
+* subplace / subview 不创建新的 provenance identity；
+* `refer(object.field)` 继续使用 object/root 的同一 descriptor，只收窄 pointer view；
+* descriptor identity 在所有合法 derived pointer 生命周期内稳定；
+* descriptor 生命周期不得短于任何合法 pointer loan；
+* pointer equality / difference / ordering 使用 descriptor identity 判断 provenance，而不是仅看机器地址。
+
+## 20.1 非 raw storage
+
+对于 address-taken local / stack storage，descriptor 可以由编译器在 frame 内建立稳定地址的内部记录；不要求 heap 分配 descriptor。
+
+如果一个原本只存在于 SSA 的 Place 被 `refer`，codegen 必须把它 materialize 到具有稳定地址的 storage，并为该 storage root 建立 canonical descriptor。
+
+对于 global/static storage，可以使用静态 descriptor。
+
+对于 heap language object，可以使用与该 object 生命周期绑定的 descriptor。
+
+## 20.2 Raw allocation descriptor
+
+`malloc` 创建的 raw allocation 使用 `StorageDescriptor` 作为其 canonical provenance root，并关联 raw initialized-region metadata。
+
+在静态 borrow checker 已经保证不存在 live pointer loan 的前提下，`free` 可以随 allocation 一并结束 descriptor 生命周期；不要求永久泄漏 descriptor 来捕捉本应被静态禁止的 use-after-free。
+
+---
+
+# 21. Raw allocation initialization metadata
 
 因为 raw allocation 支持：
 
@@ -1018,20 +1112,7 @@ destroy -> hole
 reinterpret 后建立新的 typed object
 ```
 
-运行时必须抽象地存在 allocation descriptor。
-
-最终物理布局未冻结，但语义上至少包含：
-
-```text
-AllocationDescriptor {
-    base
-    extent
-    alignment
-    allocation identity / provenance
-    alive
-    initialized regions
-}
-```
+raw allocation descriptor 必须能够关联 initialized-region metadata。
 
 每个 live initialized region 概念上包含：
 
@@ -1047,7 +1128,7 @@ InitializedRegion {
 
 `runtime type descriptor` 是编译器/runtime 内部 identity，不是源码类型名字符串。
 
-## 20.1 Region invariant
+## 21.1 Region invariant
 
 不同 live initialized object region 不允许 byte overlap。
 
@@ -1067,19 +1148,17 @@ InitializedRegion {
 [4, 8) Initialized<u32>
 ```
 
-## 20.2 Dynamic metadata
+## 21.2 Dynamic metadata
 
 若具体 offset / region 只能在运行时知道，编译器可以发射受控 runtime metadata check。
-
-这不等于 Alias 存在 `unsafe`。
 
 check 失败必须 runtime abort，不能产生未定义行为。
 
 ---
 
-# 21. Raw object lifecycle
+# 22. Raw object lifecycle
 
-## 21.1 First write
+## 22.1 First write
 
 对合法 uninitialized typed range 首次写入：
 
@@ -1089,7 +1168,7 @@ check bounds/alignment/no-overlap
 -> insert Initialized<T> region
 ```
 
-## 21.2 Replacement
+## 22.2 Replacement
 
 若目标完整对应一个现有 `Initialized<T>`：
 
@@ -1102,7 +1181,7 @@ check bounds/alignment/no-overlap
 
 不能用 replacement 把 `Initialized<S>` 直接冒充为 `Initialized<T>`。
 
-## 21.3 Move-out
+## 22.3 Move-out
 
 从 raw initialized object 完整 move-out：
 
@@ -1113,7 +1192,7 @@ Initialized<T>
 -> moved object 作为 OwnedTemporary 继续存在
 ```
 
-## 21.4 Destroy
+## 22.4 Destroy
 
 显式/隐式 destroy raw object：
 
@@ -1124,7 +1203,7 @@ Initialized<T>
 -> byte range becomes Uninitialized
 ```
 
-## 21.5 Free-time destroy order
+## 22.5 Free-time destroy order
 
 raw allocation 中 still-live initialized regions 按：
 
@@ -1132,15 +1211,13 @@ raw allocation 中 still-live initialized regions 按：
 init_sequence 的逆序
 ```
 
-销毁。
-
-不是按地址顺序。
+销毁，而不是按地址顺序。
 
 同一 byte range 被 destroy / move-out 后重新初始化，会获得新的 `init_sequence`。
 
 ---
 
-# 22. Pointer semantic model
+# 23. Pointer 类型与冻结 ABI
 
 正式 pointer 类型：
 
@@ -1164,70 +1241,133 @@ BorrowedPtr<T>
 
 同一个 `ptr<T>` 静态类型的 Value 可以由 sema 分别判定为 allocation-root owner 或 borrowed pointer view。
 
-## 22.1 Pointer semantic facts
+## 23.1 语义字段
 
-语言语义上的 pointer 至少关联：
+pointer value 的正式语义由四个 runtime lane 表达：
 
 ```text
-runtime allocation provenance
-allocation bounds
-view bounds
-current offset/address
-typed view T
-nullness
-是否携带 allocation-root ownership capability
+Ptr<T> {
+    provenance
+    address
+    view_start
+    view_end
+}
+```
+
+`T` 是静态类型，不进入 runtime pointer value。
+
+ownership capability 是 sema/HIR 静态事实，也不进入 pointer runtime value。
+
+## 23.2 当前 Windows x64 物理布局
+
+当前目标 `x86_64-pc-windows-msvc`：
+
+```text
+offset  0: provenance   8 bytes
+offset  8: address      8 bytes
+offset 16: view_start   8 bytes
+offset 24: view_end     8 bytes
+
+size  = 32 bytes
+align = 8 bytes
+```
+
+概念上是：
+
+```text
+provenance : *StorageDescriptor
+address    : u64
+view_start : u64
+view_end   : u64
+```
+
+其它目标若未来存在，可以定义与目标 pointer width 匹配的等价 4-word ABI；当前规范只冻结 Windows x64 的 32-byte 形式。
+
+## 23.3 Pointer invariant
+
+任何 non-null live pointer 必须满足：
+
+```text
+provenance != 0
+view_start <= address <= view_end
+StorageDescriptor.base <= view_start
+view_end <= StorageDescriptor.base + StorageDescriptor.extent
 ```
 
 其中：
 
 ```text
-runtime allocation provenance / bounds
+address == view_end
 ```
 
-可能完全是运行时值。
+表示 one-past-end。
 
-sema 不把它们伪装成编译期常量。
+对于当前 typed view，合法 pointer position 必须位于该 view 自己的 element lattice 上：
+
+```text
+address = view_start + k * stride(T)
+```
+
+合法 pointer operation 不能扩大 `[view_start, view_end]`。
+
+## 23.4 为什么不是 thin pointer / handle
+
+Alias pointer 的 per-value view bounds 不能只由机器 address 唯一恢复；同一 address 可以存在不同合法 view。
+
+因此不采用：
+
+```text
+8-byte raw address + global side table
+```
+
+也不采用：
+
+```text
+8-byte capability-table handle
+```
+
+后者会把普通 pointer arithmetic / subview 变成 capability entry 生命周期管理问题。
+
+4-word inline fat pointer 允许 pointer arithmetic 直接在 SSA lanes 中完成，不为每次派生 pointer 分配 runtime object。
 
 ---
 
-# 23. Pointer ABI：未决设计闸门
+# 24. Nullable pointer ABI
 
-当前尚未冻结 `ptr<T>` 的最终机器表示。
+`ptr<T>?` 与 `ptr<T>` 使用相同 32-byte storage。
 
-候选方向包括但不限于：
-
-```text
-fat pointer
-thin pointer + runtime side table
-capability handle + offset
-其它满足语义不变量的表示
-```
-
-在该设计关闭前：
-
-* `size(ptr<T>)` 的最终具体机器值不作为长期承诺；
-* codegen ABI 不得提前假定 pointer 等于裸 `I64`；
-* struct layout / function ABI 的 pointer 部分不得通过临时实现变成语言规范；
-* HIR 只表达 pointer semantic operation，不表达具体寄存器布局；
-* runtime metadata 的最终存放位置不冻结。
-
-pointer ABI 的后续设计必须同时满足：
+canonical null：
 
 ```text
-provenance
-bounds
-view bounds
-one-past-end
-nullable
-runtime checks
-allocation identity
-stored owning pointer capability
-borrowed derived pointer
+provenance = 0
+address    = 0
+view_start = 0
+view_end   = 0
 ```
+
+判断 pointer nullness 以：
+
+```text
+provenance == 0
+```
+
+为 canonical 判定。
+
+所有合法 non-null pointer 必须 `provenance != 0`。
+
+因此：
+
+```text
+size(ptr<T>)  = 32
+size(ptr<T>?) = 32
+align         = 8
+```
+
+nullable narrowing 不改变 pointer bit representation，只改变静态 nullness facts。
 
 ---
 
-# 24. `refer`
+# 25. `refer`
 
 ```alias
 refer(place)
@@ -1242,17 +1382,29 @@ Place
 -> BorrowedValue<ptr<T>>
 ```
 
+设 source Place 的地址为 `A`，其 canonical storage root descriptor 为 `D`，则单个 T Place 的基本 view：
+
+```text
+provenance = D
+address    = A
+view_start = A
+view_end   = A + stride(T)
+```
+
 `refer`：
 
 * 不产生 allocation ownership；
 * 不延长 owner 生命周期；
 * 可以指向合法的 uninitialized typed Place；
-* 建立的 pointer view 受来源 Place / allocation 的 bounds 约束；
+* 不创建新的 storage provenance identity；
+* 建立的 pointer view 受来源 Place / root storage bounds 约束；
 * 不能通过 owning field / container element stored。
+
+对 subplace 建立 pointer 时仍复用 root descriptor；view bounds 负责表达 subplace capability 边界。
 
 ---
 
-# 25. `deref` 与 indexing
+# 26. `deref` 与 indexing
 
 ```alias
 deref(ptr)
@@ -1279,9 +1431,19 @@ pointer 有效不等于 pointee initialized。
 
 因此一个 pointer 可以合法指向 Uninitialized raw storage；只有读取、borrow object、member access、method call、move object 等需要一个已存在 `T` object 的操作才要求 `Initialized<T>`。
 
+对 `deref(p)` 至少要求：
+
+```text
+p.address < p.view_end
+p.address 满足 align(T)
+[p.address, p.address + size(T)) 位于 view / storage bounds 内
+```
+
+raw allocation 上还必须满足相应 Initialized<T> identity 规则。
+
 ---
 
-# 26. Pointer arithmetic
+# 27. Pointer arithmetic
 
 允许：
 
@@ -1292,11 +1454,37 @@ ptr - integer
 
 整数单位是 `T` element stride，不是 byte。
 
-pointer arithmetic：
+设：
 
+```text
+delta = integer * stride(T)
+new_address = address +/- delta
+```
+
+乘法与地址计算必须 checked，不能发生整数回绕。
+
+合法结果必须满足：
+
+```text
+view_start <= new_address <= view_end
+```
+
+结果：
+
+```text
+result.provenance = source.provenance
+result.address    = new_address
+result.view_start = source.view_start
+result.view_end   = source.view_end
+```
+
+因此 pointer arithmetic：
+
+* 不产生新的 storage provenance；
 * 不产生新的 allocation ownership；
 * 不因为 offset 回到 0 而获得 ownership；
 * 不扩大来源 view bounds；
+* 保持原 typed element lattice；
 * 结果是 derived non-owning pointer view。
 
 如果来源是 owning pointer Place，则 owner 仍然留在原 Place，派生结果是 borrow。
@@ -1305,44 +1493,80 @@ pointer arithmetic：
 
 若某个 unanchored `OwnedTemporary` allocation root 无法在派生 view 生命周期内保持 owner，则该 borrow 不得逃逸；编译器必须拒绝悬空派生结果。
 
+静态能证明 arithmetic 越界时编译失败；只能动态确定时插入 runtime bounds check，失败时 abort。
+
 ---
 
-# 27. Pointer difference / comparison / one-past-end
+# 28. Pointer difference / comparison / one-past-end
 
-## 27.1 Difference
+## 28.1 Equality
 
-同一 runtime allocation 内两个 `ptr<T>` 可以做差。
-
-结果类型：
-
-```alias
-i64
-```
-
-结果：
-
-```text
-(offset(p) - offset(q)) / stride(T)
-```
-
-若 sema 无法证明 runtime provenance 相同，但该操作仍可能合法，则必须插入 provenance check；运行时不同 allocation 时 abort。
-
-## 27.2 Equality
+对类型兼容的 pointer：
 
 ```alias
 p == q
 p != q
 ```
 
-基于：
+pointer identity 基于：
 
 ```text
-provenance + position
+provenance + address
 ```
 
-而不是只比较裸机器地址。
+因此 runtime 比较：
 
-## 27.3 Ordering
+```text
+p.provenance == q.provenance
+&&
+p.address == q.address
+```
+
+`view_start / view_end` 不参与 equality。
+
+这意味着同 provenance、同 address、但 capability bounds 不同的两个 pointer 仍然地址相等；它们是否能 dereference 由各自 view bounds 决定。
+
+两个机器地址数值偶然相同、但 provenance 不同的 pointer 不相等。
+
+## 28.2 Difference
+
+两个类型兼容的 `ptr<T>` 做差：
+
+```alias
+p - q
+```
+
+结果静态类型固定为：
+
+```alias
+i64
+```
+
+必须满足：
+
+```text
+p.provenance == q.provenance
+```
+
+若 sema 无法静态证明，则插入 runtime provenance check；不同 storage provenance 时 abort。
+
+随后要求：
+
+```text
+(p.address - q.address) % stride(T) == 0
+```
+
+否则二者不位于同一 T element lattice distance 上，runtime abort。
+
+最终结果：
+
+```text
+(p.address - q.address) / stride(T)
+```
+
+必须可由 `i64` 表示。
+
+## 28.3 Ordering
 
 ```alias
 p < q
@@ -1351,11 +1575,19 @@ p > q
 p >= q
 ```
 
-只对同一 allocation 内的位置有定义；无法静态证明时需要 runtime provenance check。
+只对同一 storage provenance 内的位置有定义。
 
-## 27.4 One-past-end
+无法静态证明 provenance 相同时插入 runtime check；不同 provenance 时 abort。
 
-pointer 可以处于 view 的 one-past-end 位置。
+通过 provenance check 后按 `address` 顺序比较。
+
+## 28.4 One-past-end
+
+pointer 可以处于：
+
+```text
+address == view_end
+```
 
 允许：
 
@@ -1363,6 +1595,7 @@ pointer 可以处于 view 的 one-past-end 位置。
 comparison
 difference
 loop sentinel
+reinterpret 成零长度后继 view
 ```
 
 禁止：
@@ -1374,18 +1607,19 @@ write
 borrow pointee
 ```
 
-超过 one-past-end 的 pointer position 非法。
+超过 `view_end` 的 pointer position 非法。
 
 ---
 
-# 28. Bounds / alignment / layout
+# 29. Bounds / alignment / type layout
 
 pointer arithmetic、index、deref、refer、reinterpret 必须服从：
 
 ```text
-allocation bounds
-view bounds
+storage root bounds
+pointer view bounds
 alignment
+typed element lattice
 ```
 
 若静态可证明失败，则 compile error。
@@ -1410,33 +1644,76 @@ stride(T) > 0
 
 `unit` 不是 storable value type。
 
+当前 Windows x64：
+
+```text
+size(ptr<T>)   = 32
+align(ptr<T>)  = 8
+stride(ptr<T>) = 32
+```
+
+`ptr<T>?` 相同。
+
 ---
 
-# 29. `reinterpret<T>`
+# 30. `reinterpret<T>`
 
 ```alias
 reinterpret<T>(ptr)
 ```
 
-建立同一 allocation 上新的 typed pointer view。
+建立同一 storage provenance 上新的 typed pointer view。
 
 它：
 
-* 不创建 allocation；
+* 不创建 storage root；
 * 不创建 object；
 * 不创建 ownership；
 * 不 move；
 * 不 deep clone；
 * 不 shallow clone；
-* 不改变 allocation provenance。
+* 不改变 provenance。
 
-`reinterpret` 必须满足目标 `T` 的 alignment 与当前 view / allocation bounds。
+## 30.1 Capability narrowing
 
-## 29.1 Typed view 与 initialized object 分离
+`reinterpret<T>` 不扩大 source view，而是从 source 当前 address 开始建立新的 typed lattice。
+
+设：
+
+```text
+current   = source.address
+available = source.view_end - current
+count     = floor(available / stride(T))
+```
+
+成功结果：
+
+```text
+result.provenance = source.provenance
+result.address    = current
+result.view_start = current
+result.view_end   = current + count * stride(T)
+```
+
+因此 reinterpret 后：
+
+```text
+result.address = result.view_start
+```
+
+新 view 的 element lattice origin 明确，不需要额外第五个 pointer lane。
+
+source pointer 本身不被修改。
+
+尾部不足一个完整 `T` stride 的 bytes 不进入新的 typed pointer view。
+
+`current` 必须满足 `align(T)`；若静态不能确定，可以 runtime check，失败时 abort。
+
+## 30.2 Typed view 与 initialized object 分离
 
 建立 `ptr<T>` view 不等于 storage 中已经存在 `Initialized<T>`。
 
-因此仅仅创建 reinterpret view，不因为 view 其它位置存在 `Initialized<S>` 就自动把整个 view 判成非法。
+因此仅仅创建 reinterpret view，不因为原 view 其它位置存在 `Initialized<S>` 就自动把整个新 view 判成非法。
 
 真正形成具体 typed Place 或访问具体 element range 时，才检查该目标 byte range 的 initialization identity。
 
@@ -1454,11 +1731,167 @@ member access / method call as T
 
 要把同一 storage 从 `Initialized<S>` 变为 `Initialized<T>`，必须先正常结束 S 生命周期，使该 range 回到 Uninitialized，再首次写入 T。
 
-`reinterpret` 不能绕过 ownership、initialization、alignment、bounds 或 destruction。
+`reinterpret` 不能绕过 ownership、initialization、alignment、bounds、provenance 或 destruction。
 
 ---
 
-# 30. Nullable
+# 31. Pointer function ABI
+
+`ptr<T>` 是 32-byte aggregate value，不允许继续套用“一个语言值 = 一个 Cranelift scalar Type”的旧抽象。
+
+## 31.1 Expression representation
+
+函数内部 / 表达式 lowering 中，pointer 可以保持为四个 SSA lane：
+
+```text
+provenance : I64
+address    : I64
+view_start : I64
+view_end   : I64
+```
+
+普通 pointer arithmetic / comparison 不要求把 pointer 临时落入 heap object。
+
+## 31.2 Storage representation
+
+写入 local cell、struct field、array element、result payload 等真实 storage 时使用连续：
+
+```text
+32 bytes, align 8
+```
+
+是否能物理复制这 32 bytes 由 HIR 的已解析 value operation 决定；codegen 不得因为 pointer layout 可 memcpy 就绕过 ownership / DeepClone 规则。
+
+## 31.3 Parameter passing
+
+Alias 内部函数 ABI 对 pointer parameter 使用：
+
+```text
+IndirectByValue(32, align 8)
+```
+
+caller：
+
+```text
+1. 建立 caller-owned 32-byte argument temporary
+2. 写入四个 pointer lanes
+3. 传入该 temporary 的地址
+```
+
+callee：
+
+```text
+1. 从 incoming address 读取四个 lanes
+2. 进入本函数 SSA representation
+```
+
+这是语言层 by-value parameter；间接传递只是一种机器 ABI lowering，不把 callee 参数变成 stored borrow，也不允许 callee 通过修改 argument temporary 改写 caller 的语义 Place。
+
+所有 semantic pointer parameter，包括方法接收者在其最终机器签名需要 pointer value 时，都服从同一规则。
+
+## 31.4 Pointer return
+
+pointer return 使用显式 caller-allocated return area：
+
+```text
+ExplicitSRet(32, align 8)
+```
+
+caller：
+
+```text
+allocate 32-byte return area
+pass hidden return-area address
+call
+load four lanes
+```
+
+callee：
+
+```text
+write four lanes into return area
+return normally
+```
+
+不依赖四个独立机器 return register，也不把 pointer 压回 I64 handle。
+
+对于存在显式 sret 的用户函数，当前 Alias internal hidden parameter order 冻结为：
+
+```text
+[sret?, globals, closure_env, explicit machine params...]
+```
+
+无 sret 时仍为：
+
+```text
+[globals, closure_env, explicit machine params...]
+```
+
+该规则是 Alias 内部 ABI，不是 C ABI / 外部 ABI。
+
+## 31.5 Nullable pointer function ABI
+
+`ptr<T>?` 与 `ptr<T>` 完全使用相同 parameter / return ABI；null 只由 canonical zero representation 表达，不增加 discriminant 参数或额外 return tag。
+
+---
+
+# 32. Aggregate / container ABI implications
+
+冻结 32-byte `ptr<T>` 后，当前任何“所有任意值都可以压入 8-byte universal word”的实现假设必须退出长期设计。
+
+## 32.1 Array
+
+`array<T>` backing element storage 必须按：
+
+```text
+stride(T)
+```
+
+前进，而不是固定 8 bytes。
+
+因此：
+
+```text
+array<ptr<T>> element stride = 32
+```
+
+array runtime 可以保留自己的 header / wrapper，但元素物理布局必须由唯一 type-layout owner 决定。
+
+## 32.2 Result
+
+`result<T,E>` 的 payload storage 必须能够容纳实际 active payload。
+
+概念布局至少按：
+
+```text
+payload_size  = max(size(T), size(E))
+payload_align = max(align(T), align(E))
+```
+
+加上 canonical discriminant 与必要 padding 计算。
+
+不能继续假定 payload 永远是单个 8-byte word。
+
+## 32.3 Struct
+
+struct field layout 必须直接消费字段类型的真实：
+
+```text
+size
+align
+```
+
+因此 `ptr<T>` field 占 32 bytes / align 8。
+
+## 32.4 Generic internal storage
+
+任何 closure env、cell、container payload 或其它内部结构，只要语义上能够 inline 保存任意用户 `T`，就不能假定 `T` 必然是一个 I64 word。
+
+实现可以显式选择 typed inline storage 或额外 indirection，但该选择必须由统一 ABI/layout owner 管理，不能分散 magic offsets / fallback。
+
+---
+
+# 33. Nullable 通用语义
 
 nullable 是通用能力：
 
@@ -1492,11 +1925,13 @@ destroy old owned payload
 -> write null
 ```
 
-borrowed nullable slot 从 borrowed T 变为 null只结束/替换 borrow binding，不取得 ownership。
+borrowed nullable slot 从 borrowed T 变为 null 只结束/替换 borrow binding，不取得 ownership。
+
+pointer nullable 的具体无额外 tag ABI 见第 24 节。
 
 ---
 
-# 31. HIR contracts
+# 34. HIR contracts
 
 进入 codegen 前，sema 必须已经把源码操作解析为明确内存语义。
 
@@ -1523,7 +1958,7 @@ Destroy
 
 具体节点命名可由实现调整，但不得退化成 codegen 再看 AST 猜意图。
 
-## 31.1 Value category
+## 34.1 Value category
 
 HIR / typed semantic facts 必须明确区分：
 
@@ -1537,13 +1972,15 @@ Null
 
 codegen 不能通过“这个表达式看起来像 constructor / malloc”重新判断 transfer。
 
-## 31.2 Ownership facts
+## 34.2 Ownership facts
 
 Move / Free / ReturnTransfer 等消费操作必须携带 sema 已验证的 capability 事实。
 
 Move / Replace 必须在 HIR 前完成 overlap 检查。
 
-## 31.3 Borrow facts
+pointer 的 32-byte physical representation 不包含 ownership bit；后端不能根据 `address == descriptor.base` 等条件推断 owner。
+
+## 34.3 Borrow facts
 
 HIR 前必须已经完成：
 
@@ -1558,21 +1995,23 @@ borrowed return source
 
 codegen 不执行 borrow checker。
 
-## 31.4 Pointer facts
+## 34.4 Pointer facts
 
-HIR 表达的是：
+HIR 表达：
 
 ```text
-需要什么 pointer semantic operation
-需要哪些 runtime provenance/bounds/init checks
-结果是 owner 还是 derived borrow
+pointer semantic operation
+result relation / derived borrow
+需要的 runtime provenance/bounds/alignment/init checks
 ```
 
-不要求 sema 提供某个具体 runtime allocation id 常量。
+运行时 pointer value 由冻结的四 lane ABI 实现。
+
+sema 不要求提供某个具体 runtime StorageDescriptor 地址常量；动态 provenance 仍然可以完全是 runtime value。
 
 ---
 
-# 32. 编译期必须阻止
+# 35. 编译期与运行时必须阻止
 
 Alias 的静态 ownership / borrow 层必须阻止：
 
@@ -1590,6 +2029,7 @@ ordinary struct field partial move-out
 ordinary array element arbitrary move-out hole
 ownership cycle
 illegal shallow clone
+illegal deep clone of ptr-containing ownership resource
 move source/target overlap
 independent malloc root owner leaking at scope end
 ```
@@ -1598,12 +2038,13 @@ Alias 的静态 + runtime memory safety 层共同必须阻止：
 
 ```text
 deref one-past-end
-pointer out of bounds
-invalid pointer ordering/difference across allocations
+pointer out of view bounds
+pointer view escaping storage root bounds
+invalid pointer ordering/difference across provenance
+non-integral T element distance in pointer subtraction
 read uninitialized raw object
 initialized region overlap
 reinterpret type confusion
-use of deallocated allocation provenance
 misaligned typed access
 free borrowed/interior/non-owner pointer
 ```
@@ -1612,7 +2053,7 @@ free borrowed/interior/non-owner pointer
 
 ---
 
-# 33. Runtime check 边界
+# 36. Runtime check 边界
 
 允许 runtime check 的典型情况：
 
@@ -1621,6 +2062,7 @@ dynamic pointer bounds
 dynamic runtime provenance equality
 dynamic alignment condition
 dynamic raw initialization region overlap / identity
+pointer-difference stride divisibility
 ```
 
 不使用 runtime check 放宽：
@@ -1637,31 +2079,27 @@ function ownership effect mismatch
 
 ---
 
-# 34. 当前明确不进入本计划的范围
+# 37. 当前明确不进入本计划的范围
 
-以下不在本计划内：
-
-## 34.1 Pointer 最终 ABI
-
-单独设计，当前保持 unresolved gate。
-
-## 34.2 一般用户泛型系统
+## 37.1 一般用户泛型系统
 
 `malloc<T>` / `reinterpret<T>` 属于语言 intrinsic generic syntax，不要求本计划同时实现一般泛型函数、trait bound 或 `where`。
 
 一般泛型应另立设计。
 
-## 34.3 整数隐式 promotion 新规则
+## 37.2 整数隐式 promotion 新规则
 
 ownership / pointer 计划不顺带修改整个整数类型提升系统。
 
 需要改变时另立规范。
 
-## 34.4 FFI
+## 37.3 FFI
 
 不定义 C ABI / external ABI。
 
-## 34.5 用户自定义 destructor
+本文的 32-byte pointer parameter / sret 规则属于 Alias internal ABI。
+
+## 37.4 用户自定义 destructor
 
 当前 destruction pipeline 由语言/runtime 自动控制。
 
@@ -1673,15 +2111,19 @@ drop
 deinit
 ```
 
-## 34.6 Stored borrow / weak graph
+## 37.5 Stored borrow / weak graph
 
 v1 明确不提供。
 
+## 37.6 Raw allocation DeepClone
+
+当前 `ptr<T>` 不开放普通 DeepClone。未来如果需要复制 raw allocation ownership graph，必须另立语义设计，不能把 32-byte pointer bit copy 当成 clone。
+
 ---
 
-# 35. 推荐实现顺序
+# 38. 推荐实现顺序
 
-在 pointer ABI 未冻结前，可以投入开发的前端 / HIR 工作：
+## 38.1 前端 / sema / HIR
 
 ```text
 1. Place / Value category
@@ -1695,26 +2137,68 @@ v1 明确不提供。
 9. closure capture loan
 10. function parameter effects
 11. function return effects + borrow source
-12. type capability predicates
+12. DeepCloneable / ShallowCloneable predicates
 13. HIR ownership operations
 14. raw allocation abstract semantic nodes
 15. runtime-check requirement facts
+16. ptr<T> / ptr<T>? type + static relation rules
 ```
 
-在 pointer ABI 关闭前不要冻结：
+## 38.2 ABI / codegen 基础重构
 
 ```text
-ptr<T> ValueAbi
-pointer register/storage width
-pointer function ABI
-pointer field physical layout
-allocation descriptor physical layout
-runtime pointer-check calling convention
+17. 把 ValueAbi 从“单 Cranelift scalar”升级为可表达 aggregate / multi-lane value
+18. 增加统一 PtrLayout owner：4 x I64, 32 bytes, align 8
+19. pointer expression 使用 4 SSA lanes
+20. pointer parameter IndirectByValue lowering
+21. pointer return ExplicitSRet lowering
+22. hidden ABI prefix 支持 [sret?, globals, env, ...]
+23. struct field layout 支持 32-byte pointer
+24. array backing 改为 stride(T)，移除 universal 8-byte element 假设
+25. result payload 改为真实 typed payload layout
 ```
+
+## 38.3 Runtime provenance / raw memory
+
+```text
+26. StorageDescriptor canonical identity
+27. address-taken local / global / heap object descriptor lifecycle
+28. malloc raw StorageDescriptor + metadata
+29. refer / deref / indexing emitter
+30. pointer arithmetic / bounds checks
+31. pointer equality / ordering / difference provenance checks
+32. reinterpret typed-view narrowing
+33. initialized-region metadata runtime
+34. free / reverse-init destruction
+```
+
+## 38.4 验证
+
+必须覆盖：
+
+```text
+pointer ABI byte layout
+nullable canonical zero
+pointer parameter / sret round-trip
+array<ptr<T>> stride
+result<ptr<T>, E> payload layout
+struct containing ptr<T>
+subview equality with different bounds
+same address / different provenance inequality
+one-past-end
+pointer arithmetic overflow / bounds
+pointer subtraction provenance + stride divisibility
+reinterpret lattice reset
+stack/local refer descriptor lifetime
+raw partial initialization / move-out / re-init / free order
+ownership rules never由 pointer bits fallback 推断
+```
+
+仓库继续遵守 NO_CI 规则；验证只通过仓库规定的显式本地/代理命令执行，不新增 CI。
 
 ---
 
-# 36. 核心不变量总结
+# 39. 核心不变量总结
 
 Alias 的内存模型最终必须保持：
 
@@ -1731,7 +2215,7 @@ fresh owned result
 malloc 没有特殊赋值规则
 
 compile-time ownership capability
-!= runtime allocation identity
+!= runtime storage identity / provenance
 
 borrow 不拥有对象
 borrow 不延长 owner 生命周期
@@ -1743,17 +2227,54 @@ bounds / provenance / raw-init 必要时可 runtime check
 move 消费 ownership capability
 clone 创建独立 owner
 shallow 只在不会复制 ownership capability 时合法
+ptr<T> 当前不可 DeepClone
 
 普通用户对象图只包含 owning edges
 raw allocation 可以部分初始化
 Initialized<T> 不能被 reinterpret 冒充成 Initialized<U>
 
+每个可寻址 storage root 有 canonical StorageDescriptor
+subview 不创建新的 provenance identity
+
+Windows x64 ptr<T>
+= 4 x I64
+= provenance + address + view_start + view_end
+= 32 bytes / align 8
+
+ptr<T>? 使用相同 32-byte representation
+canonical null = all zero
+
+pointer equality
+= provenance + address
+
+pointer arithmetic
+= 更新 address
++ 保持 provenance / view bounds
++ checked stride / bounds
+
+reinterpret
+= 保持 provenance
++ 从 current address 建立新的 typed lattice
++ 只收窄 view
+
+pointer parameter
+= IndirectByValue(32, 8)
+
+pointer return
+= ExplicitSRet(32, 8)
+
+ownership relation 不编码进 pointer bits
+codegen 永远不能从 address / descriptor 位置猜 owner
+
+array element layout = stride(T)
+result payload = typed payload storage
+任意值不再默认等于一个 I64 word
+
 sema 决定语义
 HIR 固化语义
 codegen fail-closed 执行
 
-ptr<T> 的机器表示尚未冻结
-任何当前实现都不得反过来把临时表示升级成长期语言设计
+任何旧实现都不得反过来把历史一字宽表示升级成长期语言设计
 ```
 
-这套不变量是后续实现与审阅的基线。
+这套不变量是后续实现与审阅的正式基线。
