@@ -1,7 +1,7 @@
 # Alias 当前语言规范
 
 **状态：** 规范性文档  
-**同步日期：** 2026-08-28  
+**同步日期：** 2026-08-29  
 **实现基线：** 当前 `main` HEAD
 
 > 本文只描述 Alias **当前有效语义**。历史阶段、已删除语法、旧后端和被后续裁决覆盖的行为不得保留为可与本文竞争的规范。
@@ -52,6 +52,8 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - 函数字面量返回类型在 sema 合并完成；
 - 名字解析、目标类型传播、Pattern 合法性与覆盖、调用目标解析均在进入后端前完成。
 
+显式 `clone` 的 DeepCloneable 判定与递归执行计划同样在 sema 完成，并固化为 `DeepClonePlan`；codegen 只能执行该 plan，不能按 `Ty` / `VTy` 重新决定一个类型是否允许 clone。
+
 禁止后端通过 AST 形态、名字、函数体、诊断字符串或 fallback 重新推断静态语义。
 
 ### 2.3 `Ty → VTy` 单次投影
@@ -98,6 +100,41 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - unit 不得用于绑定、赋值、参数、字段、数组/result/iterator、转换、插值、打印、`typeof` 或其它值位置；
 - unit 用户函数的原生签名没有返回槽。
 
+### 3.2 显式 deep clone
+
+当前已实现显式 deep clone intrinsic：
+
+```alias
+clone(expr)
+clone expr
+```
+
+规则：
+
+- 恰好接受一个实参，不接受命名实参；
+- clone 结果的静态类型与 source 相同；
+- 外层已知目标类型会向 source 传播，因此 `val array<i32> a = clone([])` 合法；
+- `clone(f)` 中直接函数名 `f` 按函数值本身读取，不触发零参数裸名隐式调用；
+- `clone` 是预定义保留名，不能被用户声明 shadow。
+
+当前 `DeepCloneable(T)`：
+
+| 类型 | 当前显式 clone 语义 |
+|---|---|
+| integer / unsigned / float / bool | 普通值复制；结果仍是 `InlineValue`，不产生独立 ownership capability |
+| `string` | 复制独立字符串内容 storage |
+| `struct S` | 仅当全部字段均 DeepCloneable；按字段递归 clone |
+| `array<T>` | 仅当 `T` DeepCloneable；创建独立 wrapper/backing，并递归 clone 元素 |
+| `result<T,E>` | 仅当 `T` 与 `E` 都 DeepCloneable；只递归 clone 当前 active payload |
+| `iterator<T>` | 不支持 |
+| 函数 / closure / `func` 槽 | 不支持 |
+
+对携带独立动态 ownership 的 DeepCloneable 类型，显式 clone 结果是新的 `OwnedTemporary`，并具有 `Available` ownership capability；对 inline 标量，clone 结果仍是 `InlineValue`，capability 为 `None`。因此“deep clone”不等价于“所有类型都创建动态 owner”。
+
+sema 会把显式 clone 固化为递归 `DeepClonePlan`；final-HIR gate 会重新以同一 DeepCloneable 规则验证该 plan。后端只能执行 plan，不能把 aggregate clone 退化成引用 bit-copy。
+
+这一节只描述**当前已经实现的显式 `clone`**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / move / borrow / free 等目标语义尚未因此被提前视为已实现。
+
 ---
 
 ## 4. 绑定、作用域与函数
@@ -121,7 +158,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 
 预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
 
-- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`；
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`；
 - result 构造器：`ok`、`err`；
 - 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
 
@@ -180,13 +217,13 @@ struct User {
 - `struct` 只能顶层定义；
 - 字段独立声明 `val` 或 `var`；
 - 已登记结构体名可进入类型槽；
-- 实例采用共享引用语义；赋值、传参、闭包捕获共享同一实例；
+- **普通**赋值、传参、闭包捕获当前仍共享同一实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
 - 构造使用命名实参；
 - 未显式提供的字段使用声明默认值；
 - 字段默认值、构造实参和字段赋值均按字段声明类型进行目标检查；
 - 结构体值显示为 `<struct>`；
-- 结构体名与普通顶层绑定处于同一名字空间，局部 binding/参数/Pattern binding 可遮蔽 constructor 名字。
+- 结构体名与普通顶层 binding 处于同一名字空间，局部 binding/参数/Pattern binding 可遮蔽 constructor 名字。
 
 结构体物理布局由 `codegen/abi.rs` 按字段声明顺序、各自 size/align 和最大对齐计算，不允许其它模块复制偏移规则。
 
@@ -227,6 +264,8 @@ pub func Ret Receiver.method = (Args...) -> body
 `result<T,E>` 为二参数内建泛型。`ok(expr)` 与 `err(expr)` 是 result 构造器，不是普通名字分派函数。
 
 单侧构造可暂含 `Unknown`，但必须在目标上下文或后续统一中确定为完整可用类型后才能进入需要 ABI 的路径。
+
+显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan；普通 result 传递的其余 ownership 语义仍受当前尚未完成的整体 ownership 迁移限制。
 
 result 值显示为 `<ok>` / `<err>`。
 
@@ -274,12 +313,12 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值为共享 wrapper 引用语义。赋值、传参和闭包捕获共享同一 wrapper。
+数组值当前使用 wrapper 引用表示。**普通**赋值、传参和闭包捕获共享同一 wrapper；显式 `clone(array)` 按 3.2 节创建独立 wrapper/backing，并递归 clone 元素。
 
 ### 8.1 数组
 
 - 字面量：`[e1, e2, ...]`；
-- 空字面量允许由目标 `array<T>` 提供元素类型；
+- 空字面量允许由目标 `array<T>` 提供元素类型，包括 `clone([])` 的外层 array 目标；
 - 非空元素必须统一到同一元素类型；
 - 下标读：`arr[index]`；
 - 下标当前只读，`arr[i] = x` 明确拒绝；
@@ -287,9 +326,10 @@ err(_)
 - `push(v)` 无返回值；
 - `pop()` 返回元素，空数组中止；
 - `iterator()` 返回 `iterator<T>`；
+- `iterator<T>` 当前不支持显式 clone；
 - 数组值显示为 `<array>`。
 
-当前元素 runtime 载荷槽统一为 8 字节 word；具体静态类型与 ABI 装箱/拆箱由 `abi.rs` 负责。
+当前元素 runtime 载荷槽统一为 8 字节 word；具体静态类型与 ABI 装箱/拆箱由 `abi.rs` 负责。这是当前实现事实，不覆盖 `docs/plan.md` 已冻结的未来 typed stride 目标。
 
 ### 8.2 iterator fail-fast
 
@@ -348,7 +388,7 @@ for T item in iterable {
 
 ### 10.2 类型一致性
 
-不同数值类型之间不做隐式混算。已有变量的静态类型不会因为外层目标而被改型；目标类型只允许影响字面量、`from/try_from` 和可递归传播的复合表达式。
+不同数值类型之间不做隐式混算。已有变量的静态类型不会因为外层目标而被改型；目标类型只允许影响字面量、`from/try_from`、显式 `clone` source 和可递归传播的复合表达式。
 
 ### 10.3 运算符
 
@@ -435,6 +475,7 @@ try_from(value)
 | array 元素 | `T` |
 | result payload | `T` 或 `E` |
 | match / 三元 | 外层目标类型 |
+| `clone(expr)` source | clone 表达式的外层目标类型 |
 | 字符串插值孔 | `string` |
 | 数值/位复合表达式 | 外层数值目标向字面量与转换递归传播 |
 
@@ -464,11 +505,13 @@ Alias 支持已冻结的无括号单参数调用/方法中缀语法，但绑定�
 val i32 y = dup 5
 value plus 1
 println fact 0
+val string copied = clone original
 ```
 
 关键规则：
 
 - 静态签名为零参数函数的直接标识符或 `this` 可省略调用括号，例如 `val i32 n = five`；`five()` 仍合法；
+- 预定义 `clone` 支持 `clone value`，语义与 `clone(value)` 相同；
 - 函数值作为值传递时使用显式括号，例如 `f(g)`；
 - `dup 5 + 1` 不解释为 `(dup 5) + 1`，需要显式写 `(dup 5) + 1`；
 - `println f 0` / `print f 0` 允许其唯一输出实参本身为普通单参数无括号调用。
@@ -567,9 +610,10 @@ line / col / len
 - 绑定使用清零单元格；
 - 闭包环境保存捕获单元格指针；
 - 字符串为复制后的泄漏块；
-- struct/result/array/iterator 等对象也由原生 runtime/调用端分配并不回收。
+- struct/result/array/iterator 等对象也由原生 runtime/调用端分配并不回收；
+- 显式 dynamic `clone` 会分配新的 string/struct/array/result storage，但当前仍不会在生命周期结束时回收这些 block。
 
-这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或所有权系统。
+这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 
 当前字符串空值、数组空缓冲等可空边由 `RUNTIME_CONTRACTS` 显式规定；调用点不得自行扩大 nullable 范围。
 
@@ -603,11 +647,15 @@ line / col / len
 - 下标赋值；
 - 复合赋值；
 - unit 值；
+- `iterator` / function/closure 的显式 clone；
+- `shallow` / `borrow` / `move` 等其余计划内显式 ownership 操作；
+- 稳定 dynamic Place 普通读取自动 DeepClone；
+- 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；
 - 解释器/JIT/进程内机器码执行；
 - 非 Windows x64 的当前链接产物；
-- 已确定的内存回收方案。
+- 已完整落地的内存回收系统。
 
 未实现能力不得通过“防御性兼容”、隐藏 fallback 或预留语法被提前加入。
 

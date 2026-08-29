@@ -125,7 +125,11 @@ func i32 main = () -> {\n\
 fn clone_rejects_non_deep_cloneable_function_and_iterator() {
     let function_error = {
         let tokens = crate::lexer::lex(
-            "func i32 f = () -> return 1\nfunc i32 main = () -> { val func bad = clone(f) return 0 }\n",
+            "func i32 f = () -> return 1\n\
+func i32 main = () -> {\n\
+    val func bad = clone(f)\n\
+    return 0\n\
+}\n",
         )
         .unwrap();
         let program = crate::parser::parse(tokens).unwrap();
@@ -139,7 +143,12 @@ fn clone_rejects_non_deep_cloneable_function_and_iterator() {
 
     let iterator_error = {
         let tokens = crate::lexer::lex(
-            "func i32 main = () -> { val array<i32> a = [1] val iterator<i32> it = a.iterator() val iterator<i32> bad = clone(it) return 0 }\n",
+            "func i32 main = () -> {\n\
+    val array<i32> a = [1]\n\
+    val iterator<i32> it = a.iterator()\n\
+    val iterator<i32> bad = clone(it)\n\
+    return 0\n\
+}\n",
         )
         .unwrap();
         let program = crate::parser::parse(tokens).unwrap();
@@ -155,7 +164,11 @@ fn clone_rejects_non_deep_cloneable_function_and_iterator() {
 #[test]
 fn final_hir_gate_rejects_deep_clone_plan_drift() {
     let mut program = checked(
-        "func i32 main = () -> { val string s = 'a' val string c = clone(s) return 0 }\n",
+        "func i32 main = () -> {\n\
+    val string s = 'a'\n\
+    val string c = clone(s)\n\
+    return 0\n\
+}\n",
     );
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")

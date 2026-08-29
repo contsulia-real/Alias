@@ -202,12 +202,14 @@ pointer value 仍属于 Value。
 ```text
 struct / array / result 等新构造结果
 函数 owned return
-clone(...)
+对携带独立动态 ownership 的值执行 clone(...)
 shallow(...)
 move(place)
 malloc(...) 成功产生的新 allocation root
 其它未来产生新 owner 的表达式
 ```
+
+对 `InlineValue` 执行 `clone(...)` 仍产生 `InlineValue`，不会仅因使用 clone 语法而制造 ownership capability。
 
 `malloc` 不具有特殊赋值规则；它只是 `OwnedTemporary` 的一种来源。
 
@@ -273,6 +275,8 @@ move(...)         -> owning
 borrow(...)       -> borrowed
 Borrowed return   -> borrowed
 ```
+
+这里 `clone(...) -> owning` 描述的是 target slot relation；它不表示所有 clone 结果都必须是 `OwnedTemporary`。标量 clone 仍可作为 `InlineValue` 进入 owning slot。
 
 仅由 `null` 初始化的 nullable local：
 
@@ -373,18 +377,25 @@ move(x)
 
 source 可以是合法 readable owning Place，也可以是合法 readable borrowed Place / BorrowedValue。
 
-结果是新的：
+结果 category 取决于 T 是否携带独立动态 ownership：
 
 ```text
-OwnedTemporary
+InlineValue 类型
+-> InlineValue
+-> ownership capability = None
+
+携带独立动态 ownership 的 DeepCloneable 类型
+-> OwnedTemporary
+-> ownership capability = Available
 ```
 
 deep clone：
 
-* 递归复制 ownership subtree；
+* 对 InlineValue 执行普通值复制，不制造动态 owner；
+* 对携带 ownership subtree 的值递归复制 ownership subtree；
 * 不取得 source ownership；
 * 不改变 source 既有 loan；
-* 新结果拥有独立 ownership capability。
+* 只有动态 ownership-bearing clone 结果才拥有新的独立 ownership capability。
 
 只有 `DeepCloneable(T)` 为真时才合法。
 
@@ -454,13 +465,15 @@ borrowed Place 不能 move。
 ```text
 fresh owned constructor result
 function owned return
-clone result
+dynamic ownership-bearing clone result
 shallow result
 move result
 malloc allocation root
 ```
 
 都统一为 `OwnedTemporary`，进入 owning target 时直接 transfer。
+
+InlineValue 的 clone 仍是 InlineValue，并继续采用普通值复制；它不进入上述 owner-transfer 集合。
 
 不存在 `malloc` 专属 transfer 规则。
 
@@ -713,15 +726,17 @@ callee 取得 ownership capability。
 
 稳定 owning Place 不能因为一次普通函数调用被偷偷 move。
 
-因此 owned argument 必须来自：
+因此需要动态 ownership capability 的 owned argument 必须来自：
 
 ```text
 OwnedTemporary
 move(place)
-clone(place)
+对动态 ownership-bearing 值执行 clone(place)
 shallow(place)
 其它明确产生新 owner 的表达式
 ```
+
+InlineValue 参数按其值语义传递，不因为参数 effect 的概念分类制造动态 ownership capability。
 
 ## 13.2 Return effects
 
@@ -814,7 +829,7 @@ Destroy
 | `string` | 独立复制内容 | 不允许 | 允许 | 允许 | 销毁内容 storage |
 | `struct` | 仅当所有 owning fields 可 deep clone | 仅当 `ShallowCloneable` | 允许 | 允许 | owning fields 逆声明顺序销毁 |
 | `array<T>` | 仅当 `DeepCloneable(T)` | 不允许 | 允许 | 允许 | elements 逆索引销毁后释放 backing |
-| `result<T,E>` | 仅当 active payload 类型可 deep clone | 仅当 payload 可 shallow | 允许 | 允许 | 销毁 active payload |
+| `result<T,E>` | 仅当 payload 类型均可 deep clone | 仅当 payload 可 shallow | 允许 | 允许 | 销毁 active payload |
 | `iterator<T>` | 不允许 | 不允许 | 允许 | 允许 | 销毁自身状态，不拥有 array elements |
 | closure / executable function value | 不允许 | 不允许 | 允许 | 允许 | 结束自身 capture obligations / storage |
 | `T?` | 继承 payload 能力 | 继承 payload 能力 | 允许 | 允许 | non-null 时销毁 payload |
@@ -2007,6 +2022,8 @@ Null
 
 codegen 不能通过“这个表达式看起来像 constructor / malloc”重新判断 transfer。
 
+对显式 `DeepClone`，HIR 同样必须冻结 clone capability/plan；标量 clone 固化为 InlineValue，动态 ownership-bearing clone 固化为 OwnedTemporary，后端不得按物理表示重新分类。
+
 ## 34.2 Ownership facts
 
 Move / Free / ReturnTransfer 等消费操作必须携带 sema 已验证的 capability 事实。
@@ -2179,6 +2196,8 @@ v1 明确不提供。
 16. ptr<T> / ptr<T>? type + static relation rules
 ```
 
+第 5 项可以按独立、完整的纵切逐个落地，但每个操作一旦公开，就必须同时具备 semantic resolution、resolved HIR、fail-closed validation 与真实 codegen 行为；不能只加入语法壳。
+
 ## 38.2 ABI / codegen 基础重构
 
 ```text
@@ -2263,7 +2282,8 @@ ownership / borrow exclusivity 静态保证
 bounds / provenance / raw-init 必要时可 runtime check
 
 move 消费 ownership capability
-clone 创建独立 owner
+dynamic ownership-bearing clone 创建独立 owner
+InlineValue clone 保持 InlineValue 且不产生 ownership capability
 shallow 只在不会复制 ownership capability 时合法
 ptr<T> 当前不可 DeepClone
 

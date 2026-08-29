@@ -62,3 +62,18 @@ func i32 main = () -> {
 "#;
     assert_eq!(run(source).unwrap(), 0);
 }
+
+#[test]
+fn clone_supports_no_paren_intrinsic_syntax() {
+    let source = r#"
+func i32 main = () -> {
+    val string original = 'x'
+    val string copied = clone original
+    if copied == 'x' {
+        return 0
+    }
+    return 1
+}
+"#;
+    assert_eq!(run(source).unwrap(), 0);
+}

@@ -4,6 +4,8 @@ use super::operators::{
 };
 use super::typing::ExprCheckError;
 use crate::ast::{Expr, StrPartAst};
+use crate::builtins::is_clone_builtin;
+use crate::sema::hir::BuiltinCall;
 use crate::sema::types::{
     check_value_type_slot, default_negative_int_ty, default_positive_int_ty, types_match, FloatW,
     IntW, Ty,
@@ -124,10 +126,21 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, span } => {
-                let ty = self.call(callee, args, *span, env)?;
-                let target = self.resolve_call_target(callee, args, env)?;
-                self.record_call_target(e, target);
-                Ok(ty)
+                if matches!(callee.as_ref(), Expr::Ident(name, _) if is_clone_builtin(name)) {
+                    // clone 的 DeepCloneable 判定与 plan 在同一次解析中完成并直接写入 fact；
+                    // 不先经过普通 call 再重新计算 plan，避免一个语义节点在 check 阶段重复解析。
+                    let (ty, plan) = self.check_clone_call(args, *span, env, None)?;
+                    self.record_call_target(
+                        e,
+                        LowerCallTarget::Builtin(BuiltinCall::DeepClone(plan)),
+                    );
+                    Ok(ty)
+                } else {
+                    let ty = self.call(callee, args, *span, env)?;
+                    let target = self.resolve_call_target(callee, args, env)?;
+                    self.record_call_target(e, target);
+                    Ok(ty)
+                }
             }
             Expr::Juxtapose { lhs, rhs, span } => {
                 let lhs_ty = self.expr_raw_callable(lhs, env)?;
