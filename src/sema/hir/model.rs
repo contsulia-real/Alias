@@ -76,8 +76,9 @@ pub(crate) struct Param {
     pub(crate) ty: Ty,
 }
 
-/// sema 已解析的可写 target。这里只表达当前前端真正支持的 local/field 写入；
-/// codegen 不得再从源码形状恢复 target identity 或 target type。
+/// sema 已解析的 Place projection。Place 只表达 storage identity/projection；读取、写入、
+/// borrow、move 等外层操作另行决定语义。Field/Index 的 base 必须继续是 Place，不能退回
+/// 任意 Expr，否则 overlap/loan 会再次依赖源码形状或运行时地址猜测。
 #[derive(Debug, Clone)]
 pub(crate) struct PlaceInfo {
     pub(crate) ty: Ty,
@@ -91,8 +92,13 @@ pub(crate) enum Place {
         info: PlaceInfo,
     },
     Field {
-        recv: Box<Expr>,
+        base: Box<Place>,
         field_index: usize,
+        info: PlaceInfo,
+    },
+    Index {
+        base: Box<Place>,
+        index: Box<Expr>,
         info: PlaceInfo,
     },
 }
@@ -100,7 +106,7 @@ pub(crate) enum Place {
 impl Place {
     pub(crate) fn info(&self) -> &PlaceInfo {
         match self {
-            Self::Local { info, .. } | Self::Field { info, .. } => info,
+            Self::Local { info, .. } | Self::Field { info, .. } | Self::Index { info, .. } => info,
         }
     }
 

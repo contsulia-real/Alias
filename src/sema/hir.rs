@@ -37,12 +37,31 @@ pub(crate) use model::{
 use crate::sema::types::Ty;
 use std::collections::HashMap;
 
-/// check 阶段对一个赋值语句解析出的 Place 身份与最终 target 类型。该类型只跨越
-/// check → lower，不进入最终 HIR；lowering 会把它固化成 model::Place。
+/// check 阶段解析出的结构化 Place。该类型只跨越 check → lower；最终 lowering 必须把
+/// Local/Field/Index 的递归 projection 原样固化到 model::Place，不能重新按 AST 名字猜测。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum LowerPlaceInfo {
-    Local { binding_id: BindingId, ty: Ty },
-    Field { field_index: usize, ty: Ty },
+    Local {
+        binding_id: BindingId,
+        ty: Ty,
+    },
+    Field {
+        base: Box<LowerPlaceInfo>,
+        field_index: usize,
+        ty: Ty,
+    },
+    Index {
+        base: Box<LowerPlaceInfo>,
+        ty: Ty,
+    },
+}
+
+impl LowerPlaceInfo {
+    pub(super) fn ty(&self) -> &Ty {
+        match self {
+            Self::Local { ty, .. } | Self::Field { ty, .. } | Self::Index { ty, .. } => ty,
+        }
+    }
 }
 
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时

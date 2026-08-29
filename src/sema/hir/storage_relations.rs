@@ -1,5 +1,5 @@
 use super::{
-    Body, CheckedProgram, Expr, ExprCategory, Item, Stmt, StorageRelation, ValueCategory,
+    Body, CheckedProgram, Expr, ExprCategory, Item, Place, Stmt, StorageRelation, ValueCategory,
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
@@ -20,11 +20,6 @@ fn is_inline_type(ty: &Ty) -> bool {
     matches!(ty, Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool)
 }
 
-/// 当前阶段 initializer → binding slot relation 的唯一 policy owner。
-///
-/// OwnedTemporary / InlineValue 已能直接建立 owning slot；标量 Place 普通读取等价值复制，
-/// 因而也可确定为 Owning。动态 Place 必须等待显式 DeepClone HIR，General Value 必须等待
-/// function effect 等后续事实，二者都不能提前猜成 owning。
 pub(super) fn initial_relation(value: &Expr) -> AliasResult<Option<StorageRelation>> {
     let category = value
         .category()
@@ -49,7 +44,6 @@ fn validate_binding(binding: &super::Binding) -> AliasResult<()> {
     Ok(())
 }
 
-/// 只遍历 binding declarations；relation policy 不拥有 BindingId/type/use validation。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     for item in &program.items {
         if let Item::Binding(binding) = item {
@@ -100,14 +94,26 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            if let super::Place::Field { recv, .. } = target {
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {

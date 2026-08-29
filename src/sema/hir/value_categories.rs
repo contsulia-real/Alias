@@ -17,18 +17,10 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-/// 当前已能证明不携带独立动态 ownership 的普通值类型。
-///
-/// string/func/struct/result/array/iterator 都不是 inline；unit 不是值类型，也不能借此被
-/// 当成 InlineValue。ptr<T> 等后续类型必须由其正式 ownership 规则决定，而不是默认归类。
 fn is_inline_value(ty: &Ty) -> bool {
     matches!(ty, Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool)
 }
 
-/// 当前已经具有独立动态 ownership root 的语言值类型。
-///
-/// 这不是 DeepCloneable/ShallowCloneable 判定；它只回答一个已产生的 Value 是否可能携带
-/// 独立 owner。ptr<T> 等后续类型引入后必须在其静态 ownership 规则落地时扩展此 owner。
 fn carries_dynamic_owner(ty: &Ty) -> bool {
     matches!(
         ty,
@@ -51,9 +43,6 @@ fn deep_clone_creates_owner(plan: &DeepClonePlan) -> bool {
     }
 }
 
-/// 当前阶段能够不依赖 function effects、loan 或 capability dataflow 就证明为新 owner 的
-/// resolved HIR 来源。这里必须保持保守：动态函数/用户方法返回、ternary/match merge、
-/// propagate 等仍交给后续 ownership/effect 阶段，不得仅按结果类型猜成 OwnedTemporary。
 fn produces_owned_temporary(expr: &Expr) -> bool {
     match expr {
         Expr::Str(..)
@@ -69,8 +58,6 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
         Expr::Call { target, .. } => match target {
             CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_) => true,
             CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => deep_clone_creates_owner(plan),
-            // final-HIR validation guarantees user-level shallow never carries an Inline root plan;
-            // every valid shallow call therefore creates a fresh aggregate owner.
             CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
             CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
         },
@@ -119,11 +106,6 @@ fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCate
     })
 }
 
-/// resolved HIR 节点到 Place/Value + 当前 value subcategory 的唯一映射 owner。
-///
-/// Identity conversion 不产生新值，必须完整保留 inner category；其它节点先决定 Place/Value，
-/// 再优先固化无歧义的 OwnedTemporary 与 InlineValue。`General` 只保留仍需后续
-/// ownership/effect 语义继续细分的 Value，codegen 不得据此推断 ownership。
 fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     Ok(match expr {
         Expr::Ident(_, Some(_), ..) | Expr::Field { .. } | Expr::Index { .. } => {
@@ -141,8 +123,6 @@ fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     })
 }
 
-/// lowering 已经递归完成当前节点的全部 child，并把源码语义形状解析成最终 HIR 后，
-/// 立即固化该节点 category。这里不读取 AST variant，也不保存跨 phase 地址 fact。
 pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
     if expr.category().is_some() {
         return Err(invariant(expr.span(), "Expr category 被重复 finalization"));
@@ -152,8 +132,6 @@ pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
     Ok(())
 }
 
-/// final-HIR gate 独立重算每个节点的 resolved category；任何 None 或与最终 HIR 形状/
-/// 当前 value-category 规则不一致的值都不能进入 codegen。显式栈避免引入额外宿主递归。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
@@ -205,14 +183,26 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {

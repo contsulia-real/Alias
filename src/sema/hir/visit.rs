@@ -10,6 +10,25 @@ enum TypeNode<'a> {
     Stmt(&'a Stmt),
 }
 
+fn visit_place<'a>(
+    place: &'a Place,
+    visit: &mut impl FnMut(&Ty),
+    stack: &mut Vec<TypeNode<'a>>,
+) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        visit(place.ty());
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(TypeNode::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 impl CheckedProgram {
     /// 枚举 codegen 单次 Ty→VTy 投影所需的全部类型。显式栈避免重新把不可信 HIR
     /// 嵌套映射到宿主递归；children 逆序入栈以保持确定的源码前序。新增 HIR payload
@@ -42,11 +61,8 @@ impl CheckedProgram {
                 TypeNode::Stmt(stmt) => match stmt {
                     Stmt::Binding(binding) => stack.push(TypeNode::Binding(binding)),
                     Stmt::Assign { target, value } => {
-                        visit(target.ty());
+                        visit_place(target, visit, &mut stack);
                         stack.push(TypeNode::Expr(value));
-                        if let Place::Field { recv, .. } = target {
-                            stack.push(TypeNode::Expr(recv));
-                        }
                     }
                     Stmt::Expr { expr } => stack.push(TypeNode::Expr(expr)),
                     Stmt::Return { value } => {

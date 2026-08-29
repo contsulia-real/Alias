@@ -16,11 +16,6 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-/// 当前 phase 的 value-category → initial capability 唯一映射 owner。
-///
-/// InlineValue 明确没有独立 ownership；OwnedTemporary 明确携带唯一可转移 capability。
-/// Place capability 与 General value 的后续状态必须由真正的 relation/effect/dataflow 决定，
-/// 不能在这里按类型或源码形状猜测。
 fn expected_capability(expr: &Expr) -> AliasResult<Option<OwnershipCapability>> {
     let category = expr
         .category()
@@ -33,18 +28,12 @@ fn expected_capability(expr: &Expr) -> AliasResult<Option<OwnershipCapability>> 
     })
 }
 
-/// value category 已由 lowering 固化后，立即写入当前可证明的 initial capability fact。
-/// `Option::None` 不是 `OwnershipCapability::None`：它表示这个 phase 还没有合法依据给该
-/// Place/General Value 分配 capability 状态，后续分析必须显式决定。
 pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
     let capability = expected_capability(expr)?;
     expr.info_mut().ownership_capability = capability;
     Ok(())
 }
 
-/// final-HIR gate 独立验证 initial capability 与 value category 的关系；这不是 relation 或
-/// move/free dataflow 的替代。后续新增消费状态时应扩展 capability owner，而不是让 codegen
-/// 根据 value 类型、指针 bit 或 AST 形状重建 capability。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
@@ -93,14 +82,26 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {

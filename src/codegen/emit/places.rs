@@ -1,6 +1,7 @@
+use super::arrays::checked_array_element_addr;
 use super::cells::{cell_addr, materialize_cell_addr};
 use super::expr::emit_expr;
-use crate::codegen::abi::{norm_store, VTy};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::Place;
 use crate::sema::types::Ty;
@@ -11,7 +12,7 @@ use cranelift_module::Module;
 
 /// 已解析 struct field 的物理存储查询 owner。sema/HIR 已决定 field_index；这里仅把
 /// 静态 struct 类型映射到当前 ABI layout。接口只依赖最终 `Ty`，避免 Place owner 被迫
-/// 携带任意 HIR Expr 并在后续递归 Place 投影中重新耦合表达式形状。
+/// 携带任意 HIR Expr 并在递归 Place projection 中重新耦合表达式形状。
 pub(super) fn field_storage<M: Module>(
     c: &Compiler<M>,
     recv_ty: &Ty,
@@ -27,11 +28,24 @@ pub(super) fn field_storage<M: Module>(
     invariant_violation("字段访问索引必须由 sema/HIR 解析到结构体布局")
 }
 
+fn emit_place_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    place: &Place,
+) -> AliasResult<(Value, VTy)> {
+    let (addr, vty) = emit_place_addr(c, bcx, frame, place)?;
+    let raw = bcx
+        .ins()
+        .load(cl_type(&vty), MemFlagsData::new(), addr, 0);
+    Ok((norm_load(bcx, raw, &vty), vty))
+}
+
 /// resolved Place → 当前真实 storage address 的唯一物理 lowering 入口。
 ///
 /// 这里不决定 Place 合法性、ownership 或 borrow；这些都必须已经由 sema/HIR 固化。
-/// 它只把 Local 的 canonical binding cell 与 Field 的 canonical struct offset 物化成地址，
-/// 供 replacement、后续 borrow/refer 等 storage operation 复用。
+/// Local 物化 canonical binding cell；Field/Index 递归读取 base Place 的语言值后应用唯一
+/// field/index layout owner。后续 borrow/refer 必须复用这里，不能重建 projection 规则。
 pub(super) fn emit_place_addr<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -47,12 +61,21 @@ pub(super) fn emit_place_addr<M: Module>(
             Ok((materialize_cell_addr(bcx, frame, &addr), vty))
         }
         Place::Field {
-            recv, field_index, ..
+            base, field_index, ..
         } => {
-            let (field_vty, offset) = field_storage(c, recv.ty(), *field_index)?;
-            let recv_value = emit_expr(c, bcx, frame, recv)?;
-            let addr = bcx.ins().iadd_imm(recv_value, offset as i64);
+            let (base_value, _) = emit_place_value(c, bcx, frame, base)?;
+            let (field_vty, offset) = field_storage(c, base.ty(), *field_index)?;
+            let addr = bcx.ins().iadd_imm(base_value, offset as i64);
             Ok((addr, field_vty))
+        }
+        Place::Index { base, index, .. } => {
+            let (array, base_vty) = emit_place_value(c, bcx, frame, base)?;
+            let VTy::Array(elem_vty) = base_vty else {
+                invariant_violation("Place::Index base 必须保留 array VTy")
+            };
+            let index_word = emit_expr(c, bcx, frame, index)?;
+            let addr = checked_array_element_addr(c, bcx, array, index_word, place.span())?;
+            Ok((addr, *elem_vty))
         }
     }
 }

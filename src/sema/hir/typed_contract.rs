@@ -28,6 +28,20 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
     match expr {
         Expr::Str(parts, ..) => {
@@ -114,9 +128,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
@@ -313,12 +325,40 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
     Ok(())
 }
 
+/// 只验证 Place projection 自己的局部类型方程。字段索引对应哪个声明字段由 cross-reference
+/// validator 拥有；BindingId 是否存在/可写则由 binding contract 拥有。
+fn validate_place(place: &Place) -> AliasResult<()> {
+    let mut stack = vec![place];
+    while let Some(place) = stack.pop() {
+        if place.ty().contains_unknown() {
+            return Err(invariant(place.span(), "Place 类型未确定"));
+        }
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => {
+                if !matches!(base.ty(), Ty::Struct(_)) {
+                    return Err(invariant(place.span(), "Field Place base 不是 struct"));
+                }
+                stack.push(base);
+            }
+            Place::Index { base, index, .. } => {
+                let Ty::Array(elem) = base.ty() else {
+                    return Err(invariant(place.span(), "Index Place base 不是 array"));
+                };
+                if index.ty() != &Ty::Int(IntW::W32) || !types_match(elem, place.ty()) {
+                    return Err(invariant(place.span(), "Index Place 下标/结果类型不一致"));
+                }
+                stack.push(base);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
     match stmt {
         Stmt::Assign { target, value } => {
-            if target.ty().contains_unknown() {
-                return Err(invariant(target.span(), "Assign Place 类型未确定"));
-            }
+            validate_place(target)?;
             if !types_match(target.ty(), value.ty()) {
                 return Err(invariant(
                     value.span(),
@@ -339,8 +379,6 @@ fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
     Ok(())
 }
 
-/// 只验证 typed HIR 节点自身的局部类型方程；跨 BindingId、MethodId、字段索引与
-/// constructor target 的关系由其它 final-gate 子验证器拥有。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {

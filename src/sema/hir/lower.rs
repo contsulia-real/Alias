@@ -162,13 +162,52 @@ fn lower_body(body: &crate::ast::Body, facts: &mut LowerFacts) -> AliasResult<Bo
     })
 }
 
+fn lower_place(
+    expr: &crate::ast::Expr,
+    place: LowerPlaceInfo,
+    facts: &mut LowerFacts,
+) -> AliasResult<Place> {
+    let span = expr.span();
+    match (expr, place) {
+        (
+            crate::ast::Expr::Ident(..),
+            LowerPlaceInfo::Local { binding_id, ty },
+        ) => Ok(Place::Local {
+            binding_id,
+            info: PlaceInfo { ty, span },
+        }),
+        (
+            crate::ast::Expr::Field { recv, .. },
+            LowerPlaceInfo::Field {
+                base,
+                field_index,
+                ty,
+            },
+        ) => Ok(Place::Field {
+            base: Box::new(lower_place(recv, *base, facts)?),
+            field_index,
+            info: PlaceInfo { ty, span },
+        }),
+        (
+            crate::ast::Expr::Index { recv, idx, .. },
+            LowerPlaceInfo::Index { base, ty },
+        ) => Ok(Place::Index {
+            base: Box::new(lower_place(recv, *base, facts)?),
+            index: Box::new(lower_expr(idx, facts)?),
+            info: PlaceInfo { ty, span },
+        }),
+        _ => Err(AliasError {
+            msg: "内部 sema 不变式被破坏: Place fact 与 AST projection 形状不一致".into(),
+            span,
+        }),
+    }
+}
+
 fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<Stmt> {
     let key = stmt as *const crate::ast::Stmt as usize;
     Ok(match stmt {
         crate::ast::Stmt::Binding(binding) => Stmt::Binding(lower_binding(binding, facts)?),
         crate::ast::Stmt::Assign { value, span, .. } => {
-            // check 已把每个赋值解析成唯一 Place；variant 若与 AST 形状不一致，说明
-            // check→lower identity/语义合同已破坏，不能把另一种 Place 重新解释成 local。
             let target = match take_required(
                 &mut facts.assignment_places,
                 key,
@@ -179,9 +218,9 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                     binding_id,
                     info: PlaceInfo { ty, span: *span },
                 },
-                LowerPlaceInfo::Field { .. } => {
+                LowerPlaceInfo::Field { .. } | LowerPlaceInfo::Index { .. } => {
                     return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: 普通赋值携带字段 Place".into(),
+                        msg: "内部 sema 不变式被破坏: 普通赋值携带非 local Place".into(),
                         span: *span,
                     })
                 }
@@ -194,24 +233,27 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
         crate::ast::Stmt::FieldAssign {
             recv, value, span, ..
         } => {
-            // 源码级 FieldAssign 只属于 parser AST；final HIR 统一固化为 Assign + Place。
-            let (field_index, ty) = match take_required(
+            let (base, field_index, ty) = match take_required(
                 &mut facts.assignment_places,
                 key,
                 *span,
                 "赋值 Place",
             )? {
-                LowerPlaceInfo::Field { field_index, ty } => (field_index, ty),
-                LowerPlaceInfo::Local { .. } => {
+                LowerPlaceInfo::Field {
+                    base,
+                    field_index,
+                    ty,
+                } => (base, field_index, ty),
+                LowerPlaceInfo::Local { .. } | LowerPlaceInfo::Index { .. } => {
                     return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: 字段赋值携带 local Place".into(),
+                        msg: "内部 sema 不变式被破坏: 字段赋值未携带 terminal field Place".into(),
                         span: *span,
                     })
                 }
             };
             Stmt::Assign {
                 target: Place::Field {
-                    recv: Box::new(lower_expr(recv, facts)?),
+                    base: Box::new(lower_place(recv, *base, facts)?),
                     field_index,
                     info: PlaceInfo { ty, span: *span },
                 },
@@ -430,8 +472,6 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                             span: *span,
                         });
                     };
-                    // callee 的 sema facts 仍需消费，但最终 HIR 不保留 `from/try_from`
-                    // 名字；backend 只能看到已经裁决好的 Convert/Identity 节点。
                     let _ = lower_expr(callee, facts)?;
                     let value = lower_expr(&args[0].value, facts)?;
                     Expr::Convert {
@@ -486,8 +526,6 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                         span: rhs.span(),
                     });
                 }
-                // RHS 方法名不是可求值表达式；sema 只为整个 Juxtapose 记录 target，
-                // 因此这里不 lower RHS，避免制造不存在的 BindingId 要求。
                 Expr::MethodCall {
                     recv: Box::new(lower_expr(lhs, facts)?),
                     args: Vec::new(),

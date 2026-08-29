@@ -62,6 +62,20 @@ fn push_match_children<'a>(
     stack.push(Node::Expr(subject));
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
     match expr {
         Expr::Str(parts, ..) => {
@@ -137,9 +151,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(Node::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
@@ -332,6 +344,31 @@ fn collect_contracts(
     Ok((contracts, writable))
 }
 
+/// Place projection 里的每个 Local root 都必须保持与自身声明一致的静态类型。这里不拥有
+/// field/index projection 方程，只验证 BindingId 合同；同一 Place 的终端可写性由外层操作决定。
+fn validate_place_bindings(
+    place: &Place,
+    contracts: &HashMap<BindingId, Ty>,
+) -> AliasResult<()> {
+    let mut stack = vec![place];
+    while let Some(place) = stack.pop() {
+        match place {
+            Place::Local { binding_id, .. } => {
+                if let Some(declared) = contracts.get(binding_id) {
+                    if !types_match(declared, place.ty()) {
+                        return Err(invariant(
+                            place.span(),
+                            "Place Local 类型与 BindingId 声明类型不一致",
+                        ));
+                    }
+                }
+            }
+            Place::Field { base, .. } | Place::Index { base, .. } => stack.push(base),
+        }
+    }
+    Ok(())
+}
+
 fn validate_uses(
     program: &CheckedProgram,
     contracts: &HashMap<BindingId, Ty>,
@@ -362,8 +399,6 @@ fn validate_uses(
                     }
                 }
                 if let Expr::Ident(_, Some(id), ..) = expr {
-                    // 未知 ID 由 resolved cross-reference validator 统一拒绝；本 pass 只在
-                    // ID 能解析到声明后检查类型关系，避免形成第二套存在性验证 owner。
                     if let Some(declared) = contracts.get(id) {
                         if !types_match(declared, expr.ty()) {
                             return Err(invariant(
@@ -378,20 +413,13 @@ fn validate_uses(
             Node::Stmt(stmt) => {
                 match stmt {
                     Stmt::Assign { target, .. } => {
+                        validate_place_bindings(target, contracts)?;
                         if let Place::Local { binding_id, .. } = target {
-                            if let Some(declared) = contracts.get(binding_id) {
-                                if !types_match(declared, target.ty()) {
-                                    return Err(invariant(
-                                        target.span(),
-                                        "Assign Place 类型与 BindingId 声明类型不一致",
-                                    ));
-                                }
-                                if !writable.contains(binding_id) {
-                                    return Err(invariant(
-                                        target.span(),
-                                        "Assign 目标不是可写 var 绑定",
-                                    ));
-                                }
+                            if contracts.contains_key(binding_id) && !writable.contains(binding_id) {
+                                return Err(invariant(
+                                    target.span(),
+                                    "Assign 目标不是可写 var 绑定",
+                                ));
                             }
                         }
                     }
@@ -422,8 +450,8 @@ fn validate_uses(
 }
 
 /// Stable BindingId graph 的 final-HIR contract：每个声明 ID 全局唯一并绑定唯一静态类型；
-/// local Place 必须与 BindingId 声明类型一致且指向可写 var，所有 Ident use 也必须服从
-/// BindingId 类型合同。未知引用由 resolved cross-reference validator 拒绝。
+/// Place 中所有 Local root 必须与 BindingId 声明类型一致。只有终端 Local assignment 要求
+/// `var`；Field/Index base 的 local mutability 不决定其可投影性。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let (contracts, writable) = collect_contracts(program)?;
     validate_uses(program, &contracts, &writable)

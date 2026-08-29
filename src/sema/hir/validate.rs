@@ -70,6 +70,23 @@ fn push_match_children<'a>(
     stack.push(HirValidationNode::Expr(subject));
 }
 
+fn push_place_expr_children<'a>(
+    stack: &mut Vec<HirValidationNode<'a>>,
+    place: &'a Place,
+) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(HirValidationNode::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr) {
     match expr {
         Expr::Str(parts, ..) => {
@@ -145,9 +162,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt
         Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(HirValidationNode::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(HirValidationNode::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
         Stmt::Return { value } => {
@@ -384,7 +399,6 @@ fn collect_function_locals(expr: &Expr) -> HashSet<BindingId> {
     while let Some(node) = stack.pop() {
         match node {
             HirValidationNode::Expr(child) => match child {
-                // Nested functions own their own locals and are deliberately not descended here.
                 Expr::FuncLit { .. } => {}
                 Expr::Match { subject, arms, .. } => {
                     locals.extend(arms.iter().filter_map(|arm| arm.binding_id));
@@ -746,12 +760,12 @@ fn validate_funclit_contract(
 }
 
 fn resolved_field_contract(
-    recv: &Expr,
+    recv_ty: &Ty,
     field_index: usize,
     structs: &HashMap<String, StructContract>,
     span: Span,
 ) -> AliasResult<StructFieldContract> {
-    let Ty::Struct(name) = recv.ty() else {
+    let Ty::Struct(name) = recv_ty else {
         return Err(invariant(span, "字段索引的接收者不是 struct"));
     };
     let Some(contract) = structs.get(name) else {
@@ -763,10 +777,59 @@ fn resolved_field_contract(
     Ok(field.clone())
 }
 
+/// cross-reference Place gate：Local 检查 ID 存在；Field 检查声明字段索引/类型；Index 的
+/// 局部类型方程归 typed-contract。只有 assignment 的 terminal Field 要求 mutable；base Field
+/// 只是路径的一部分，不能把 `val outer` 错判为禁止写其内部 `var` 字段。
+fn validate_place_contract(
+    place: &Place,
+    known_ids: &HashSet<BindingId>,
+    structs: &HashMap<String, StructContract>,
+    terminal_write: bool,
+) -> AliasResult<()> {
+    let mut stack = vec![(place, terminal_write)];
+    while let Some((place, terminal)) = stack.pop() {
+        match place {
+            Place::Local { binding_id, .. } => {
+                if !known_ids.contains(binding_id) {
+                    return Err(invariant(
+                        place.span(),
+                        format!("Place 引用未知 BindingId {binding_id:?}"),
+                    ));
+                }
+            }
+            Place::Field {
+                base,
+                field_index,
+                ..
+            } => {
+                let field =
+                    resolved_field_contract(base.ty(), *field_index, structs, place.span())?;
+                if !types_match(&field.ty, place.ty()) {
+                    return Err(invariant(
+                        place.span(),
+                        "字段 Place 类型与已解析字段声明不一致",
+                    ));
+                }
+                if terminal && !field.mutable {
+                    return Err(invariant(place.span(), "字段赋值目标指向不可写 val 字段"));
+                }
+                stack.push((base, false));
+            }
+            Place::Index { base, .. } => {
+                if terminal {
+                    return Err(invariant(
+                        place.span(),
+                        "当前 HIR 不允许直接 Index assignment target",
+                    ));
+                }
+                stack.push((base, false));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()> {
-    // 源码不可信，且合法嵌套虽有上限仍不可忽略；最终 authority gate 使用显式栈，
-    // 不能由验证器自己重新引入宿主递归风险。这里也是 codegen 前最后一个 cross-reference
-    // 门：resolved ID、call/method target 与字段合同均对声明核验，后端不得重新发现或修补。
     let known_ids = collect_declared_ids(program);
     let structs = collect_struct_contracts(program)?;
     let user_methods = collect_user_methods(program)?;
@@ -968,8 +1031,12 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Field {
                         recv, field_index, ..
                     } => {
-                        let field =
-                            resolved_field_contract(recv, *field_index, &structs, expr.span())?;
+                        let field = resolved_field_contract(
+                            recv.ty(),
+                            *field_index,
+                            &structs,
+                            expr.span(),
+                        )?;
                         if !types_match(&field.ty, expr.ty()) {
                             return Err(invariant(
                                 expr.span(),
@@ -1019,42 +1086,9 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     stack.push(HirValidationNode::Expr(&binding.value));
                 }
                 Stmt::Assign { target, value } => {
-                    match target {
-                        Place::Local { binding_id, .. } => {
-                            if !known_ids.contains(binding_id) {
-                                return Err(invariant(
-                                    target.span(),
-                                    format!("Assign 引用未知 BindingId {binding_id:?}"),
-                                ));
-                            }
-                        }
-                        Place::Field {
-                            recv, field_index, ..
-                        } => {
-                            let field = resolved_field_contract(
-                                recv,
-                                *field_index,
-                                &structs,
-                                target.span(),
-                            )?;
-                            if !field.mutable {
-                                return Err(invariant(
-                                    target.span(),
-                                    "字段赋值目标指向不可写 val 字段",
-                                ));
-                            }
-                            if !types_match(&field.ty, target.ty()) {
-                                return Err(invariant(
-                                    target.span(),
-                                    "字段 Place 类型与已解析字段声明不一致",
-                                ));
-                            }
-                        }
-                    }
+                    validate_place_contract(target, &known_ids, &structs, true)?;
                     stack.push(HirValidationNode::Expr(value));
-                    if let Place::Field { recv, .. } = target {
-                        stack.push(HirValidationNode::Expr(recv));
-                    }
+                    push_place_expr_children(&mut stack, target);
                 }
                 Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
                 Stmt::Return { value } => {

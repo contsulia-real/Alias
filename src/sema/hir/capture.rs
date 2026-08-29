@@ -156,13 +156,9 @@ fn collect_function_captures(
                 }
             }
             Node::Stmt(stmt) => {
-                if let Stmt::Assign {
-                    target: Place::Local { binding_id, .. },
-                    ..
-                } = stmt
-                {
+                if let Stmt::Assign { target, .. } = stmt {
                     if let Some(frame) = frames.last_mut() {
-                        record_use(frame, locals, globals, *binding_id)?;
+                        record_place_uses(frame, locals, globals, target)?;
                     }
                 }
                 push_stmt_children(&mut stack, stmt);
@@ -212,6 +208,24 @@ fn record_use(
         .ok_or_else(|| capture_invariant("capture use 的函数 ordinal 越界"))?;
     if !local.contains(&id) && !globals.contains(&id) && frame.seen.insert(id) {
         frame.ordered.push(id);
+    }
+    Ok(())
+}
+
+fn record_place_uses(
+    frame: &mut CaptureFrame,
+    locals: &[HashSet<BindingId>],
+    globals: &HashSet<BindingId>,
+    place: &Place,
+) -> AliasResult<()> {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { binding_id, .. } => {
+                record_use(frame, locals, globals, *binding_id)?;
+            }
+            Place::Field { base, .. } | Place::Index { base, .. } => places.push(base),
+        }
     }
     Ok(())
 }
@@ -297,15 +311,28 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(Node::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
+            // 三遍 capture traversal 必须保持同一 preorder；Place 内只有 Index expression
+            // 仍属于可求值 child，Local/Field identity 本身由 record_place_uses 处理。
             stack.push(Node::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                // capture 的确定性 preorder 保持 target receiver 先于 RHS；三遍遍历必须一致。
-                stack.push(Node::Expr(recv));
-            }
+            push_place_expr_children(stack, target);
         }
         Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value, .. } => {
@@ -433,14 +460,26 @@ fn push_body_mut<'a>(stack: &mut Vec<MutNode<'a>>, body: &'a mut Body) {
     }
 }
 
+fn push_place_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, place: &'a mut Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base.as_mut()),
+            Place::Index { base, index, .. } => {
+                stack.push(MutNode::Expr(index.as_mut()));
+                places.push(base.as_mut());
+            }
+        }
+    }
+}
+
 fn push_stmt_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(MutNode::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(MutNode::Expr(recv));
-            }
+            push_place_expr_children_mut(stack, target);
         }
         Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value, .. } => {

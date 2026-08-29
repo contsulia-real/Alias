@@ -74,15 +74,17 @@ func i32 main = () -> {
 }
 
 #[test]
-fn assignments_lower_to_resolved_places() {
+fn assignments_lower_to_recursive_resolved_places() {
     let source = r#"
 struct cell { var i32 value = 0 }
 func i32 main = () -> {
     var i32 n = 0
     val cell c = cell()
+    val array<cell> cells = [cell()]
     n = 1
     c.value = 2
-    return n + c.value
+    cells[0].value = 3
+    return n + c.value + cells[0].value
 }
 "#;
     let tokens = crate::lexer::lex(source).unwrap();
@@ -105,6 +107,7 @@ func i32 main = () -> {
 
     let mut saw_local = false;
     let mut saw_field = false;
+    let mut saw_index_base = false;
     for stmt in stmts {
         match stmt {
             Stmt::Assign {
@@ -112,17 +115,36 @@ func i32 main = () -> {
                 ..
             } => saw_local = true,
             Stmt::Assign {
-                target: Place::Field { field_index, .. },
+                target: Place::Field { base, field_index, .. },
                 ..
             } => {
                 saw_field = true;
                 assert_eq!(*field_index, 0);
+                if let Place::Index { base, .. } = base.as_ref() {
+                    saw_index_base = matches!(base.as_ref(), Place::Local { .. });
+                }
             }
             _ => {}
         }
     }
     assert!(saw_local);
     assert!(saw_field);
+    assert!(saw_index_base, "cells[0].value 必须固化为 Field(Index(Local))");
+}
+
+#[test]
+fn field_assignment_rejects_temporary_receiver_as_non_place() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    cell().value = 1
+    return 0
+}
+"#;
+    let tokens = crate::lexer::lex(source).unwrap();
+    let program = crate::parser::parse(tokens).unwrap();
+    let error = crate::sema::check(program).expect_err("temporary receiver must not become a Place");
+    assert!(error.msg.contains("不是可寻址 Place"), "实际: {}", error.msg);
 }
 
 #[test]
@@ -362,14 +384,26 @@ fn push_body<'a>(stack: &mut Vec<TestNode<'a>>, body: &'a Body) {
     }
 }
 
+fn push_place_exprs<'a>(stack: &mut Vec<TestNode<'a>>, place: &'a Place) {
+    let mut places = vec![place];
+    while let Some(place) = places.pop() {
+        match place {
+            Place::Local { .. } => {}
+            Place::Field { base, .. } => places.push(base),
+            Place::Index { base, index, .. } => {
+                stack.push(TestNode::Expr(index));
+                places.push(base);
+            }
+        }
+    }
+}
+
 fn push_stmt<'a>(stack: &mut Vec<TestNode<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(TestNode::Expr(&binding.value)),
         Stmt::Assign { target, value } => {
             stack.push(TestNode::Expr(value));
-            if let Place::Field { recv, .. } = target {
-                stack.push(TestNode::Expr(recv));
-            }
+            push_place_exprs(stack, target);
         }
         Stmt::Expr { expr, .. } => stack.push(TestNode::Expr(expr)),
         Stmt::Return { value, .. } => {
