@@ -87,8 +87,8 @@ pub(crate) fn emit_stmt<M: Module>(
             Ok(())
         }
         Stmt::Assign { target, value } => {
-            // Replacement/ownership 语义尚由上游演进；当前运行时顺序必须保持 RHS 先求值，
-            // Field receiver 后求值。Place emitter 只负责已经 resolved 的物理写入。
+            // Replacement/ownership 语义尚由上游演进；当前运行时顺序必须保持 RHS 先完整
+            // 求值，再求值 Place 内的 Field/Index projection。Place emitter 只执行 resolved 写入。
             let value = emit_expr(c, bcx, frame, value)?;
             emit_place_write(c, bcx, frame, target, value)
         }
