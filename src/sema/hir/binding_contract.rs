@@ -1,9 +1,10 @@
 use super::{
-    ArmBody, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Stmt, StrPart,
+    ArmBody, BindKind, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Stmt,
+    StrPart,
 };
 use crate::sema::types::{types_match, Ty};
 use crate::{AliasError, AliasResult, Span};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 enum Node<'a> {
     Expr(&'a Expr),
@@ -223,8 +224,11 @@ fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {
     stack
 }
 
-fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId, Ty>> {
+fn collect_contracts(
+    program: &CheckedProgram,
+) -> AliasResult<(HashMap<BindingId, Ty>, HashSet<BindingId>)> {
     let mut contracts = HashMap::new();
+    let mut writable = HashSet::new();
     for item in &program.items {
         if let Item::Binding(binding) = item {
             register(
@@ -233,6 +237,9 @@ fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId,
                 &binding.ty,
                 binding.span,
             )?;
+            if binding.kind == BindKind::Var {
+                writable.insert(binding.binding_id);
+            }
         }
     }
 
@@ -298,12 +305,17 @@ fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId,
             }
             Node::Stmt(stmt) => {
                 match stmt {
-                    Stmt::Binding(binding) => register(
-                        &mut contracts,
-                        binding.binding_id,
-                        &binding.ty,
-                        binding.span,
-                    )?,
+                    Stmt::Binding(binding) => {
+                        register(
+                            &mut contracts,
+                            binding.binding_id,
+                            &binding.ty,
+                            binding.span,
+                        )?;
+                        if binding.kind == BindKind::Var {
+                            writable.insert(binding.binding_id);
+                        }
+                    }
                     Stmt::For {
                         binding_id,
                         ty,
@@ -316,10 +328,14 @@ fn collect_contracts(program: &CheckedProgram) -> AliasResult<HashMap<BindingId,
             }
         }
     }
-    Ok(contracts)
+    Ok((contracts, writable))
 }
 
-fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -> AliasResult<()> {
+fn validate_uses(
+    program: &CheckedProgram,
+    contracts: &HashMap<BindingId, Ty>,
+    writable: &HashSet<BindingId>,
+) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
@@ -346,6 +362,12 @@ fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -
                                 return Err(invariant(
                                     value.span(),
                                     "Assign RHS 类型与 BindingId 声明类型不一致",
+                                ));
+                            }
+                            if !writable.contains(target_id) {
+                                return Err(invariant(
+                                    value.span(),
+                                    "Assign 目标不是可写 var 绑定",
                                 ));
                             }
                         }
@@ -377,8 +399,9 @@ fn validate_uses(program: &CheckedProgram, contracts: &HashMap<BindingId, Ty>) -
 }
 
 /// Stable BindingId graph 的 final-HIR contract：每个声明 ID 全局唯一并绑定唯一静态类型；
-/// 已解析引用若指向现有声明，必须消费该声明类型。未知引用由 cross-reference validator 拒绝。
+/// 已解析引用必须消费该声明类型，Assign 还必须指向可写 var 绑定。未知引用由
+/// resolved cross-reference validator 拒绝。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
-    let contracts = collect_contracts(program)?;
-    validate_uses(program, &contracts)
+    let (contracts, writable) = collect_contracts(program)?;
+    validate_uses(program, &contracts, &writable)
 }
