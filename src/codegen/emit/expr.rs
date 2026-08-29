@@ -1,12 +1,11 @@
-use super::arrays::{array_element_addr, array_len, array_raw, emit_array_lit};
+use super::arrays::{checked_array_element_addr, emit_array_lit};
 use super::calls::{emit_call, emit_method_call};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
 };
 use super::control::emit_stmt;
 use super::ops::{
-    emit_abort_branch, emit_binary, emit_convert, emit_index_guard, narrow, widen_signed,
-    widen_unsigned,
+    emit_abort_branch, emit_binary, emit_convert, narrow, widen_signed, widen_unsigned,
 };
 use super::places::field_storage;
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
@@ -177,7 +176,7 @@ pub(crate) fn emit_expr<M: Module>(
             recv, field_index, ..
         } => {
             let p = emit_expr(c, bcx, frame, recv)?;
-            let (fvty, offset) = field_storage(c, recv, *field_index)?;
+            let (fvty, offset) = field_storage(c, recv.ty(), *field_index)?;
             let raw = bcx
                 .ins()
                 .load(cl_type(&fvty), MemFlagsData::new(), p, offset);
@@ -192,13 +191,7 @@ pub(crate) fn emit_expr<M: Module>(
                 VTy::Array(inner) => (*inner).clone(),
                 _ => invariant_violation("下标主语为 array (sema 已校验)"),
             };
-            let raw_array = array_raw(bcx, array);
-            let idx32 = bcx.ins().ireduce(types::I32, idxw);
-            let len64 = array_len(bcx, raw_array);
-            let len32 = bcx.ins().ireduce(types::I32, len64);
-            emit_index_guard(c, bcx, idx32, len32, *span)?;
-            let idx64 = bcx.ins().sextend(types::I64, idx32);
-            let addr = array_element_addr(bcx, raw_array, idx64);
+            let addr = checked_array_element_addr(c, bcx, array, idxw, *span)?;
             let raw = bcx
                 .ins()
                 .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
