@@ -63,6 +63,7 @@ src/
 ├── sema/
 │   ├── mod.rs              # check(Program) -> CheckedProgram
 │   ├── decls.rs / stmts.rs
+│   ├── places.rs           # 可赋值 Place 解析、目标可写性与赋值目标类型检查
 │   ├── exprs.rs + exprs/   # 表达式静态语义、调用/方法解析、目标类型传播
 │   ├── types.rs            # Ty 与类型槽检查
 │   └── hir.rs + hir/       # typed HIR、lower、capture、validate、visit

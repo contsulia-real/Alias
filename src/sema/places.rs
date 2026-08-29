@@ -1,0 +1,105 @@
+//! 可赋值 Place 的静态解析与目标检查。
+//!
+//! 语句检查只负责控制流编排；“这个赋值写到哪里、目标是否可写、RHS 应采用什么类型”
+//! 属于 Place 语义。该规则只在这里实现，HIR lowering 与 codegen 只能消费已解析结果。
+
+use super::{Checker, Env, Scope};
+use crate::ast::{Expr, Stmt};
+use crate::sema::types::Ty;
+use crate::{AliasError, AliasResult, Span};
+
+impl Checker {
+    pub(super) fn check_local_assignment(
+        &mut self,
+        stmt: &Stmt,
+        target: &str,
+        value: &Expr,
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<()> {
+        let Some(info) = Scope::get(env, target) else {
+            return Err(AliasError {
+                msg: format!("赋值目标 '{target}' 未定义"),
+                span,
+            });
+        };
+        if !info.mutable {
+            return Err(AliasError {
+                msg: format!("'{target}' 是 val 绑定, 不可重新赋值"),
+                span,
+            });
+        }
+
+        // 该地址只在本次 check → lower 链内作为临时 fact identity。若未来 AST
+        // rewrite 会移动 Stmt，必须先换稳定 NodeId；不能用 lookup fallback 掩盖错配。
+        self.assign_target_ids
+            .insert(stmt as *const Stmt as usize, info.id);
+        self.expr_expected(value, env, &info.ty).map_err(|error| {
+            let error = error.into_alias();
+            AliasError {
+                msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), error.msg),
+                span: error.span,
+            }
+        })?;
+        Ok(())
+    }
+
+    pub(super) fn check_field_assignment(
+        &mut self,
+        stmt: &Stmt,
+        recv: &Expr,
+        field: &str,
+        value: &Expr,
+        span: Span,
+        env: &Env,
+    ) -> AliasResult<()> {
+        let recv_ty = self.expr(recv, env)?;
+        if recv_ty.is_unknown() {
+            self.expr(value, env)?;
+            return Ok(());
+        }
+        let Ty::Struct(struct_name) = recv_ty else {
+            return Err(AliasError {
+                msg: format!("{} 没有字段 '{}'", recv_ty.name(), field),
+                span,
+            });
+        };
+        let info = &self.structs[&struct_name];
+        let Some((field_index, field_info)) = info
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.name == field)
+            .map(|(index, field)| (index, field.clone()))
+        else {
+            return Err(AliasError {
+                msg: format!("结构体 {struct_name} 没有字段 '{field}'"),
+                span,
+            });
+        };
+        if !field_info.mutable {
+            return Err(AliasError {
+                msg: format!("'{field}' 是 val 字段, 不可赋值"),
+                span,
+            });
+        }
+
+        // FieldAssign 与普通 Assign 共用同一 AST-Stmt 生命周期约束；这里只记录
+        // sema 已裁决的字段索引，lowering 不得再按字段名重新解析。
+        self.field_assign_indices
+            .insert(stmt as *const Stmt as usize, field_index);
+        self.expr_expected(value, env, &field_info.ty)
+            .map_err(|error| {
+                let error = error.into_alias();
+                AliasError {
+                    msg: format!(
+                        "字段 '{field}' 需要 {}: {}",
+                        field_info.ty.name(),
+                        error.msg
+                    ),
+                    span: error.span,
+                }
+            })?;
+        Ok(())
+    }
+}

@@ -3,6 +3,7 @@
 mod decls;
 mod exprs;
 pub(crate) mod hir;
+mod places;
 mod stmts;
 pub(crate) mod types;
 

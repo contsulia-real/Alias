@@ -288,27 +288,7 @@ impl Checker {
                 value,
                 span,
             } => {
-                let Some(info) = Scope::get(env, target) else {
-                    return Err(AliasError {
-                        msg: format!("赋值目标 '{target}' 未定义"),
-                        span: *span,
-                    });
-                };
-                if !info.mutable {
-                    return Err(AliasError {
-                        msg: format!("'{target}' 是 val 绑定, 不可重新赋值"),
-                        span: *span,
-                    });
-                }
-                self.assign_target_ids
-                    .insert(s as *const Stmt as usize, info.id);
-                self.expr_expected(value, env, &info.ty).map_err(|error| {
-                    let error = error.into_alias();
-                    AliasError {
-                        msg: format!("赋值目标 '{target}' 需要 {}: {}", info.ty.name(), error.msg),
-                        span: error.span,
-                    }
-                })?;
+                self.check_local_assignment(s, target, value, *span, env)?;
                 Ok(None)
             }
             Stmt::FieldAssign {
@@ -317,45 +297,7 @@ impl Checker {
                 value,
                 span,
             } => {
-                let rt = self.expr(recv, env)?;
-                if rt.is_unknown() {
-                    self.expr(value, env)?;
-                    return Ok(None);
-                }
-                let Ty::Struct(struct_name) = rt else {
-                    return Err(AliasError {
-                        msg: format!("{} 没有字段 '{}'", rt.name(), field),
-                        span: *span,
-                    });
-                };
-                let info = &self.structs[&struct_name];
-                let Some((field_index, f)) = info
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .find(|(_, fi)| fi.name == *field)
-                    .map(|(index, field)| (index, field.clone()))
-                else {
-                    return Err(AliasError {
-                        msg: format!("结构体 {struct_name} 没有字段 '{field}'"),
-                        span: *span,
-                    });
-                };
-                if !f.mutable {
-                    return Err(AliasError {
-                        msg: format!("'{field}' 是 val 字段, 不可赋值"),
-                        span: *span,
-                    });
-                }
-                self.field_assign_indices
-                    .insert(s as *const Stmt as usize, field_index);
-                self.expr_expected(value, env, &f.ty).map_err(|error| {
-                    let error = error.into_alias();
-                    AliasError {
-                        msg: format!("字段 '{field}' 需要 {}: {}", f.ty.name(), error.msg),
-                        span: error.span,
-                    }
-                })?;
+                self.check_field_assignment(s, recv, field, value, *span, env)?;
                 Ok(None)
             }
             Stmt::Expr { expr, .. } => {
