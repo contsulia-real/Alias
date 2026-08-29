@@ -22,7 +22,7 @@ pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
     CallTarget, CheckedProgram, CtorKind, Expr, ExprCategory, ExprInfo, Item, MatchArm, MethodId,
     MethodTarget, Param, Pattern, Place, PlaceInfo, ResolvedConversion, Stmt, StrPart, StructDef,
-    StructField,
+    StructField, ValueCategory,
 };
 
 use crate::sema::types::Ty;

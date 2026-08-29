@@ -210,12 +210,23 @@ pub(crate) enum CallTarget {
     Builtin(BuiltinCall),
 }
 
+/// 已经产生 Value 的表达式继续记录 ownership-sensitive 细分类。
+///
+/// `General` 是当前第 2 阶段尚未证明为 OwnedTemporary 的普通 Value 桶；它不表示
+/// InlineValue/BorrowedValue/Null 已经裁决，也不能被 codegen 当成任何 ownership fallback。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueCategory {
+    General,
+    OwnedTemporary,
+}
+
 /// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。
-/// OwnedTemporary/BorrowedValue/Null 属于 Value 的后续细分类，不与这一层 Place/Value 事实竞争。
+/// Value 内部再由 `ValueCategory` 逐步固化 InlineValue/OwnedTemporary/BorrowedValue/Null
+/// 等最终语义；当前阶段只先冻结无歧义的 OwnedTemporary。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExprCategory {
     Place,
-    Value,
+    Value(ValueCategory),
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +407,13 @@ impl Expr {
 
     pub(crate) fn category(&self) -> Option<ExprCategory> {
         self.info().category
+    }
+
+    pub(crate) fn value_category(&self) -> Option<ValueCategory> {
+        match self.category()? {
+            ExprCategory::Place => None,
+            ExprCategory::Value(category) => Some(category),
+        }
     }
 
     pub(crate) fn span(&self) -> Span {

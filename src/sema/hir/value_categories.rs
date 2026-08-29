@@ -1,7 +1,8 @@
 use super::{
-    ArmBody, Body, CheckedProgram, Expr, ExprCategory, Item, MatchArm, Place, ResolvedConversion,
-    Stmt, StrPart,
+    ArmBody, Body, CallTarget, CheckedProgram, Expr, ExprCategory, Item, MatchArm, MethodTarget,
+    Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
 };
+use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
 
 enum Node<'a> {
@@ -16,11 +17,91 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-/// resolved HIR 节点到粗粒度 Place/Value category 的唯一映射 owner。
+/// 当前已经具有独立动态 ownership root 的语言值类型。
 ///
-/// Identity conversion 不产生新值，必须保留 inner 的 category；其它 conversion/运算/
-/// 调用节点都产生 Value。OwnedTemporary/BorrowedValue/Null 会在后续阶段继续细分 Value，
-/// 不改变这一层 Place/Value 合同。
+/// 这不是 DeepCloneable/ShallowCloneable 判定；它只回答一个已产生的 Value 是否可能携带
+/// 独立 owner。ptr<T> 等后续类型引入后必须在其静态 ownership 规则落地时扩展此 owner。
+fn carries_dynamic_owner(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Str
+            | Ty::Func { .. }
+            | Ty::Struct(_)
+            | Ty::Result(..)
+            | Ty::Array(_)
+            | Ty::Iterator(_)
+    )
+}
+
+/// 当前阶段能够不依赖 function effects、loan 或 capability dataflow 就证明为新 owner 的
+/// resolved HIR 来源。这里必须保持保守：动态函数/用户方法返回、ternary/match merge、
+/// propagate 等仍交给后续 ownership/effect 阶段，不得仅按结果类型猜成 OwnedTemporary。
+fn produces_owned_temporary(expr: &Expr) -> bool {
+    match expr {
+        Expr::Str(..)
+        | Expr::This(..)
+        | Expr::Typeof { .. }
+        | Expr::ArrayLit { .. }
+        | Expr::FuncLit { .. } => true,
+        Expr::Cast { .. }
+        | Expr::Convert {
+            mode: ResolvedConversion::Convert,
+            ..
+        } => carries_dynamic_owner(expr.ty()),
+        Expr::Call { target, .. } => matches!(
+            target,
+            CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_)
+        ),
+        Expr::MethodCall { target, .. } => match target {
+            MethodTarget::StringUpper
+            | MethodTarget::StringLower
+            | MethodTarget::StringTrim
+            | MethodTarget::ArrayIterator => true,
+            MethodTarget::ArrayPop => carries_dynamic_owner(expr.ty()),
+            MethodTarget::Numeric(_)
+            | MethodTarget::BoolNot
+            | MethodTarget::StringLen
+            | MethodTarget::ArrayLen
+            | MethodTarget::ArrayPush
+            | MethodTarget::User { .. } => false,
+        },
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Ident(..)
+        | Expr::Binary { .. }
+        | Expr::Neg { .. }
+        | Expr::Not { .. }
+        | Expr::BitNot { .. }
+        | Expr::Ternary { .. }
+        | Expr::Index { .. }
+        | Expr::Field { .. }
+        | Expr::Match { .. }
+        | Expr::Propagate { .. } => false,
+        Expr::Convert {
+            mode: ResolvedConversion::Identity,
+            ..
+        } => false,
+    }
+}
+
+fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCategory> {
+    let category = inner
+        .category()
+        .ok_or_else(|| invariant(span, "Identity Convert 的 inner category 尚未 finalization"))?;
+    Ok(match category {
+        ExprCategory::Place => ExprCategory::Place,
+        ExprCategory::Value(_) => ExprCategory::Value(inner.value_category().ok_or_else(|| {
+            invariant(span, "Identity Convert 的 inner Value 缺少 value category")
+        })?),
+    })
+}
+
+/// resolved HIR 节点到 Place/Value + 当前 value subcategory 的唯一映射 owner。
+///
+/// Identity conversion 不产生新值，必须完整保留 inner category；其它节点先决定 Place/Value，
+/// 再只把当前阶段无歧义的新 owner 标成 OwnedTemporary。`General` 只是当前阶段的普通 Value
+/// 桶，后续 InlineValue/BorrowedValue/Null/effect 分析继续细分；codegen 不得据此推断 ownership。
 fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     Ok(match expr {
         Expr::Ident(_, Some(_), ..) | Expr::Field { .. } | Expr::Index { .. } => {
@@ -29,14 +110,11 @@ fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
         Expr::Convert {
             expr: inner,
             mode: ResolvedConversion::Identity,
+            span,
             ..
-        } => inner.category().ok_or_else(|| {
-            invariant(
-                expr.span(),
-                "Identity Convert 的 inner category 尚未 finalization",
-            )
-        })?,
-        _ => ExprCategory::Value,
+        } => inherited_identity_category(inner, *span)?,
+        _ if produces_owned_temporary(expr) => ExprCategory::Value(ValueCategory::OwnedTemporary),
+        _ => ExprCategory::Value(ValueCategory::General),
     })
 }
 
@@ -51,8 +129,8 @@ pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
     Ok(())
 }
 
-/// final-HIR gate 独立重算每个节点的 resolved category；任何 None 或与最终 HIR 形状
-/// 不一致的值都不能进入 codegen。显式栈避免为这项新分析引入额外宿主递归。
+/// final-HIR gate 独立重算每个节点的 resolved category；任何 None 或与最终 HIR 形状/
+/// 当前 OwnedTemporary 规则不一致的值都不能进入 codegen。显式栈避免引入额外宿主递归。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
@@ -65,7 +143,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 if got != want {
                     return Err(invariant(
                         expr.span(),
-                        "Expr category 与 resolved HIR 形状不一致",
+                        "Expr category 与 resolved HIR ownership 形状不一致",
                     ));
                 }
                 push_expr_children(&mut stack, expr);
