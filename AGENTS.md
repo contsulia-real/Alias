@@ -66,7 +66,7 @@ src/
 │   ├── places.rs           # 递归 Place(Local/Field/Index) 解析、终端可写性与赋值目标类型检查
 │   ├── exprs.rs + exprs/   # 表达式静态语义；deep_clone.rs / shallow_clone.rs 分别拥有 capability + plan
 │   ├── types.rs            # Ty 与类型槽检查
-│   └── hir.rs + hir/       # typed HIR、lower、value category、initial capability、storage relation、capture、validate、visit
+│   └── hir.rs + hir/       # typed HIR、lower、value/category/capability/relation、Place overlap、capture、validate、visit
 ├── codegen/
 │   ├── mod.rs              # compile_to_object(CheckedProgram)
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
@@ -93,7 +93,7 @@ parser 可以查询 `builtins.rs` 中**明确属于语法分类**的信息，但
 
 ### sema
 
-sema 是语言静态语义的 owner。名字解析、目标类型传播、转换关系、调用/方法归属、Pattern coverage、字段/构造器索引，以及当前已落地的 value category / initial ownership capability / binding storage relation 和后续 loan、Place overlap、function effect 等静态事实，都必须在这里或其明确的 sema 子 owner 中完成。
+sema 是语言静态语义的 owner。名字解析、目标类型传播、转换关系、调用/方法归属、Pattern coverage、字段/构造器索引，以及当前已落地的 value category / initial ownership capability / binding storage relation / Place overlap 和后续 loan、function effect 等静态事实，都必须在这里或其明确的 sema 子 owner 中完成。
 
 显式 `clone` 的 DeepCloneable 判定与递归 `DeepClonePlan` 只由 `sema/exprs/deep_clone.rs` 决定；显式 `shallow` 的递归 ShallowCloneable 判定、standalone root legality 与 `ShallowClonePlan` 只由 `sema/exprs/shallow_clone.rs` 决定。其它 checker/validator 可以调用这些 owner，但不得复制类型 capability 矩阵。generic `call()` / `resolve_call_target()` 对 ownership intrinsic 只允许 fail-closed，不得形成第二条解析路径或重新计算 plan。
 
@@ -106,6 +106,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - 每个可求值 HIR 表达式有最终 `Ty`；`hir/value_categories.rs` 固化 `Place` 与 Value 子类，当前明确区分 `InlineValue`、`OwnedTemporary` 与仍需后续 effect/ownership 事实继续收窄的 `General`；Identity conversion 必须完整继承 inner category；
 - `hir/ownership_capabilities.rs` 独立固化当前可证明的 initial capability：`InlineValue → None`、`OwnedTemporary → Available`；Place / General 在当前迁移阶段没有可伪造的 capability fact，codegen 不得把缺失 fact 当 fallback；
 - 显式 Binding 由 `hir/storage_relations.rs` 固化当前可证明的 slot relation：InlineValue / OwnedTemporary 与标量 Place 读取可确定为 `Owning`；动态 Place 的普通读取与动态函数返回在 ordinary-read DeepClone / return-effect 落地前不得提前猜 relation；
+- `hir/place_relation.rs` 是 resolved Place 三态关系 `Disjoint / Overlap / Unknown` 的唯一 owner；不同 Local root、字段 divergence、常量 index divergence 等证明只在这里完成，动态 index 无充分事实时保持 `Unknown`，final gate 同时验证自反与 ancestor overlap 不变量；
 - 显式 `clone` 固化为 `CallTarget::Builtin(BuiltinCall::DeepClone(DeepClonePlan))`；dynamic ownership-bearing clone 是 `OwnedTemporary + Available`，标量 clone 保持 `InlineValue + None`；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
 - Binding/Method/字段/构造器索引均已结构化解析；
@@ -116,7 +117,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - value category、当前可证明的 initial capability / storage relation 与 capture 列表都在最终 HIR validation 前写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作一旦进入当前 HIR，就必须在进入 codegen 前固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 move/free/loan/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 move/free/loan/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
 
 ### codegen
 
@@ -208,7 +209,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 实现要求：
 
 - 对用户输入的深度/规模必须有显式上限；
-- HIR value-category / initial-capability / storage-relation / capture / validation 等遍历避免对不可信嵌套使用宿主递归；
+- HIR value-category / initial-capability / storage-relation / Place-relation / capture / validation 等遍历避免对不可信嵌套使用宿主递归；
 - 公开 build/run 管线在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖调用者线程栈承载合法输入；
 - 用户输入超限必须产生 `AliasError`，不能 panic；
 - internal invariant panic 只用于 sema 成功后理论上不可达的编译器内部状态。
@@ -221,7 +222,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 - 不因拆文件而把父模块私有状态批量升级成 `pub(crate)`；仅暴露真实跨模块接口；
 - 无消费者字段、缓存、签名表或未来占位状态应删除，而不是为了“可能以后用”保留；
 - 不通过 accidental transitive import、wildcard re-export 或巨型 facade 获得依赖；
-- 相似遍历不等于同一职责。HIR visit/validate/capture/value-category/initial-capability/storage-relation，以及后续 loan/effect 分析若具有不同状态与失败语义，不为机械 DRY 建立万能 Visitor。
+- 相似遍历不等于同一职责。HIR visit/validate/capture/value-category/initial-capability/storage-relation/Place-relation，以及后续 loan/effect 分析若具有不同状态与失败语义，不为机械 DRY 建立万能 Visitor。
 
 ## 11. 注释标准
 
