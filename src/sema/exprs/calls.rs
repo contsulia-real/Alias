@@ -289,7 +289,14 @@ impl Checker {
                 span: *tspan,
             });
         };
-        if !info.mutable {
+        let borrowed_writable = self.borrowed_bindings.get(&info.id).copied();
+        if borrowed_writable == Some(false) {
+            return Err(AliasError {
+                msg: format!("'{target}' 的 referent 未证明可写, 不能 {name}"),
+                span: *tspan,
+            });
+        }
+        if borrowed_writable.is_none() && !info.mutable {
             return Err(AliasError {
                 msg: format!("'{target}' 是 val 绑定, 不能 {name}"),
                 span: *tspan,

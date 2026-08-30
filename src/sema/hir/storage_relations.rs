@@ -21,13 +21,17 @@ fn is_inline_type(ty: &Ty) -> bool {
 }
 
 pub(super) fn initial_relation(value: &Expr) -> AliasResult<Option<StorageRelation>> {
-    let category = value
-        .category()
-        .ok_or_else(|| invariant(value.span(), "storage relation 缺少 value category 前置事实"))?;
+    let category = value.category().ok_or_else(|| {
+        invariant(
+            value.span(),
+            "storage relation 缺少 value category 前置事实",
+        )
+    })?;
     Ok(match category {
         ExprCategory::Value(ValueCategory::InlineValue | ValueCategory::OwnedTemporary) => {
             Some(StorageRelation::Owning)
         }
+        ExprCategory::Value(ValueCategory::BorrowedValue) => Some(StorageRelation::Borrowed),
         ExprCategory::Place if is_inline_type(value.ty()) => Some(StorageRelation::Owning),
         ExprCategory::Place | ExprCategory::Value(ValueCategory::General) => None,
     })
@@ -202,7 +206,12 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(then_expr));
             stack.push(Node::Expr(cond));
         }
-        Expr::Call { callee, args, target, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            target,
+            ..
+        } => {
             for arg in args.iter().rev() {
                 stack.push(Node::Expr(&arg.value));
             }
@@ -228,9 +237,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)

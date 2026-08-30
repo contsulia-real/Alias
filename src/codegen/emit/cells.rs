@@ -1,6 +1,6 @@
-use crate::codegen::abi::{cl_type, norm_load, norm_store, size_align, value_word_offset, VTy};
-use crate::codegen::{invariant_violation, Compiler, Frame, Slot};
-use crate::sema::hir::BindingId;
+use crate::codegen::abi::{norm_store, size_align, value_word_offset, VTy};
+use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
+use crate::sema::hir::{BindingId, StorageRelation};
 use crate::AliasResult;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
@@ -37,7 +37,24 @@ pub(crate) fn cell_addr<M: Module>(
     }
     c.globals_final
         .get(&id)
-        .map(|(off, _)| CellAddr::GlobalOff(*off))
+        .map(|(off, _, _)| CellAddr::GlobalOff(*off))
+}
+
+/// Materialize the semantic storage addressed by a binding. An owning binding's cell is the
+/// storage itself; a borrowed binding's cell stores the referent address so closure capture can
+/// share the alias slot and still observe `var` rebinds.
+pub(crate) fn binding_storage_addr<M: Module>(
+    c: &Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    id: BindingId,
+) -> Option<Value> {
+    let cell = materialize_cell_addr(bcx, frame, &cell_addr(c, frame, id)?);
+    if bound_relation(c, frame, id) == Some(StorageRelation::Borrowed) {
+        Some(bcx.ins().load(types::I64, MemFlagsData::new(), cell, 0))
+    } else {
+        Some(cell)
+    }
 }
 
 /// 把已经解析的 binding cell 位置统一物化成实际 machine address。
@@ -64,30 +81,6 @@ pub(crate) fn materialize_cell_addr(
     }
 }
 
-pub(crate) fn read_cell(
-    bcx: &mut FunctionBuilder,
-    frame: &Frame,
-    addr: &CellAddr,
-    vty: &VTy,
-) -> Value {
-    let t = cl_type(vty);
-    let cell = materialize_cell_addr(bcx, frame, addr);
-    let raw = bcx.ins().load(t, MemFlagsData::new(), cell, 0);
-    norm_load(bcx, raw, vty)
-}
-
-pub(crate) fn write_cell(
-    bcx: &mut FunctionBuilder,
-    frame: &Frame,
-    addr: &CellAddr,
-    v: Value,
-    vty: &VTy,
-) {
-    let sv = norm_store(bcx, v, vty);
-    let cell = materialize_cell_addr(bcx, frame, addr);
-    bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
-}
-
 pub(crate) fn emit_local_cell<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -95,11 +88,20 @@ pub(crate) fn emit_local_cell<M: Module>(
     word: Value,
     vty: VTy,
     id: BindingId,
+    relation: Option<StorageRelation>,
 ) -> AliasResult<Variable> {
-    let (sz, _) = size_align(&vty);
+    let (sz, _) = if relation == Some(StorageRelation::Borrowed) {
+        (8, 8)
+    } else {
+        size_align(&vty)
+    };
     let szw = bcx.ins().iconst(types::I64, sz as i64);
     let cell = c.call_rt(bcx, "alias.cell.new", &[szw])?;
-    let sv = norm_store(bcx, word, &vty);
+    let sv = if relation == Some(StorageRelation::Borrowed) {
+        word
+    } else {
+        norm_store(bcx, word, &vty)
+    };
     bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
     let var = bcx.declare_var(types::I64);
     bcx.def_var(var, cell);
@@ -113,6 +115,11 @@ pub(crate) fn emit_local_cell<M: Module>(
         .last_mut()
         .unwrap_or_else(|| invariant_violation("作用域栈非空"))
         .insert(id, vty);
+    frame
+        .locals_relation
+        .last_mut()
+        .unwrap_or_else(|| invariant_violation("作用域栈非空"))
+        .insert(id, relation);
     Ok(var)
 }
 
@@ -145,9 +152,11 @@ pub(crate) fn coerce_ret(bcx: &mut FunctionBuilder, frame: &Frame, v: Value) -> 
 pub(crate) fn push_scope(frame: &mut Frame) {
     frame.scopes.push(HashMap::new());
     frame.locals_vty.push(HashMap::new());
+    frame.locals_relation.push(HashMap::new());
 }
 
 pub(crate) fn pop_scope(frame: &mut Frame) {
     frame.scopes.pop();
     frame.locals_vty.pop();
+    frame.locals_relation.pop();
 }

@@ -10,6 +10,75 @@ use crate::ast::{Expr, Stmt};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
+    pub(super) fn place_terminal_is_writable(&self, expr: &Expr, env: &Env) -> AliasResult<bool> {
+        match expr {
+            Expr::Ident(name, span) => {
+                Scope::get(env, name)
+                    .map(|info| info.mutable)
+                    .ok_or_else(|| AliasError {
+                        msg: format!("Place 根 '{name}' 未定义"),
+                        span: *span,
+                    })
+            }
+            Expr::Field { recv, name, span } => {
+                let recv_ty = self.place_type_without_recording(recv, env)?;
+                let Ty::Struct(struct_name) = recv_ty else {
+                    return Err(AliasError {
+                        msg: format!("{} 没有字段 '{name}'", recv_ty.name()),
+                        span: *span,
+                    });
+                };
+                self.struct_field(&struct_name, name, *span)
+                    .map(|(_, field)| field.mutable)
+            }
+            // Direct Index assignment is not yet a supported Place terminal, so a borrow cannot
+            // manufacture write permission that the assignment checker itself does not expose.
+            Expr::Index { .. } => Ok(false),
+            _ => Err(AliasError {
+                msg: "该表达式不是可寻址 Place".into(),
+                span: expr.span(),
+            }),
+        }
+    }
+
+    fn place_type_without_recording(&self, expr: &Expr, env: &Env) -> AliasResult<Ty> {
+        match expr {
+            Expr::Ident(name, span) => {
+                Scope::get(env, name)
+                    .map(|info| info.ty)
+                    .ok_or_else(|| AliasError {
+                        msg: format!("Place 根 '{name}' 未定义"),
+                        span: *span,
+                    })
+            }
+            Expr::Field { recv, name, span } => {
+                let recv_ty = self.place_type_without_recording(recv, env)?;
+                let Ty::Struct(struct_name) = recv_ty else {
+                    return Err(AliasError {
+                        msg: format!("{} 没有字段 '{name}'", recv_ty.name()),
+                        span: *span,
+                    });
+                };
+                self.struct_field(&struct_name, name, *span)
+                    .map(|(_, field)| field.ty)
+            }
+            Expr::Index { recv, span, .. } => {
+                let recv_ty = self.place_type_without_recording(recv, env)?;
+                let Ty::Array(elem) = recv_ty else {
+                    return Err(AliasError {
+                        msg: format!("下标 Place 需要 array 类型, 实际 {}", recv_ty.name()),
+                        span: *span,
+                    });
+                };
+                Ok(*elem)
+            }
+            _ => Err(AliasError {
+                msg: "该表达式不是可寻址 Place".into(),
+                span: expr.span(),
+            }),
+        }
+    }
+
     /// 把一个源码表达式解析为结构化 Place。只有真正表示已有 storage 的 Ident/Field/Index
     /// 可以进入这里；constructor/call/ternary 等 Value 不能因为当前物理表示像 pointer 就被
     /// 后端当成 Place。Index 的用户表达式仍通过普通 expr checker 固化其类型 facts。

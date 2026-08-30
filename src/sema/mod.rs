@@ -31,6 +31,7 @@ pub(crate) enum LowerCallTarget {
     StructConstructor(String),
     ResultConstructor(crate::ast::CtorKind),
     Builtin(BuiltinCall),
+    Borrow,
     Move,
     Typeof,
     ContextualConversion(ResolvedConversion),
@@ -269,6 +270,7 @@ struct Checker {
 
     next_binding_id: u32,
     next_method_id: u32,
+    next_loan_id: u32,
 
     expr_facts: HashMap<usize, LowerExprInfo>,
     binding_types: HashMap<usize, Ty>,
@@ -279,6 +281,8 @@ struct Checker {
     field_types: HashMap<usize, Ty>,
     field_indices: HashMap<usize, usize>,
     assignment_places: HashMap<usize, hir::LowerPlaceInfo>,
+    borrow_places: HashMap<usize, hir::LowerBorrowInfo>,
+    borrowed_bindings: HashMap<BindingId, bool>,
     move_places: HashMap<usize, hir::LowerPlaceInfo>,
     owning_reads: HashMap<usize, hir::LowerOwningReadInfo>,
     ctor_arg_indices: HashMap<usize, usize>,
@@ -315,6 +319,15 @@ impl Checker {
         Ok(id)
     }
 
+    fn fresh_loan_id(&mut self) -> AliasResult<hir::LoanId> {
+        let id = hir::LoanId(self.next_loan_id);
+        self.next_loan_id = self.next_loan_id.checked_add(1).ok_or_else(|| AliasError {
+            msg: "内部 sema 不变式被破坏: LoanId 耗尽".into(),
+            span: Span::default(),
+        })?;
+        Ok(id)
+    }
+
     fn binding_id_for(&mut self, binding: &Binding) -> AliasResult<BindingId> {
         // facts 的 identity 只在同一次 check(program) → hir::lower(program) 调用链内有效。
         // 这段期间 AST 仍由原 Program 持有且不得 move/clone-replace 节点；lower 会用同一
@@ -338,6 +351,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         methods: HashMap::new(),
         next_binding_id: 0,
         next_method_id: 0,
+        next_loan_id: 0,
         expr_facts: HashMap::new(),
         binding_types: HashMap::new(),
         binding_ids: HashMap::new(),
@@ -347,6 +361,8 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         field_types: HashMap::new(),
         field_indices: HashMap::new(),
         assignment_places: HashMap::new(),
+        borrow_places: HashMap::new(),
+        borrowed_bindings: HashMap::new(),
         move_places: HashMap::new(),
         owning_reads: HashMap::new(),
         ctor_arg_indices: HashMap::new(),
@@ -417,6 +433,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
             fields: ck.field_types,
             field_indices: ck.field_indices,
             assignment_places: ck.assignment_places,
+            borrow_places: ck.borrow_places,
             move_places: ck.move_places,
             owning_reads: ck.owning_reads,
             params: ck.param_types,

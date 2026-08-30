@@ -1,6 +1,6 @@
 use super::{
-    ArmBody, BindKind, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Place,
-    Stmt, StrPart,
+    ArmBody, BindKind, BindingId, Body, CheckedProgram, CtorKind, Expr, Item, Pattern, Place, Stmt,
+    StorageRelation, StrPart,
 };
 use crate::sema::types::{types_match, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 enum Node<'a> {
     Expr(&'a Expr),
     Stmt(&'a Stmt),
+}
+
+struct CollectedContracts {
+    types: HashMap<BindingId, Ty>,
+    writable: HashSet<BindingId>,
+    borrowed: HashSet<BindingId>,
 }
 
 fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
@@ -137,9 +143,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -240,11 +246,10 @@ fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {
     stack
 }
 
-fn collect_contracts(
-    program: &CheckedProgram,
-) -> AliasResult<(HashMap<BindingId, Ty>, HashSet<BindingId>)> {
+fn collect_contracts(program: &CheckedProgram) -> AliasResult<CollectedContracts> {
     let mut contracts = HashMap::new();
     let mut writable = HashSet::new();
+    let mut borrowed = HashSet::new();
     for item in &program.items {
         if let Item::Binding(binding) = item {
             register(
@@ -331,6 +336,9 @@ fn collect_contracts(
                         if binding.kind == BindKind::Var {
                             writable.insert(binding.binding_id);
                         }
+                        if binding.relation == Some(StorageRelation::Borrowed) {
+                            borrowed.insert(binding.binding_id);
+                        }
                     }
                     Stmt::For {
                         binding_id,
@@ -344,15 +352,16 @@ fn collect_contracts(
             }
         }
     }
-    Ok((contracts, writable))
+    Ok(CollectedContracts {
+        types: contracts,
+        writable,
+        borrowed,
+    })
 }
 
 /// Place projection 里的每个 Local root 都必须保持与自身声明一致的静态类型。这里不拥有
 /// field/index projection 方程，只验证 BindingId 合同；同一 Place 的终端可写性由外层操作决定。
-fn validate_place_bindings(
-    place: &Place,
-    contracts: &HashMap<BindingId, Ty>,
-) -> AliasResult<()> {
+fn validate_place_bindings(place: &Place, contracts: &HashMap<BindingId, Ty>) -> AliasResult<()> {
     let mut stack = vec![place];
     while let Some(place) = stack.pop() {
         match place {
@@ -372,11 +381,12 @@ fn validate_place_bindings(
     Ok(())
 }
 
-fn validate_uses(
-    program: &CheckedProgram,
-    contracts: &HashMap<BindingId, Ty>,
-    writable: &HashSet<BindingId>,
-) -> AliasResult<()> {
+fn validate_uses(program: &CheckedProgram, collected: &CollectedContracts) -> AliasResult<()> {
+    let CollectedContracts {
+        types: contracts,
+        writable,
+        borrowed,
+    } = collected;
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
@@ -392,7 +402,10 @@ fn validate_uses(
                 {
                     if let [arg] = args.as_slice() {
                         if let Expr::Ident(_, Some(id), ..) = &arg.value {
-                            if contracts.contains_key(id) && !writable.contains(id) {
+                            if contracts.contains_key(id)
+                                && !writable.contains(id)
+                                && !borrowed.contains(id)
+                            {
                                 return Err(invariant(
                                     arg.value.span(),
                                     "increase/decrease 目标不是可写 var 绑定",
@@ -411,7 +424,7 @@ fn validate_uses(
                         }
                     }
                 }
-                if let Expr::Move { source, .. } = expr {
+                if let Expr::Move { source, .. } | Expr::Borrow { source, .. } = expr {
                     validate_place_bindings(source, contracts)?;
                 }
                 if let Expr::ReadPlace { source, .. } = expr {
@@ -424,7 +437,8 @@ fn validate_uses(
                     Stmt::Assign { target, .. } => {
                         validate_place_bindings(target, contracts)?;
                         if let Place::Local { binding_id, .. } = target {
-                            if contracts.contains_key(binding_id) && !writable.contains(binding_id) {
+                            if contracts.contains_key(binding_id) && !writable.contains(binding_id)
+                            {
                                 return Err(invariant(
                                     target.span(),
                                     "Assign 目标不是可写 var 绑定",
@@ -462,6 +476,6 @@ fn validate_uses(
 /// Place 中所有 Local root 必须与 BindingId 声明类型一致。只有终端 Local assignment 要求
 /// `var`；Field/Index base 的 local mutability 不决定其可投影性。
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
-    let (contracts, writable) = collect_contracts(program)?;
-    validate_uses(program, &contracts, &writable)
+    let contracts = collect_contracts(program)?;
+    validate_uses(program, &contracts)
 }

@@ -6,6 +6,7 @@ use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
 use crate::codegen::{
     bound_vty, invariant_violation, native_err, Compiler, Frame, PendingFn, Slot,
 };
+use crate::sema::hir::StorageRelation;
 use crate::sema::hir::{BindKind, BindingId, Body, Expr, Item, Param};
 use crate::sema::types::{IntW, Ty};
 use crate::{AliasResult, Span};
@@ -39,7 +40,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         fid: FuncId,
         params: &[Param],
         body: &Body,
-        caps: Vec<(BindingId, VTy)>,
+        caps: Vec<(BindingId, VTy, Option<StorageRelation>)>,
         ret_vty: VTy,
     ) -> AliasResult<()> {
         let param_vtys: Vec<VTy> = params.iter().map(|p| self.vty(&p.ty)).collect();
@@ -62,17 +63,21 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.def_var(env_v, bcx.block_params(entry)[1]);
         let mut caps_map: HashMap<BindingId, usize> = HashMap::new();
         let mut caps_vty: HashMap<BindingId, VTy> = HashMap::new();
-        for (i, (id, vty)) in caps.iter().enumerate() {
+        let mut caps_relation: HashMap<BindingId, Option<StorageRelation>> = HashMap::new();
+        for (i, (id, vty, relation)) in caps.iter().enumerate() {
             caps_map.insert(*id, i);
             caps_vty.insert(*id, vty.clone());
+            caps_relation.insert(*id, *relation);
         }
         let mut frame = Frame {
             scopes: vec![HashMap::new()],
             locals_vty: vec![HashMap::new()],
+            locals_relation: vec![HashMap::new()],
             globals: globals_v,
             env: Some(env_v),
             caps: caps_map,
             caps_vty,
+            caps_relation,
             this_fid: Some(fid),
             terminated: false,
             loop_targets: Vec::new(),
@@ -85,7 +90,15 @@ impl<'m, M: Module> Compiler<'m, M> {
             let raw = bcx.block_params(entry)[i + 2];
             let vty = self.vty(&p.ty);
             let word = norm_load(&mut bcx, raw, &vty);
-            emit_local_cell(self, &mut bcx, &mut frame, word, vty, p.binding_id)?;
+            emit_local_cell(
+                self,
+                &mut bcx,
+                &mut frame,
+                word,
+                vty,
+                p.binding_id,
+                Some(StorageRelation::Owning),
+            )?;
         }
 
         let ret_block = bcx.create_block();
@@ -152,10 +165,12 @@ impl<'m, M: Module> Compiler<'m, M> {
         let mut frame = Frame {
             scopes: vec![HashMap::new()],
             locals_vty: vec![HashMap::new()],
+            locals_relation: vec![HashMap::new()],
             globals: globals_v,
             env: None,
             caps: HashMap::new(),
             caps_vty: HashMap::new(),
+            caps_relation: HashMap::new(),
             this_fid: None,
             terminated: false,
             loop_targets: Vec::new(),
@@ -210,6 +225,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             bcx.ins().store(MemFlagsData::new(), sv, base, off as i32);
             frame.scopes[0].insert(b.binding_id, Slot::Global(off));
             frame.locals_vty[0].insert(b.binding_id, svty);
+            frame.locals_relation[0].insert(b.binding_id, b.relation);
         }
 
         let clo = {
@@ -278,9 +294,15 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
-    let cap_vtys: Vec<(BindingId, VTy)> = captures
+    let cap_vtys: Vec<(BindingId, VTy, Option<StorageRelation>)> = captures
         .iter()
-        .map(|id| (*id, bound_vty(c, frame, *id)))
+        .map(|id| {
+            (
+                *id,
+                bound_vty(c, frame, *id),
+                crate::codegen::bound_relation(c, frame, *id),
+            )
+        })
         .collect();
     // 先声明并排队，当前函数继续只发射 closure 对象；nested body 在外层 builder
     // 完成后定义，避免同时持有两个 FunctionBuilder。FuncId 已足以安全写入 code pointer。

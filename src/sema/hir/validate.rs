@@ -70,10 +70,7 @@ fn push_match_children<'a>(
     stack.push(HirValidationNode::Expr(subject));
 }
 
-fn push_place_expr_children<'a>(
-    stack: &mut Vec<HirValidationNode<'a>>,
-    place: &'a Place,
-) {
+fn push_place_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, place: &'a Place) {
     let mut places = vec![place];
     while let Some(place) = places.pop() {
         match place {
@@ -148,9 +145,9 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         }
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { body, .. } => push_validation_body(stack, body),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -557,7 +554,10 @@ fn validate_call_target(
         CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => {
             let callee_name = direct_resolved_callee_name(callee)?;
             if !is_clone_builtin(callee_name) {
-                return Err(invariant(callee.span(), "DeepClone callee 不是 clone intrinsic"));
+                return Err(invariant(
+                    callee.span(),
+                    "DeepClone callee 不是 clone intrinsic",
+                ));
             }
             let [arg] = args else {
                 return Err(invariant(expr.span(), "DeepClone target 元数不是 1"));
@@ -801,9 +801,7 @@ fn validate_place_contract(
                 }
             }
             Place::Field {
-                base,
-                field_index,
-                ..
+                base, field_index, ..
             } => {
                 let field =
                     resolved_field_contract(base.ty(), *field_index, structs, place.span())?;
@@ -1102,6 +1100,13 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                                 expr.span(),
                                 "ReadPlace DeepClone plan 与 resolved Place 类型不一致",
                             ));
+                        }
+                        push_place_expr_children(&mut stack, source);
+                    }
+                    Expr::Borrow { source, kind, .. } => {
+                        validate_place_contract(source, &known_ids, &structs, false)?;
+                        if kind.is_none() {
+                            return Err(invariant(expr.span(), "Borrow 缺少已解析 loan kind"));
                         }
                         push_place_expr_children(&mut stack, source);
                     }

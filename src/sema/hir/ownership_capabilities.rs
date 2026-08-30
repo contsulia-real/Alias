@@ -17,13 +17,17 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
 }
 
 fn expected_capability(expr: &Expr) -> AliasResult<Option<OwnershipCapability>> {
-    let category = expr
-        .category()
-        .ok_or_else(|| invariant(expr.span(), "ownership capability 缺少 value category 前置事实"))?;
+    let category = expr.category().ok_or_else(|| {
+        invariant(
+            expr.span(),
+            "ownership capability 缺少 value category 前置事实",
+        )
+    })?;
     Ok(match category {
         ExprCategory::Place => None,
         ExprCategory::Value(ValueCategory::InlineValue) => Some(OwnershipCapability::None),
         ExprCategory::Value(ValueCategory::OwnedTemporary) => Some(OwnershipCapability::Available),
+        ExprCategory::Value(ValueCategory::BorrowedValue) => Some(OwnershipCapability::None),
         ExprCategory::Value(ValueCategory::General) => None,
     })
 }
@@ -208,9 +212,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Typeof { .. }
         | Expr::Int(..)
         | Expr::Float(..)

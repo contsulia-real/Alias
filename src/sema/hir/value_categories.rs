@@ -1,6 +1,6 @@
 use super::{
-    ArmBody, Body, BuiltinCall, CallTarget, CheckedProgram, DeepClonePlan, Expr, ExprCategory, Item,
-    MatchArm, MethodTarget, Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
+    ArmBody, Body, BuiltinCall, CallTarget, CheckedProgram, DeepClonePlan, Expr, ExprCategory,
+    Item, MatchArm, MethodTarget, Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
@@ -24,12 +24,7 @@ fn is_inline_value(ty: &Ty) -> bool {
 fn carries_dynamic_owner(ty: &Ty) -> bool {
     matches!(
         ty,
-        Ty::Str
-            | Ty::Func { .. }
-            | Ty::Struct(_)
-            | Ty::Result(..)
-            | Ty::Array(_)
-            | Ty::Iterator(_)
+        Ty::Str | Ty::Func { .. } | Ty::Struct(_) | Ty::Result(..) | Ty::Array(_) | Ty::Iterator(_)
     )
 }
 
@@ -67,6 +62,7 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
         },
         Expr::ReadPlace { plan, .. } => !matches!(plan, DeepClonePlan::Inline),
         Expr::Move { .. } => carries_dynamic_owner(expr.ty()),
+        Expr::Borrow { .. } => false,
         Expr::MethodCall { target, .. } => match target {
             MethodTarget::StringUpper
             | MethodTarget::StringLower
@@ -114,6 +110,7 @@ fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCate
 
 fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     Ok(match expr {
+        Expr::Borrow { .. } => ExprCategory::Value(ValueCategory::BorrowedValue),
         Expr::Ident(_, Some(_), ..) | Expr::Field { .. } | Expr::Index { .. } => {
             ExprCategory::Place
         }
@@ -277,9 +274,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
         | Expr::Propagate { expr, .. } => stack.push(Node::Expr(expr)),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Binary { lhs, rhs, .. } => {
             stack.push(Node::Expr(rhs));
             stack.push(Node::Expr(lhs));

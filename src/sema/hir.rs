@@ -1,6 +1,7 @@
 //! typed HIR facade：model、lowering、validation、capture analysis 与 type traversal。
 
 mod binding_contract;
+mod borrow_contract;
 mod capture;
 mod lower;
 mod model;
@@ -13,6 +14,8 @@ mod validate;
 mod value_categories;
 mod visit;
 
+#[cfg(test)]
+mod borrow_tests;
 #[cfg(test)]
 mod contract_tests;
 #[cfg(test)]
@@ -35,11 +38,11 @@ mod typed_contract_tests;
 mod value_category_tests;
 
 pub(crate) use model::{
-    ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BuiltinCall, CallArg,
-    CallTarget, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, Item,
-    MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern, Place, PlaceInfo,
-    ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef, StructField,
-    ValueCategory,
+    ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind, BuiltinCall,
+    CallArg, CallTarget, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo,
+    Item, LoanId, MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern, Place,
+    PlaceInfo, ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef,
+    StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -71,12 +74,29 @@ impl LowerPlaceInfo {
             Self::Local { ty, .. } | Self::Field { ty, .. } | Self::Index { ty, .. } => ty,
         }
     }
+
+    pub(super) fn root_binding_id(&self) -> BindingId {
+        let mut place = self;
+        loop {
+            match place {
+                Self::Local { binding_id, .. } => return *binding_id,
+                Self::Field { base, .. } | Self::Index { base, .. } => place = base,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct LowerOwningReadInfo {
     pub(super) place: LowerPlaceInfo,
     pub(super) plan: DeepClonePlan,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct LowerBorrowInfo {
+    pub(super) loan_id: LoanId,
+    pub(super) place: LowerPlaceInfo,
+    pub(super) source_writable: bool,
 }
 
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时
@@ -91,6 +111,7 @@ pub(super) struct LowerFacts {
     pub(super) fields: HashMap<usize, Ty>,
     pub(super) field_indices: HashMap<usize, usize>,
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
+    pub(super) borrow_places: HashMap<usize, LowerBorrowInfo>,
     pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) owning_reads: HashMap<usize, LowerOwningReadInfo>,
     pub(super) ctor_arg_indices: HashMap<usize, usize>,
@@ -117,6 +138,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     value_categories::validate(program)?;
     ownership_capabilities::validate(program)?;
     storage_relations::validate(program)?;
+    borrow_contract::validate(program)?;
     place_relation::validate(program)?;
     ownership_flow::validate(program)?;
     binding_contract::validate(program)?;

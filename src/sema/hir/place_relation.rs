@@ -105,11 +105,13 @@ pub(crate) fn relation(left: &Place, right: &Place) -> PlaceRelation {
                     return PlaceRelation::Disjoint;
                 }
             }
-            (Projection::Index(left), Projection::Index(right)) => match index_relation(left, right) {
-                PlaceRelation::Disjoint => return PlaceRelation::Disjoint,
-                PlaceRelation::Overlap => {}
-                PlaceRelation::Unknown => uncertain = true,
-            },
+            (Projection::Index(left), Projection::Index(right)) => {
+                match index_relation(left, right) {
+                    PlaceRelation::Disjoint => return PlaceRelation::Disjoint,
+                    PlaceRelation::Overlap => {}
+                    PlaceRelation::Unknown => uncertain = true,
+                }
+            }
             // 对已通过 typed-HIR gate 的 Place，同一 base 不会同时既是 struct 又是 array。
             // relation owner 仍 fail-closed，避免被损坏 HIR 诱导出假的 Disjoint。
             (Projection::Field(_), Projection::Index(_))
@@ -174,7 +176,11 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
     }
 }
 
-fn push_match_children<'a>(stack: &mut Vec<Node<'a>>, subject: &'a Expr, arms: &'a [super::MatchArm]) {
+fn push_match_children<'a>(
+    stack: &mut Vec<Node<'a>>,
+    subject: &'a Expr,
+    arms: &'a [super::MatchArm],
+) {
     for arm in arms.iter().rev() {
         match &arm.body {
             ArmBody::Block(stmts) => {
@@ -300,9 +306,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)

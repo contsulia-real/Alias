@@ -1,5 +1,5 @@
 use super::arrays::checked_array_element_addr;
-use super::cells::{cell_addr, materialize_cell_addr};
+use super::cells::binding_storage_addr;
 use super::expr::emit_expr;
 use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
@@ -35,9 +35,7 @@ pub(super) fn emit_place_value<M: Module>(
     place: &Place,
 ) -> AliasResult<(Value, VTy)> {
     let (addr, vty) = emit_place_addr(c, bcx, frame, place)?;
-    let raw = bcx
-        .ins()
-        .load(cl_type(&vty), MemFlagsData::new(), addr, 0);
+    let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
     Ok((norm_load(bcx, raw, &vty), vty))
 }
 
@@ -55,10 +53,10 @@ pub(super) fn emit_place_addr<M: Module>(
     match place {
         Place::Local { binding_id, .. } => {
             let vty = c.vty(place.ty());
-            let Some(addr) = cell_addr(c, frame, *binding_id) else {
+            let Some(addr) = binding_storage_addr(c, bcx, frame, *binding_id) else {
                 return Err(native_err(place.span(), "内部: Place BindingId 无存储"));
             };
-            Ok((materialize_cell_addr(bcx, frame, &addr), vty))
+            Ok((addr, vty))
         }
         Place::Field {
             base, field_index, ..

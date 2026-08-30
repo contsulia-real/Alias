@@ -11,6 +11,7 @@ mod runtime;
 
 use crate::sema::hir::{
     BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, Expr, Item, MethodId, Param,
+    StorageRelation,
 };
 use crate::sema::types::Ty;
 use crate::target::TARGET_TRIPLE;
@@ -39,10 +40,12 @@ pub(crate) enum Slot {
 pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
+    pub(crate) locals_relation: Vec<HashMap<BindingId, Option<StorageRelation>>>,
     pub(crate) globals: Variable,
     pub(crate) env: Option<Variable>,
     pub(crate) caps: HashMap<BindingId, usize>,
     pub(crate) caps_vty: HashMap<BindingId, VTy>,
+    pub(crate) caps_relation: HashMap<BindingId, Option<StorageRelation>>,
     pub(crate) this_fid: Option<FuncId>,
     pub(crate) terminated: bool,
     /// 当前函数内由内向外的循环目标：(break 目标, continue 目标)。
@@ -57,7 +60,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) module: &'m mut M,
     pub(crate) cc: cranelift_codegen::isa::CallConv,
     pub(crate) ptr_ty: cranelift_codegen::ir::Type,
-    pub(crate) globals_final: HashMap<BindingId, (usize, VTy)>,
+    pub(crate) globals_final: HashMap<BindingId, (usize, VTy, Option<StorageRelation>)>,
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
     pub(crate) next_fid: u32,
@@ -76,7 +79,7 @@ pub(crate) struct PendingFn {
     fid: FuncId,
     params: Vec<Param>,
     body: Body,
-    caps: Vec<(BindingId, VTy)>,
+    caps: Vec<(BindingId, VTy, Option<StorageRelation>)>,
     ret_vty: VTy,
 }
 
@@ -194,7 +197,8 @@ fn compile_program<M: Module>(
             let slot = off;
             off += sz;
             c.top_slots.push(slot);
-            c.globals_final.insert(b.binding_id, (slot, slot_vty));
+            c.globals_final
+                .insert(b.binding_id, (slot, slot_vty, b.relation));
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
@@ -327,8 +331,27 @@ pub(crate) fn bound_vty<M: Module>(c: &Compiler<M>, frame: &Frame, id: BindingId
     }
     c.globals_final
         .get(&id)
-        .map(|(_, vty)| vty.clone())
+        .map(|(_, vty, _)| vty.clone())
         .unwrap_or_else(|| invariant_violation("BindingId 必须在 sema 后解析到存储"))
+}
+
+pub(crate) fn bound_relation<M: Module>(
+    c: &Compiler<M>,
+    frame: &Frame,
+    id: BindingId,
+) -> Option<StorageRelation> {
+    for relations in frame.locals_relation.iter().rev() {
+        if let Some(relation) = relations.get(&id) {
+            return *relation;
+        }
+    }
+    if let Some(relation) = frame.caps_relation.get(&id) {
+        return *relation;
+    }
+    c.globals_final
+        .get(&id)
+        .map(|(_, _, relation)| *relation)
+        .unwrap_or_else(|| invariant_violation("BindingId relation 必须解析到存储"))
 }
 
 #[cfg(test)]

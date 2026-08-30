@@ -1,6 +1,4 @@
-use super::{
-    ArmBody, Body, CheckedProgram, Expr, Item, Place, ResolvedConversion, Stmt, StrPart,
-};
+use super::{ArmBody, Body, CheckedProgram, Expr, Item, Place, ResolvedConversion, Stmt, StrPart};
 use crate::sema::exprs::{binary_result_type, conversion_exists};
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -114,9 +112,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             }
             stack.push(Node::Expr(subject));
         }
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_expr_children(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -323,6 +321,11 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                     expr.span(),
                     "Place read source/result 类型不一致",
                 ));
+            }
+        }
+        Expr::Borrow { source, .. } => {
+            if !types_match(source.ty(), expr.ty()) {
+                return Err(invariant(expr.span(), "Borrow source/result 类型不一致"));
             }
         }
         Expr::Move { source, .. } => {

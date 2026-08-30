@@ -184,7 +184,7 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 尚未完成 effect/loan 合同，当前仍保留既有共享读取事实；这部分不能反推为长期语义。完整 destruction / borrow / free 也尚未落地。
+普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 尚未完成 effect/loan 合同，当前仍保留既有共享读取事实；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -209,6 +209,28 @@ move place
 
 sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前 runtime 仍未实现 destruction/deallocation，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前泄漏式实现限制。
 
+### 3.6 局部 borrow 与 NLL loan
+
+当前已实现两种等价写法：
+
+```alias
+borrow(place)
+borrow place
+```
+
+当前纵切边界：
+
+- source 必须是当前函数内 owning local 所根植的 resolved `Local/Field/Index` Place；borrowed alias、parameter、capture 与 global 作为 source 仍 fail-closed；
+- borrow 结果为 `BorrowedValue`，只能进入 local borrowed binding，不能进入 top-level/global binding、struct field、array element、result payload 或其它 owning storage；
+- borrowed slot 的 `val` / `var` 只决定 slot 能否重新绑定，不决定 loan kind；其 NLL live region 内仅读取 referent 时为 `ReadLoan`，实际 write-through 时为 `WriteLoan`；
+- 多个重叠 `ReadLoan` 可以共存；`WriteLoan` 对重叠区域独占；owner 对 live loan 的冲突 write/move/reinitialize 会静态失败；冲突判断统一消费 canonical Place relation，`Unknown` 按冲突处理；
+- loan 在 alias 最后一次实际使用后结束；控制流分支、merge 与 loop back-edge 由显式 CFG/worklist 计算，不按词法块寿命粗放延长；
+- `var` borrowed slot 重新绑定只替换 alias 本身，不算对旧 referent write-through，并为新 source 建立独立 loan generation；
+- 普通读取 borrowed Place 进入 owning slot 时执行 `DeepClone`，不把 borrow 偷渡进 owning object graph；
+- closure capture loan、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow 与 terminal Index write-through 尚未开放，缺失合同不会被当作共享引用 fallback。
+
+sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/WriteLoan` kind 的专用 HIR；final-HIR gate 重算 loan facts 并拒绝漂移。codegen 只物化 borrowed alias cell 与 canonical referent address，不执行 borrow checker，也不从机器地址猜 relation。
+
 ---
 
 ## 4. 绑定、作用域与函数
@@ -232,7 +254,7 @@ sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/w
 
 预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
 
-- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`move`；
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`borrow`、`move`；
 - result 构造器：`ok`、`err`；
 - 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
 
@@ -580,15 +602,16 @@ Alias 支持已冻结的无括号单参数调用/方法中缀语法，但绑定�
 val i32 y = dup 5
 value plus 1
 println fact 0
-val string copied = clone original
-val Leaf copied_leaf = shallow original_leaf
+ val string copied = clone original
+ val Leaf copied_leaf = shallow original_leaf
+ val i32 alias = borrow original
+ val string transferred = move original
 ```
 
 关键规则：
 
 - 静态签名为零参数函数的直接标识符或 `this` 可省略调用括号，例如 `val i32 n = five`；`five()` 仍合法；
-- 预定义 `clone` / `shallow` 支持无括号单参写法，语义分别与 `clone(value)` / `shallow(value)` 相同；
-- `move` 与 `clone` / `shallow` 一样支持无括号单参数形式；
+- 预定义 `clone` / `shallow` / `borrow` / `move` 均支持无括号单参写法，与各自的括号形式语义相同；
 - 函数值作为值传递时使用显式括号，例如 `f(g)`；
 - `dup 5 + 1` 不解释为 `(dup 5) + 1`，需要显式写 `(dup 5) + 1`；
 - `println f 0` / `print f 0` 允许其唯一输出实参本身为普通单参数无括号调用。
@@ -727,7 +750,8 @@ line / col / len
 - `iterator` / function/closure 的显式 clone/shallow；
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
-- `borrow`、`free` 等其余计划内显式 ownership 操作；dynamic parameter/capture/global move 仍等待 effect 分析；
+- `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic parameter/capture/global move 仍等待 effect 分析；
+- closure capture loan、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow、top-level/global borrow 与 terminal Index write-through；
 - 普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 中稳定 dynamic Place 普通读取的 effect/loan 解析；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；

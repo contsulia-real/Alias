@@ -1,16 +1,16 @@
-//! Explicit ownership-transfer resolution.
+//! Explicit non-owning borrow resolution.
 //!
-//! `move(place)` consumes an existing owning Place. The checker records the exact resolved Place;
-//! lowering must not recover storage identity from the source expression's spelling.
+//! The AST expression is resolved to a canonical Place during checking. Loan kind and NLL region
+//! depend on later uses, so they are deliberately not guessed here.
 
 use super::super::{Checker, Env};
 use crate::ast::{CallArg, Expr};
-use crate::sema::hir::LowerPlaceInfo;
+use crate::sema::hir::LowerBorrowInfo;
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
-    pub(super) fn check_move_call(
+    pub(super) fn check_borrow_call(
         &mut self,
         call: &Expr,
         args: &[CallArg],
@@ -19,47 +19,47 @@ impl Checker {
     ) -> AliasResult<Ty> {
         let [arg] = args else {
             return Err(AliasError {
-                msg: "move 恰好接受 1 个参数".into(),
+                msg: "borrow 恰好接受 1 个参数".into(),
                 span,
             });
         };
         if arg.label.is_some() {
             return Err(AliasError {
-                msg: "move 不接受命名实参".into(),
+                msg: "borrow 不接受命名实参".into(),
                 span: arg.span,
             });
         }
 
         let place = self.resolve_place_expr(&arg.value, env)?;
-        if !matches!(place, LowerPlaceInfo::Local { .. }) {
-            return Err(AliasError {
-                msg: "普通 struct 字段和 array 元素不能被 move-out 后留下 hole".into(),
-                span: arg.value.span(),
-            });
-        }
         if self
             .borrowed_bindings
             .contains_key(&place.root_binding_id())
         {
             return Err(AliasError {
-                msg: "borrowed Place 不携带 ownership capability，不能 move".into(),
+                msg: "borrow source 当前必须直接根植于 owning Place；borrowed alias 的 reborrow 尚未解析 canonical owner".into(),
                 span: arg.value.span(),
             });
         }
-
-        // Direct function bindings are values here, not zero-argument calls. This mirrors clone's
-        // callable handling while preserving the resolved Place as the operation payload.
+        let source_writable = self.place_terminal_is_writable(&arg.value, env)?;
         let checked_ty = match &arg.value {
             Expr::Ident(..) | Expr::This(..) => self.expr_raw_callable(&arg.value, env)?,
             _ => self.expr(&arg.value, env)?,
         };
         if checked_ty != *place.ty() {
             return Err(AliasError {
-                msg: "内部 sema 不变式被破坏: move Place 类型与表达式类型不一致".into(),
+                msg: "内部 sema 不变式被破坏: borrow Place 类型与表达式类型不一致".into(),
                 span: arg.value.span(),
             });
         }
-        self.move_places.insert(Self::expr_key(call), place);
+        let loan_id = self.fresh_loan_id()?;
+        self.borrow_places.insert(
+            Self::expr_key(call),
+            LowerBorrowInfo {
+                loan_id,
+                place,
+                source_writable,
+            },
+        );
         Ok(checked_ty)
     }
 }

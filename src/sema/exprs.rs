@@ -2,6 +2,7 @@
 //!
 //! 子模块直接依赖各自实际 owner；这里只向 sema 其它职责暴露确实共享的窄接口。
 
+mod borrow_value;
 mod calls;
 mod deep_clone;
 mod infer;

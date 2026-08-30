@@ -93,6 +93,16 @@ impl Checker {
                         }
                     })?;
             self.record_owning_slot_read(&b.value, env, &declared)?;
+            if let Some(borrow) = self.borrow_places.get(&Self::expr_key(&b.value)) {
+                if env.parent.is_none() {
+                    return Err(AliasError {
+                        msg: "borrowed binding 当前只允许位于受函数体控制的局部作用域".into(),
+                        span: b.span,
+                    });
+                }
+                self.borrowed_bindings
+                    .insert(binding_id, borrow.source_writable);
+            }
             self.binding_types
                 .insert(b as *const Binding as usize, declared.clone());
             Scope::insert(

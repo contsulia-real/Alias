@@ -64,9 +64,9 @@ src/
 │   ├── mod.rs              # check(Program) -> CheckedProgram
 │   ├── decls.rs / stmts.rs
 │   ├── places.rs           # 递归 Place(Local/Field/Index) 解析、终端可写性与赋值目标类型检查
-│   ├── exprs.rs + exprs/   # 表达式静态语义；deep/shallow clone capability + plan，owning-slot ordinary read
+│   ├── exprs.rs + exprs/   # 表达式静态语义；clone/read plan、borrow/move Place resolution
 │   ├── types.rs            # Ty 与类型槽检查
-│   └── hir.rs + hir/       # typed HIR、lower、value/category/capability/relation、Place overlap、ownership flow、capture、validate、visit
+│   └── hir.rs + hir/       # typed HIR、lower、value/category/capability/relation、Place overlap、ownership/loan flow、capture、validate、visit
 ├── codegen/
 │   ├── mod.rs              # compile_to_object(CheckedProgram)
 │   ├── abi.rs              # Ty→VTy、当前 ValueAbi、结构体布局、word 编码；计划执行时仍是值 ABI owner
@@ -89,13 +89,13 @@ src/
 
 `src/ast.rs` 只表达源码语法，不拥有最终静态类型、BindingId、MethodId、字段索引或最终调用目标。
 
-parser 可以查询 `builtins.rs` 中**明确属于语法分类**的信息，但不得自行复制 builtin 字符串名单，也不得在多个 parser 文件维护平行分类。`clone` / `shallow` 由 `OwnershipBuiltinName` 统一分类；无括号调用和保留名判断都消费这一 owner。
+parser 可以查询 `builtins.rs` 中**明确属于语法分类**的信息，但不得自行复制 builtin 字符串名单，也不得在多个 parser 文件维护平行分类。`clone` / `shallow` / `borrow` / `move` 由 `OwnershipBuiltinName` 统一分类；无括号调用和保留名判断都消费这一 owner。
 
 ### sema
 
 sema 是语言静态语义的 owner。名字解析、目标类型传播、转换关系、调用/方法归属、Pattern coverage、字段/构造器索引，以及当前已落地的 value category / initial ownership capability / binding storage relation / Place overlap 和后续 loan、function effect 等静态事实，都必须在这里或其明确的 sema 子 owner 中完成。
 
-显式 `clone` 的 DeepCloneable 判定与递归 `DeepClonePlan` 只由 `sema/exprs/deep_clone.rs` 决定；当前已知 owning slot 的稳定 Place 普通读取只由 `sema/exprs/ordinary_read.rs` 解析 source Place，并复用 canonical DeepClone plan owner；显式 `shallow` 的递归 ShallowCloneable 判定、standalone root legality 与 `ShallowClonePlan` 只由 `sema/exprs/shallow_clone.rs` 决定；显式 `move(place)` 的 source Place resolution 只由 `sema/exprs/move_value.rs` 决定。其它 checker/validator 可以调用这些 owner，但不得复制类型 capability 矩阵或从 AST 形状恢复 Place/source。generic `call()` / `resolve_call_target()` 对 ownership intrinsic 只允许 fail-closed，不得形成第二条解析路径或重新计算 plan。
+显式 `clone` 的 DeepCloneable 判定与递归 `DeepClonePlan` 只由 `sema/exprs/deep_clone.rs` 决定；当前已知 owning slot 的稳定 Place 普通读取只由 `sema/exprs/ordinary_read.rs` 解析 source Place，并复用 canonical DeepClone plan owner；显式 `shallow` 的递归 ShallowCloneable 判定、standalone root legality 与 `ShallowClonePlan` 只由 `sema/exprs/shallow_clone.rs` 决定；显式 `borrow(place)` / `move(place)` 的 source Place resolution 分别只由 `sema/exprs/borrow_value.rs` / `move_value.rs` 决定。其它 checker/validator 可以调用这些 owner，但不得复制类型 capability 矩阵或从 AST 形状恢复 Place/source。generic `call()` / `resolve_call_target()` 对 ownership intrinsic 只允许 fail-closed，不得形成第二条解析路径或重新计算 plan。
 
 检查阶段使用 AST 节点地址作为短生命周期 fact key。该 identity **只在同一次 check → lower 调用链内有效**；两阶段之间禁止移动、clone 后替换或重建 AST 节点。若未来引入 AST 重写，必须先改用稳定 NodeId，不能继续依赖地址并增加补丁式 fallback。
 
@@ -103,14 +103,15 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 
 `CheckedProgram` 是后端入口，也是 sema 的完成态：
 
-- 每个可求值 HIR 表达式有最终 `Ty`；`hir/value_categories.rs` 固化 `Place` 与 Value 子类，当前明确区分 `InlineValue`、`OwnedTemporary` 与仍需后续 effect/ownership 事实继续收窄的 `General`；Identity conversion 必须完整继承 inner category；
-- `hir/ownership_capabilities.rs` 独立固化当前可证明的 initial capability：`InlineValue → None`、`OwnedTemporary → Available`；Place / General 在当前迁移阶段没有可伪造的 capability fact，codegen 不得把缺失 fact 当 fallback；
-- 显式 Binding 由 `hir/storage_relations.rs` 固化当前可证明的 slot relation：InlineValue / OwnedTemporary，以及已解析 owning-slot `ReadPlace` 均为 `Owning`；动态函数返回与尚未纳入 effect/loan 的读取上下文不得提前猜 relation；
+- 每个可求值 HIR 表达式有最终 `Ty`；`hir/value_categories.rs` 固化 `Place` 与 Value 子类，当前明确区分 `InlineValue`、`OwnedTemporary`、`BorrowedValue` 与仍需后续 effect/ownership 事实继续收窄的 `General`；Identity conversion 必须完整继承 inner category；
+- `hir/ownership_capabilities.rs` 独立固化当前可证明的 initial capability：`InlineValue → None`、`OwnedTemporary → Available`、`BorrowedValue → None`；Place / General 在当前迁移阶段没有可伪造的 capability fact，codegen 不得把缺失 fact 当 fallback；
+- 显式 Binding 由 `hir/storage_relations.rs` 固化当前可证明的 slot relation：InlineValue / OwnedTemporary 及已解析 owning-slot `ReadPlace` 为 `Owning`，显式 BorrowedValue local 为 `Borrowed`；动态函数返回与尚未纳入 effect/loan 的读取上下文不得提前猜 relation；
 - `hir/place_relation.rs` 是 resolved Place 三态关系 `Disjoint / Overlap / Unknown` 的唯一 owner；不同 Local root、字段 divergence、常量 index divergence 等证明只在这里完成，动态 index 无充分事实时保持 `Unknown`，final gate 同时验证自反与 ancestor overlap 不变量；
-- `hir/ownership_flow.rs` 以显式 CFG/worklist 验证当前 dynamic local 的程序点 capability；branch/loop join 对 may-be-moved / may-be-exposed fail-closed；`ReadPlace` clone 只检查 read-after-move，不暴露 source alias，尚未解析 effect 的共享读取或 closure 捕获阻止后续 move；Move replacement 只接受 canonical `Disjoint`，且分析不得把用户 HIR nesting 映射到宿主递归；
+- `hir/ownership_flow.rs` 以显式 CFG/worklist 统一验证 dynamic local 的程序点 capability 与 local borrow loan；branch/loop join 对 may-be-moved / may-be-exposed fail-closed；reaching-definition + backward liveness 推导每个 loan generation 的 NLL region，并按实际 referent use 固化 ReadLoan/WriteLoan；loan conflict 与 Move replacement 都消费 canonical Place relation，只有 `Disjoint` 授权独立；分析不得把用户 HIR nesting 映射到宿主递归；
 - 显式 `clone` 固化为 `CallTarget::Builtin(BuiltinCall::DeepClone(DeepClonePlan))`；dynamic ownership-bearing clone 是 `OwnedTemporary + Available`，标量 clone 保持 `InlineValue + None`；
 - 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；普通函数实参/返回、方法 receiver、Pattern/for/capture 仍等待 effect/loan；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
+- 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow 与未解析的 call/return/capture escape，closure capture loan、function borrow effects 与 reborrow 仍 fail-closed；
 - 显式 `move(place)` 固化为专用 `Expr::Move { source: Place }`；当前 dynamic source 只接受同一函数内已证明 owning 的完整 local，field/array partial move-out 以及缺少 parameter/capture/global effect 的 move 均 fail-closed；scalar move 保持 InlineValue 值语义；
 - Binding/Method/字段/构造器索引均已结构化解析；
 - 当前赋值统一固化为递归 resolved `Place`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId 与字段索引/可写合同都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
@@ -120,7 +121,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - value category、当前可证明的 initial capability / storage relation 与 capture 列表都在最终 HIR validation 前写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作一旦进入当前 HIR，就必须在进入 codegen 前固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / Move flow / `ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free/loan/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / Move/loan flow / Borrow kind / `ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
 
 ### codegen
 
@@ -137,7 +138,7 @@ codegen 只消费已解析 HIR，不得根据：
 
 重新决定静态语义、ownership 或 borrow relation。
 
-`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement 以及后续 borrow/refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
+`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
 
 `codegen/emit/clone.rs` 同时执行显式 clone 与 owning-slot `ReadPlace` 的 resolved plan；`shallow.rs` 执行 resolved shallow plan。两者可以验证 plan 与既有物理布局的内部不变量，但不能自行判断静态类型是否允许对应操作。尤其 shallow-safe aggregate 当前即使以 heap pointer 表示，也必须建立新的独立 aggregate root；禁止简单 bit-copy pointer 后让两个语义 owner 指向同一 root。
 
@@ -246,7 +247,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 测试按**行为 contract**分层，不按数量评价质量。
 
-- `*_laws.rs`：各语言子系统的静态/动态法律；显式 deep/shallow copy、owning-slot 普通读取与 move 的 native/静态行为分别由 `clone_laws.rs` / `shallow_laws.rs` / `ordinary_read_laws.rs` / `move_laws.rs` 覆盖；
+- `*_laws.rs`：各语言子系统的静态/动态法律；显式 deep/shallow copy、owning-slot 普通读取、move 与 local borrow/NLL 的 native/静态行为分别由 `clone_laws.rs` / `shallow_laws.rs` / `ordinary_read_laws.rs` / `move_laws.rs` / `borrow_laws.rs` 覆盖；
 - `golden.rs`：需要冻结 stdout/stderr/exit 或诊断字节的代表性黄金行为；
 - `smoke.rs`：少量跨层主链烟雾检查，不复制完整法律；
 - `demo_corpus.rs`：机械枚举所有 `demos/*.as` 并冻结每个 demo 的三元组；

@@ -1,11 +1,13 @@
 use super::arrays::{array_len, array_raw, bump_array_version, make_iterator};
-use super::cells::{cell_addr, first_result, read_cell, write_cell};
+use super::cells::{binding_storage_addr, first_result};
 use super::clone::emit_deep_clone;
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
-use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, user_signature, VTy};
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, restore_word, storage_word, user_signature, VTy,
+};
 use crate::codegen::layout::{
     result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
     RESULT_WORDS,
@@ -275,20 +277,22 @@ fn emit_incdec<M: Module>(
     let Expr::Ident(_, Some(target_id), _, _) = &arg.value else {
         invariant_violation("increase/decrease 参数为已解析可变绑定 (sema 已校验)")
     };
-    let addr = cell_addr(c, frame, *target_id)
+    let addr = binding_storage_addr(c, bcx, frame, *target_id)
         .unwrap_or_else(|| invariant_violation("increase/decrease BindingId 必须有存储"));
     let vty = bound_vty(c, frame, *target_id);
     if !vty.is_numeric() {
         invariant_violation("increase/decrease 目标为数值绑定 (sema 已校验)");
     }
-    let cur = read_cell(bcx, frame, &addr, &vty);
+    let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
+    let cur = norm_load(bcx, raw, &vty);
     let one = match &vty {
         VTy::F(FloatW::F32) => bcx.ins().f32const(1.0),
         VTy::F(FloatW::F64) => bcx.ins().f64const(1.0),
         _ => bcx.ins().iconst(types::I64, 1),
     };
     let next = emit_binary_values(c, bcx, (op, &vty, cur, one, span))?;
-    write_cell(bcx, frame, &addr, next, &vty);
+    let stored = norm_store(bcx, next, &vty);
+    bcx.ins().store(MemFlagsData::new(), stored, addr, 0);
     Ok(bcx.ins().iconst(types::I64, 0))
 }
 

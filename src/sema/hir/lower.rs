@@ -1,7 +1,7 @@
 use super::{
-    ArmBody, Binding, BindingId, BindingOwner, Body, CallArg, CallTarget, CheckedProgram, Expr,
-    ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Place, PlaceInfo, Stmt, StrPart,
-    StructDef, StructField,
+    ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallTarget,
+    CheckedProgram, Expr, ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Place,
+    PlaceInfo, Stmt, StrPart, StructDef, StructField,
 };
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
@@ -25,6 +25,10 @@ pub(super) fn lower(
     // initial ownership capability；每个显式 Binding 同时固化当前可证明的 storage relation。
     // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked)?;
+    super::borrow_contract::validate(&checked)?;
+    // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
+    // only after captures are known; otherwise a closure use could be omitted from the loan region.
+    super::ownership_flow::finalize(&mut checked)?;
     super::validate_resolved_hir(&checked)?;
     Ok(checked)
 }
@@ -40,6 +44,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("结构体字段", facts.fields.len()),
         ("字段索引", facts.field_indices.len()),
         ("赋值 Place", facts.assignment_places.len()),
+        ("borrow Place", facts.borrow_places.len()),
         ("move Place", facts.move_places.len()),
         ("owning-slot ordinary read", facts.owning_reads.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
@@ -173,13 +178,12 @@ fn lower_place(
 ) -> AliasResult<Place> {
     let span = expr.span();
     match (expr, place) {
-        (
-            crate::ast::Expr::Ident(..),
-            LowerPlaceInfo::Local { binding_id, ty },
-        ) => Ok(Place::Local {
-            binding_id,
-            info: PlaceInfo { ty, span },
-        }),
+        (crate::ast::Expr::Ident(..), LowerPlaceInfo::Local { binding_id, ty }) => {
+            Ok(Place::Local {
+                binding_id,
+                info: PlaceInfo { ty, span },
+            })
+        }
         (
             crate::ast::Expr::Field { recv, .. },
             LowerPlaceInfo::Field {
@@ -192,14 +196,13 @@ fn lower_place(
             field_index,
             info: PlaceInfo { ty, span },
         }),
-        (
-            crate::ast::Expr::Index { recv, idx, .. },
-            LowerPlaceInfo::Index { base, ty },
-        ) => Ok(Place::Index {
-            base: Box::new(lower_place(recv, *base, facts)?),
-            index: Box::new(lower_expr(idx, facts)?),
-            info: PlaceInfo { ty, span },
-        }),
+        (crate::ast::Expr::Index { recv, idx, .. }, LowerPlaceInfo::Index { base, ty }) => {
+            Ok(Place::Index {
+                base: Box::new(lower_place(recv, *base, facts)?),
+                index: Box::new(lower_expr(idx, facts)?),
+                info: PlaceInfo { ty, span },
+            })
+        }
         _ => Err(AliasError {
             msg: "内部 sema 不变式被破坏: Place fact 与 AST projection 形状不一致".into(),
             span,
@@ -212,23 +215,19 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
     Ok(match stmt {
         crate::ast::Stmt::Binding(binding) => Stmt::Binding(lower_binding(binding, facts)?),
         crate::ast::Stmt::Assign { value, span, .. } => {
-            let target = match take_required(
-                &mut facts.assignment_places,
-                key,
-                *span,
-                "赋值 Place",
-            )? {
-                LowerPlaceInfo::Local { binding_id, ty } => Place::Local {
-                    binding_id,
-                    info: PlaceInfo { ty, span: *span },
-                },
-                LowerPlaceInfo::Field { .. } | LowerPlaceInfo::Index { .. } => {
-                    return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: 普通赋值携带非 local Place".into(),
-                        span: *span,
-                    })
-                }
-            };
+            let target =
+                match take_required(&mut facts.assignment_places, key, *span, "赋值 Place")? {
+                    LowerPlaceInfo::Local { binding_id, ty } => Place::Local {
+                        binding_id,
+                        info: PlaceInfo { ty, span: *span },
+                    },
+                    LowerPlaceInfo::Field { .. } | LowerPlaceInfo::Index { .. } => {
+                        return Err(AliasError {
+                            msg: "内部 sema 不变式被破坏: 普通赋值携带非 local Place".into(),
+                            span: *span,
+                        })
+                    }
+                };
             Stmt::Assign {
                 target,
                 value: lower_expr(value, facts)?,
@@ -237,24 +236,21 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
         crate::ast::Stmt::FieldAssign {
             recv, value, span, ..
         } => {
-            let (base, field_index, ty) = match take_required(
-                &mut facts.assignment_places,
-                key,
-                *span,
-                "赋值 Place",
-            )? {
-                LowerPlaceInfo::Field {
-                    base,
-                    field_index,
-                    ty,
-                } => (base, field_index, ty),
-                LowerPlaceInfo::Local { .. } | LowerPlaceInfo::Index { .. } => {
-                    return Err(AliasError {
-                        msg: "内部 sema 不变式被破坏: 字段赋值未携带 terminal field Place".into(),
-                        span: *span,
-                    })
-                }
-            };
+            let (base, field_index, ty) =
+                match take_required(&mut facts.assignment_places, key, *span, "赋值 Place")? {
+                    LowerPlaceInfo::Field {
+                        base,
+                        field_index,
+                        ty,
+                    } => (base, field_index, ty),
+                    LowerPlaceInfo::Local { .. } | LowerPlaceInfo::Index { .. } => {
+                        return Err(AliasError {
+                            msg: "内部 sema 不变式被破坏: 字段赋值未携带 terminal field Place"
+                                .into(),
+                            span: *span,
+                        })
+                    }
+                };
             Stmt::Assign {
                 target: Place::Field {
                     base: Box::new(lower_place(recv, *base, facts)?),
@@ -507,6 +503,9 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                         span: *span,
                         info,
                     }
+                }
+                LowerCallTarget::Borrow => {
+                    lower_borrow_expr(callee, args, *span, key, info, facts)?
                 }
                 LowerCallTarget::Move => lower_move_expr(callee, args, *span, key, info, facts)?,
                 other => Expr::Call {
@@ -776,6 +775,33 @@ fn lower_move_expr(
     })
 }
 
+fn lower_borrow_expr(
+    callee: &crate::ast::Expr,
+    args: &[crate::ast::CallArg],
+    span: Span,
+    key: usize,
+    info: ExprInfo,
+    facts: &mut LowerFacts,
+) -> AliasResult<Expr> {
+    let [_arg] = args else {
+        return Err(AliasError {
+            msg: "内部 sema 不变式被破坏: borrow 元数不是 1".into(),
+            span,
+        });
+    };
+    let _ = lower_expr(callee, facts)?;
+    let source_expr = lower_expr(&args[0].value, facts)?;
+    let source_fact = take_required(&mut facts.borrow_places, key, span, "borrow Place")?;
+    let source = lower_resolved_place(source_expr, source_fact.place, span)?;
+    Ok(Expr::Borrow {
+        loan_id: source_fact.loan_id,
+        source: Box::new(source),
+        kind: Some(BorrowKind::Read),
+        span,
+        info,
+    })
+}
+
 fn lower_call_target(
     target: LowerCallTarget,
     args: &[crate::ast::CallArg],
@@ -805,6 +831,7 @@ fn lower_call_target(
             span,
         }),
         LowerCallTarget::Typeof
+        | LowerCallTarget::Borrow
         | LowerCallTarget::Move
         | LowerCallTarget::ContextualConversion(_) => Err(AliasError {
             msg: "内部 sema 不变式被破坏: 已解析静态操作进入普通 Call lowering".into(),

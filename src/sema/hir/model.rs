@@ -10,6 +10,9 @@ pub(crate) struct BindingId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MethodId(pub(crate) u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct LoanId(pub(crate) u32);
+
 #[derive(Debug, Clone)]
 pub(crate) struct CheckedProgram {
     pub(crate) main_id: BindingId,
@@ -260,6 +263,7 @@ pub(crate) enum ValueCategory {
     InlineValue,
     General,
     OwnedTemporary,
+    BorrowedValue,
 }
 
 /// Value 产生时可固化的 initial compile-time ownership capability。
@@ -273,18 +277,23 @@ pub(crate) enum OwnershipCapability {
     Available,
 }
 
-/// 当前 phase 已能证明的 binding slot relation。
-///
-/// 现有语言尚无 BorrowedValue producer，因此只允许真实可达的 Owning；`Borrowed` 会在
-/// borrow semantic resolution 真正落地时加入，而不是提前制造 dead variant。
+/// sema 已证明的 binding slot relation。Owning cell 保存值；Borrowed cell 保存 referent
+/// address。两者物理解释不同，codegen 必须消费该事实，不能从 value bit pattern 反推 relation。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StorageRelation {
     Owning,
+    Borrowed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BorrowKind {
+    Read,
+    Write,
 }
 
 /// 表达式在完成 sema 后首先区分“一个可继续投影/读取的存储 Place”与“已经产生的 Value”。
-/// Value 内部再由 `ValueCategory` 逐步固化 InlineValue/OwnedTemporary/BorrowedValue/Null
-/// 等最终语义；当前尚未实现的 borrowed/null/effect 语义不得由 codegen 猜测。
+/// Value 内部再由 `ValueCategory` 固化 InlineValue/OwnedTemporary/BorrowedValue 等当前已落地
+/// 语义；尚未实现的 null/effect 语义不得由 codegen 猜测。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExprCategory {
     Place,
@@ -418,6 +427,15 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// Non-owning alias to a resolved Place. `kind` is filled by the loan analysis from actual
+    /// uses; codegen may consume the source address only after the final HIR gate proves it.
+    Borrow {
+        loan_id: LoanId,
+        source: Box<Place>,
+        kind: Option<BorrowKind>,
+        span: Span,
+        info: ExprInfo,
+    },
     /// Explicit ownership transfer from a sema-resolved Place. Keeping the Place as payload makes
     /// source identity and later overlap checks independent of the original AST expression shape.
     Move {
@@ -453,6 +471,7 @@ impl Expr {
             | Self::Match { info, .. }
             | Self::Propagate { info, .. }
             | Self::ReadPlace { info, .. }
+            | Self::Borrow { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -482,6 +501,7 @@ impl Expr {
             | Self::Match { info, .. }
             | Self::Propagate { info, .. }
             | Self::ReadPlace { info, .. }
+            | Self::Borrow { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -530,6 +550,7 @@ impl Expr {
             | Self::Match { span, .. }
             | Self::Propagate { span, .. }
             | Self::ReadPlace { span, .. }
+            | Self::Borrow { span, .. }
             | Self::Move { span, .. } => *span,
         }
     }

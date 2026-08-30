@@ -41,7 +41,7 @@ fn compile(name: &str, src: &str) -> std::process::Output {
 fn predefined_call_names_cannot_be_redeclared() {
     for name in [
         "print", "println", "from", "try_from", "typeof", "increase", "decrease", "clone",
-        "shallow", "move",
+        "shallow", "borrow", "move",
     ] {
         let src = format!("val i32 {name} = 1\nfunc i32 main = () -> return 0\n");
         let out = compile(name, &src);

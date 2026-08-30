@@ -1,16 +1,16 @@
 use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
-use super::cells::{
-    coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope,
-};
+use super::cells::{coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::places::emit_place_write;
 use crate::codegen::abi::{cl_type, norm_load, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
-use crate::codegen::layout::{ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET};
+use crate::codegen::layout::{
+    ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET,
+};
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
-use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt};
+use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt, StorageRelation, ValueCategory};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, BlockArg, InstBuilder, MemFlagsData};
@@ -78,11 +78,12 @@ pub(crate) fn emit_stmt<M: Module>(
                     v,
                     VTy::Func(param_vtys, Box::new(ret_vty)),
                     b.binding_id,
+                    b.relation,
                 )?;
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr(c, bcx, frame, &b.value)?;
-                emit_local_cell(c, bcx, frame, v, vty, b.binding_id)?;
+                emit_local_cell(c, bcx, frame, v, vty, b.binding_id, b.relation)?;
             }
             Ok(())
         }
@@ -90,7 +91,26 @@ pub(crate) fn emit_stmt<M: Module>(
             // Replacement 的 ownership 语义由 resolved HIR 决定；运行时顺序必须保持 RHS
             // （包括 ReadPlace clone）先完整求值，再求值 target 的 Field/Index projection。
             // 反转顺序会让重叠 Place 的 replacement 观察到错误 source 状态。
+            let borrowed_rebind = matches!(
+                (target, value.value_category()),
+                (
+                    crate::sema::hir::Place::Local { binding_id, .. },
+                    Some(ValueCategory::BorrowedValue)
+                ) if crate::codegen::bound_relation(c, frame, *binding_id)
+                    == Some(StorageRelation::Borrowed)
+            );
             let value = emit_expr(c, bcx, frame, value)?;
+            if borrowed_rebind {
+                let crate::sema::hir::Place::Local { binding_id, .. } = target else {
+                    unreachable!()
+                };
+                let cell = super::cells::cell_addr(c, frame, *binding_id).unwrap_or_else(|| {
+                    invariant_violation("borrowed rebind target 必须有 alias cell")
+                });
+                let cell = super::cells::materialize_cell_addr(bcx, frame, &cell);
+                bcx.ins().store(MemFlagsData::new(), value, cell, 0);
+                return Ok(());
+            }
             emit_place_write(c, bcx, frame, target, value)
         }
         Stmt::Expr { expr, .. } => {
@@ -358,7 +378,15 @@ fn emit_for<M: Module>(
         .store(MemFlagsData::new(), next, iter, ITERATOR_INDEX_OFFSET);
 
     push_scope(frame);
-    emit_local_cell(c, bcx, frame, elem, elem_vty.clone(), binding_id)?;
+    emit_local_cell(
+        c,
+        bcx,
+        frame,
+        elem,
+        elem_vty.clone(),
+        binding_id,
+        Some(StorageRelation::Owning),
+    )?;
     frame.loop_targets.push((end_b, header));
     for s in body {
         ensure_current(bcx, frame);

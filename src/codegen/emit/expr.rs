@@ -1,14 +1,14 @@
 use super::arrays::{checked_array_element_addr, emit_array_lit};
 use super::calls::{emit_call, emit_method_call};
 use super::cells::{
-    cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
+    binding_storage_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope,
 };
 use super::clone::emit_deep_clone_place;
 use super::control::emit_stmt;
 use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, narrow, widen_signed, widen_unsigned,
 };
-use super::places::{emit_place_value, field_storage};
+use super::places::{emit_place_addr, emit_place_value, field_storage};
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
@@ -46,10 +46,11 @@ pub(crate) fn emit_expr<M: Module>(
             let id = id.unwrap_or_else(|| {
                 panic!("内部代码生成不变式被破坏: 可求值标识符 '{name}' 缺少 BindingId")
             });
-            match cell_addr(c, frame, id) {
+            match binding_storage_addr(c, bcx, frame, id) {
                 Some(addr) => {
                     let vty = bound_vty(c, frame, id);
-                    Ok(read_cell(bcx, frame, &addr, &vty))
+                    let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
+                    Ok(norm_load(bcx, raw, &vty))
                 }
                 None => Err(native_err(
                     *span,
@@ -71,6 +72,9 @@ pub(crate) fn emit_expr<M: Module>(
         }
         Expr::Move { source, .. } => {
             emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+        }
+        Expr::Borrow { source, .. } => {
+            emit_place_addr(c, bcx, frame, source).map(|(address, _)| address)
         }
         Expr::ReadPlace { source, plan, .. } => emit_deep_clone_place(c, bcx, frame, source, plan),
         Expr::Cast { expr, span, .. } => {
@@ -440,7 +444,15 @@ pub(crate) fn emit_match_arm<M: Module>(
 
     match (&arm.pattern, subject_vty, arm.binding_id) {
         (Pattern::Binding { .. }, _, Some(binding_id)) => {
-            emit_local_cell(c, bcx, frame, subj, subject_vty.clone(), binding_id)?;
+            emit_local_cell(
+                c,
+                bcx,
+                frame,
+                subj,
+                subject_vty.clone(),
+                binding_id,
+                Some(crate::sema::hir::StorageRelation::Owning),
+            )?;
         }
         (
             Pattern::Constructor {
@@ -459,7 +471,15 @@ pub(crate) fn emit_match_arm<M: Module>(
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
             let payload = restore_word(bcx, raw, &bind_vty);
-            emit_local_cell(c, bcx, frame, payload, bind_vty, binding_id)?;
+            emit_local_cell(
+                c,
+                bcx,
+                frame,
+                payload,
+                bind_vty,
+                binding_id,
+                Some(crate::sema::hir::StorageRelation::Owning),
+            )?;
         }
         (Pattern::Binding { .. }, _, None)
         | (

@@ -10,11 +10,7 @@ enum TypeNode<'a> {
     Stmt(&'a Stmt),
 }
 
-fn visit_place<'a>(
-    place: &'a Place,
-    visit: &mut impl FnMut(&Ty),
-    stack: &mut Vec<TypeNode<'a>>,
-) {
+fn visit_place<'a>(place: &'a Place, visit: &mut impl FnMut(&Ty), stack: &mut Vec<TypeNode<'a>>) {
     let mut places = vec![place];
     while let Some(place) = places.pop() {
         visit(place.ty());
@@ -196,9 +192,9 @@ impl CheckedProgram {
                             }
                             stack.push(TypeNode::Expr(subject));
                         }
-                        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-                            visit_place(source, visit, &mut stack)
-                        }
+                        Expr::ReadPlace { source, .. }
+                        | Expr::Borrow { source, .. }
+                        | Expr::Move { source, .. } => visit_place(source, visit, &mut stack),
                     }
                 }
             }

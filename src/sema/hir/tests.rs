@@ -1,6 +1,4 @@
-use super::{
-    ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Place, Stmt, StrPart,
-};
+use super::{ArmBody, Body, CallTarget, Expr, Item, MethodId, MethodTarget, Place, Stmt, StrPart};
 use crate::codegen::abi::{project_ty, projected_ty, VTy};
 
 #[test]
@@ -115,7 +113,9 @@ func i32 main = () -> {
                 ..
             } => saw_local = true,
             Stmt::Assign {
-                target: Place::Field { base, field_index, .. },
+                target: Place::Field {
+                    base, field_index, ..
+                },
                 ..
             } => {
                 saw_field = true;
@@ -129,7 +129,10 @@ func i32 main = () -> {
     }
     assert!(saw_local);
     assert!(saw_field);
-    assert!(saw_index_base, "cells[0].value 必须固化为 Field(Index(Local))");
+    assert!(
+        saw_index_base,
+        "cells[0].value 必须固化为 Field(Index(Local))"
+    );
 }
 
 #[test]
@@ -143,8 +146,13 @@ func i32 main = () -> {
 "#;
     let tokens = crate::lexer::lex(source).unwrap();
     let program = crate::parser::parse(tokens).unwrap();
-    let error = crate::sema::check(program).expect_err("temporary receiver must not become a Place");
-    assert!(error.msg.contains("不是可寻址 Place"), "实际: {}", error.msg);
+    let error =
+        crate::sema::check(program).expect_err("temporary receiver must not become a Place");
+    assert!(
+        error.msg.contains("不是可寻址 Place"),
+        "实际: {}",
+        error.msg
+    );
 }
 
 #[test]
@@ -528,9 +536,9 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             }
             stack.push(TestNode::Expr(subject));
         }
-        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
-            push_place_exprs(stack, source)
-        }
+        Expr::ReadPlace { source, .. }
+        | Expr::Borrow { source, .. }
+        | Expr::Move { source, .. } => push_place_exprs(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)

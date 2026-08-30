@@ -58,7 +58,7 @@ impl From<AliasError> for ExprCheckError {
 }
 
 impl Checker {
-    pub(super) fn expr_key(e: &Expr) -> usize {
+    pub(in crate::sema) fn expr_key(e: &Expr) -> usize {
         // expr facts 与 binding facts 共享同一阶段约束：key 是本次 check→lower 调用链内
         // AST 节点的临时地址，不是持久 identity。两阶段之间移动/替换 AST 会让 facts
         // 错配；若未来需要 AST 重写，必须先引入稳定 NodeId，而不是继续依赖地址。
@@ -227,6 +227,18 @@ impl Checker {
                             let (ty, plan) =
                                 self.check_shallow_call(args, *span, env, Some(expected))?;
                             (ty, BuiltinCall::ShallowClone(plan))
+                        }
+                        OwnershipBuiltinName::Borrow => {
+                            let ty = self.check_borrow_call(e, args, *span, env)?;
+                            if !types_match(expected, &ty) {
+                                return Err(ExprCheckError::Mismatch {
+                                    expected: expected.clone(),
+                                    actual: ty,
+                                    span: e.span(),
+                                });
+                            }
+                            self.record_call_target(e, LowerCallTarget::Borrow);
+                            return Ok(expected.clone());
                         }
                         OwnershipBuiltinName::Move => {
                             let ty = self.check_move_call(e, args, *span, env)?;
