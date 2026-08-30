@@ -228,6 +228,18 @@ impl Checker {
                                 self.check_shallow_call(args, *span, env, Some(expected))?;
                             (ty, BuiltinCall::ShallowClone(plan))
                         }
+                        OwnershipBuiltinName::Move => {
+                            let ty = self.check_move_call(e, args, *span, env)?;
+                            if !types_match(expected, &ty) {
+                                return Err(ExprCheckError::Mismatch {
+                                    expected: expected.clone(),
+                                    actual: ty,
+                                    span: e.span(),
+                                });
+                            }
+                            self.record_call_target(e, LowerCallTarget::Move);
+                            return Ok(expected.clone());
+                        }
                     };
                     self.record_call_target(e, LowerCallTarget::Builtin(target));
                     return Ok(ty);

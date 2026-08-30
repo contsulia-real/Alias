@@ -415,7 +415,7 @@ fn final_hir_gate_rejects_assign_target_type_drift() {
     assert!(
         error
             .msg
-            .contains("Assign Place 类型与 BindingId 声明类型不一致"),
+            .contains("Place Local 类型与 BindingId 声明类型不一致"),
         "实际: {}",
         error.msg
     );

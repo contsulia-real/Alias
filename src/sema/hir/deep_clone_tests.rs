@@ -127,7 +127,7 @@ fn clone_rejects_non_deep_cloneable_function_and_iterator() {
         let tokens = crate::lexer::lex(
             "func i32 f = () -> return 1\n\
 func i32 main = () -> {\n\
-    val func bad = clone(f)\n\
+    clone(f)\n\
     return 0\n\
 }\n",
         )

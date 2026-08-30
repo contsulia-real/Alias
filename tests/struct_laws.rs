@@ -139,7 +139,7 @@ fn field_assignment_rejects_temporary_receiver() {
         "struct cell { var i32 value = 0 }\nfunc i32 main = () -> {\n    cell().value = 1\n    return 0\n}\n",
         "该表达式不是可寻址 Place",
         3,
-        4,
+        8,
     );
 }
 

@@ -36,7 +36,7 @@ fn binding_value<'a>(stmts: &'a mut [Stmt], name: &str) -> &'a mut Expr {
 #[test]
 fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     let mut program = checked(
-        "struct point { var i32 x = 7 }\nfunc point make = () -> point()\nfunc i32 main = () -> {\n    var i32 n = 1\n    val point p = point()\n    val array<i32> xs = [n]\n    val point from_func = make()\n    val i32 from_local = n\n    val i32 from_field = p.x\n    val i32 from_index = xs[0]\n    val point identity_place = try_from p\n    val point identity_owned = try_from point()\n    return from_local + from_field + from_index\n}\n",
+        "struct point { var i32 x = 7 }\nfunc point make = () -> return point()\nfunc i32 main = () -> {\n    var i32 n = 1\n    val point p = point()\n    val array<i32> xs = [n]\n    val point from_func = make()\n    val i32 from_local = n\n    val i32 from_field = p.x\n    val i32 from_index = xs[0]\n    val point identity_place = try_from p\n    val point identity_owned = try_from point()\n    return from_local + from_field + from_index\n}\n",
     );
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")

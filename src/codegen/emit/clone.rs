@@ -45,22 +45,22 @@ fn clone_value<M: Module>(
         }
         DeepClonePlan::Struct { name, fields } => {
             let VTy::Struct(vname) = vty else {
-                return invariant_violation("DeepClonePlan::Struct 必须对应 struct VTy");
+                invariant_violation("DeepClonePlan::Struct 必须对应 struct VTy");
             };
             if vname != name {
-                return invariant_violation("DeepClonePlan::Struct 名称与 VTy 不一致");
+                invariant_violation("DeepClonePlan::Struct 名称与 VTy 不一致");
             }
             clone_struct(c, bcx, source, name, fields)
         }
         DeepClonePlan::Array(elem_plan) => {
             let VTy::Array(elem_vty) = vty else {
-                return invariant_violation("DeepClonePlan::Array 必须对应 array VTy");
+                invariant_violation("DeepClonePlan::Array 必须对应 array VTy");
             };
             clone_array(c, bcx, source, elem_vty, elem_plan)
         }
         DeepClonePlan::Result { ok, err } => {
             let VTy::Result(ok_vty, err_vty) = vty else {
-                return invariant_violation("DeepClonePlan::Result 必须对应 result VTy");
+                invariant_violation("DeepClonePlan::Result 必须对应 result VTy");
             };
             clone_result(c, bcx, source, ok_vty, err_vty, ok, err)
         }
@@ -148,7 +148,7 @@ fn clone_struct<M: Module>(
         .cloned()
         .unwrap_or_else(|| invariant_violation("DeepClone struct layout 必须存在"));
     if layout.fields.len() != plans.len() {
-        return invariant_violation("DeepClone struct field plan 数量与 layout 不一致");
+        invariant_violation("DeepClone struct field plan 数量与 layout 不一致");
     }
     let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
     let out = c.call_rt(bcx, "alias.cell.new", &[bytes])?;

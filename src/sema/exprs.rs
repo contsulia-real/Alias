@@ -6,6 +6,7 @@ mod calls;
 mod deep_clone;
 mod infer;
 mod match_expr;
+mod move_value;
 mod operators;
 mod shallow_clone;
 mod typing;

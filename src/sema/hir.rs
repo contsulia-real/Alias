@@ -5,6 +5,7 @@ mod capture;
 mod lower;
 mod model;
 mod ownership_capabilities;
+mod ownership_flow;
 mod place_relation;
 mod storage_relations;
 mod typed_contract;
@@ -16,6 +17,8 @@ mod visit;
 mod contract_tests;
 #[cfg(test)]
 mod deep_clone_tests;
+#[cfg(test)]
+mod move_tests;
 #[cfg(test)]
 mod place_relation_tests;
 #[cfg(test)]
@@ -80,6 +83,7 @@ pub(super) struct LowerFacts {
     pub(super) fields: HashMap<usize, Ty>,
     pub(super) field_indices: HashMap<usize, usize>,
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
+    pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) ctor_arg_indices: HashMap<usize, usize>,
     pub(super) params: HashMap<usize, Ty>,
     pub(super) param_ids: HashMap<usize, BindingId>,
@@ -105,6 +109,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     ownership_capabilities::validate(program)?;
     storage_relations::validate(program)?;
     place_relation::validate(program)?;
+    ownership_flow::validate(program)?;
     binding_contract::validate(program)?;
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)

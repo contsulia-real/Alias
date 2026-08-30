@@ -20,6 +20,7 @@ pub(crate) enum CallBuiltinName {
 pub(crate) enum OwnershipBuiltinName {
     Clone,
     Shallow,
+    Move,
 }
 
 pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
@@ -35,12 +36,13 @@ pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
     })
 }
 
-/// ownership copy intrinsics 与普通 builtin call 分开分类：它们需要携带 sema 已解析的
-/// capability execution plan，不能退化成仅靠名字即可决定的普通 BuiltinCall。
+/// ownership intrinsics 与普通 builtin call 分开分类：copy 操作携带 sema 已解析的
+/// execution plan，move 携带 resolved Place；都不能退化成按名字执行的普通 BuiltinCall。
 pub(crate) fn classify_ownership_builtin(name: &str) -> Option<OwnershipBuiltinName> {
     Some(match name {
         "clone" => OwnershipBuiltinName::Clone,
         "shallow" => OwnershipBuiltinName::Shallow,
+        "move" => OwnershipBuiltinName::Move,
         _ => return None,
     })
 }

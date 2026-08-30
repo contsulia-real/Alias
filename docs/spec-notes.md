@@ -1,7 +1,7 @@
 # Alias 当前语言规范
 
 **状态：** 规范性文档  
-**同步日期：** 2026-08-29  
+**同步日期：** 2026-08-30
 **实现基线：** 当前 `main` HEAD
 
 > 本文只描述 Alias **当前有效语义**。历史阶段、已删除语法、旧后端和被后续裁决覆盖的行为不得保留为可与本文竞争的规范。
@@ -170,7 +170,30 @@ shallow expr
 
 sema 会把显式 shallow 固化为递归 `ShallowClonePlan`；final-HIR gate 会用同一 capability owner 重新验证 plan。codegen 不重新判断 ShallowCloneable。
 
-3.2/3.3 只描述**当前已经实现的显式 copy intrinsics**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / move / borrow / free 等目标语义尚未因此被提前视为已实现。
+3.2/3.3 只描述**当前已经实现的显式 copy intrinsics**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / borrow / free、以及依赖 function/capture effect 的更广 move 语义尚未因此被提前视为已实现。
+
+### 3.4 显式 move
+
+当前已实现 ownership-transfer intrinsic：
+
+```alias
+move(place)
+move place
+```
+
+当前纵切边界：
+
+- source 必须是完整 local Place；普通 struct field 与 array element 不能被 move-out 后留下 partial-move hole；
+- 对 string、struct、array、result、iterator、function/closure 等携带动态 ownership 的 owning local，结果为 `OwnedTemporary + Available`，source capability 进入 moved 状态；
+- moved local 在重新初始化前不能读取或再次 move；控制流 merge 与 loop back-edge 采用 may-be-moved 的 fail-closed join；
+- 在稳定 Place 普通读取 DeepClone 与 call/capture effect 尚未落地期间，dynamic local 一旦被普通读取或 closure 捕获，就不能再声称 exclusive capability 并 move；
+- `var` local 可由新的 `OwnedTemporary` 重新初始化；
+- scalar `move` 等价于普通值传递，不制造或消费动态 ownership capability；
+- `target = move(source)` 要求 canonical Place relation 为 `Disjoint`，因此 `x = move(x)` 编译失败；
+- parameter、capture、global 的 dynamic move 要等待 function/capture effect 固化后开放，当前不会把缺失 effect 当 owning fallback；
+- `move(place)` 与 `move place` 使用同一 semantic resolution、resolved Place 和 ownership dataflow。
+
+sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前 runtime 仍未实现 destruction/deallocation，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前泄漏式实现限制。
 
 ---
 
@@ -195,7 +218,7 @@ sema 会把显式 shallow 固化为递归 `ShallowClonePlan`；final-HIR gate �
 
 预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
 
-- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`；
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`move`；
 - result 构造器：`ok`、`err`；
 - 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
 
@@ -551,6 +574,7 @@ val Leaf copied_leaf = shallow original_leaf
 
 - 静态签名为零参数函数的直接标识符或 `this` 可省略调用括号，例如 `val i32 n = five`；`five()` 仍合法；
 - 预定义 `clone` / `shallow` 支持无括号单参写法，语义分别与 `clone(value)` / `shallow(value)` 相同；
+- `move` 与 `clone` / `shallow` 一样支持无括号单参数形式；
 - 函数值作为值传递时使用显式括号，例如 `f(g)`；
 - `dup 5 + 1` 不解释为 `(dup 5) + 1`，需要显式写 `(dup 5) + 1`；
 - `println f 0` / `print f 0` 允许其唯一输出实参本身为普通单参数无括号调用。
@@ -689,7 +713,7 @@ line / col / len
 - `iterator` / function/closure 的显式 clone/shallow；
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
-- `borrow` / `move` 等其余计划内显式 ownership 操作；
+- `borrow`、`free` 等其余计划内显式 ownership 操作；dynamic parameter/capture/global move 仍等待 effect 分析；
 - 稳定 dynamic Place 普通读取自动 DeepClone；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；

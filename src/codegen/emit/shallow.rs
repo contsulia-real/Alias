@@ -37,16 +37,16 @@ fn shallow_value<M: Module>(
         },
         ShallowClonePlan::Struct { name, fields } => {
             let VTy::Struct(vname) = vty else {
-                return invariant_violation("ShallowClonePlan::Struct 必须对应 struct VTy");
+                invariant_violation("ShallowClonePlan::Struct 必须对应 struct VTy");
             };
             if vname != name {
-                return invariant_violation("ShallowClonePlan::Struct 名称与 VTy 不一致");
+                invariant_violation("ShallowClonePlan::Struct 名称与 VTy 不一致");
             }
             shallow_struct(c, bcx, source, name, fields)
         }
         ShallowClonePlan::Result { ok, err } => {
             let VTy::Result(ok_vty, err_vty) = vty else {
-                return invariant_violation("ShallowClonePlan::Result 必须对应 result VTy");
+                invariant_violation("ShallowClonePlan::Result 必须对应 result VTy");
             };
             shallow_result(c, bcx, source, ok_vty, err_vty, ok, err)
         }
@@ -66,7 +66,7 @@ fn shallow_struct<M: Module>(
         .cloned()
         .unwrap_or_else(|| invariant_violation("ShallowClone struct layout 必须存在"));
     if layout.fields.len() != plans.len() {
-        return invariant_violation("ShallowClone struct field plan 数量与 layout 不一致");
+        invariant_violation("ShallowClone struct field plan 数量与 layout 不一致");
     }
     let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
     let out = c.call_rt(bcx, "alias.cell.new", &[bytes])?;

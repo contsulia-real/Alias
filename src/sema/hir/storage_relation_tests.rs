@@ -34,7 +34,7 @@ fn binding<'a>(stmts: &'a mut [Stmt], name: &str) -> &'a mut super::Binding {
 #[test]
 fn resolved_hir_freezes_only_proven_owning_relations() {
     let mut program = checked(
-        "struct point { val i32 x = 1 }\nfunc point make = () -> point()\nfunc i32 main = () -> {\n    val i32 scalar = 1\n    val point fresh = point()\n    val i32 scalar_copy = scalar\n    val point from_func = make()\n    val point from_place = fresh\n    return scalar_copy\n}\n",
+        "struct point { val i32 x = 1 }\nfunc point make = () -> return point()\nfunc i32 main = () -> {\n    val i32 scalar = 1\n    val point fresh = point()\n    val i32 scalar_copy = scalar\n    val point from_func = make()\n    val point from_place = fresh\n    return scalar_copy\n}\n",
     );
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")

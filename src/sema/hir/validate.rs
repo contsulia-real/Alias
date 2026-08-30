@@ -148,6 +148,7 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         }
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { body, .. } => push_validation_body(stack, body),
+        Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -1076,6 +1077,10 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                             }
                         }
                         stack.push(HirValidationNode::Expr(subject));
+                    }
+                    Expr::Move { source, .. } => {
+                        validate_place_contract(source, &known_ids, &structs, false)?;
+                        push_place_expr_children(&mut stack, source);
                     }
                     Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::This(..) => {}
                 }

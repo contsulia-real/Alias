@@ -33,6 +33,10 @@ fn carries_dynamic_owner(ty: &Ty) -> bool {
     )
 }
 
+pub(super) fn type_carries_dynamic_owner(ty: &Ty) -> bool {
+    carries_dynamic_owner(ty)
+}
+
 fn deep_clone_creates_owner(plan: &DeepClonePlan) -> bool {
     match plan {
         DeepClonePlan::Inline => false,
@@ -61,6 +65,7 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
             CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
             CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
         },
+        Expr::Move { .. } => carries_dynamic_owner(expr.ty()),
         Expr::MethodCall { target, .. } => match target {
             MethodTarget::StringUpper
             | MethodTarget::StringLower
@@ -271,6 +276,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
         | Expr::Propagate { expr, .. } => stack.push(Node::Expr(expr)),
+        Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Binary { lhs, rhs, .. } => {
             stack.push(Node::Expr(rhs));
             stack.push(Node::Expr(lhs));

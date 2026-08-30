@@ -59,7 +59,7 @@ pub(crate) fn materialize_cell_addr(
         }
         CellAddr::GlobalOff(off) => {
             let base = bcx.use_var(frame.globals);
-            bcx.ins().iadd_imm(base, *off as i64)
+            bcx.ins().iadd_imm_s(base, *off as i64)
         }
     }
 }

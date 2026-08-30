@@ -114,6 +114,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             }
             stack.push(Node::Expr(subject));
         }
+        Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -312,6 +313,14 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                     expr.span(),
                     "Propagate HIR 结果类型与 ok payload 不一致",
                 ));
+            }
+        }
+        Expr::Move { source, .. } => {
+            if !types_match(source.ty(), expr.ty()) {
+                return Err(invariant(expr.span(), "Move source/result 类型不一致"));
+            }
+            if !matches!(source.as_ref(), Place::Local { .. }) {
+                return Err(invariant(expr.span(), "Move source 不是完整 local Place"));
             }
         }
         Expr::Call { .. }

@@ -18,7 +18,7 @@ pub(crate) struct CheckedProgram {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Item {
-    Binding(Binding),
+    Binding(Box<Binding>),
     StructDef(StructDef),
 }
 
@@ -262,10 +262,11 @@ pub(crate) enum ValueCategory {
     OwnedTemporary,
 }
 
-/// 当前 phase 已实际可达的 compile-time ownership capability 状态。
+/// Value 产生时可固化的 initial compile-time ownership capability。
 ///
-/// `Moved` / `Consumed` 只有在对应消费操作进入 resolved HIR 后才会成为真实程序点状态；
-/// 在那之前不创建永远不可达的占位 variant。category 与 capability 是正交事实。
+/// 显式 Move 之后的程序点 `Moved` 状态由 `hir/ownership_flow.rs` 的 CFG dataflow 表达，
+/// 不伪装成每个 Expr 自带的 initial capability。后续 Consumed 操作真正进入 HIR 时也必须
+/// 进入同一个程序点分析 owner，而不是提前增加无消费者的枚举占位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnershipCapability {
     None,
@@ -409,6 +410,13 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// Explicit ownership transfer from a sema-resolved Place. Keeping the Place as payload makes
+    /// source identity and later overlap checks independent of the original AST expression shape.
+    Move {
+        source: Box<Place>,
+        span: Span,
+        info: ExprInfo,
+    },
 }
 
 impl Expr {
@@ -435,7 +443,8 @@ impl Expr {
             | Self::ArrayLit { info, .. }
             | Self::FuncLit { info, .. }
             | Self::Match { info, .. }
-            | Self::Propagate { info, .. } => info,
+            | Self::Propagate { info, .. }
+            | Self::Move { info, .. } => info,
         }
     }
 
@@ -462,7 +471,8 @@ impl Expr {
             | Self::ArrayLit { info, .. }
             | Self::FuncLit { info, .. }
             | Self::Match { info, .. }
-            | Self::Propagate { info, .. } => info,
+            | Self::Propagate { info, .. }
+            | Self::Move { info, .. } => info,
         }
     }
 
@@ -508,7 +518,8 @@ impl Expr {
             | Self::ArrayLit { span, .. }
             | Self::FuncLit { span, .. }
             | Self::Match { span, .. }
-            | Self::Propagate { span, .. } => *span,
+            | Self::Propagate { span, .. }
+            | Self::Move { span, .. } => *span,
         }
     }
 }

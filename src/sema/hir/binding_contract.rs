@@ -137,6 +137,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
+        Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -407,6 +408,9 @@ fn validate_uses(
                             ));
                         }
                     }
+                }
+                if let Expr::Move { source, .. } = expr {
+                    validate_place_bindings(source, contracts)?;
                 }
                 push_expr_children(&mut stack, expr);
             }

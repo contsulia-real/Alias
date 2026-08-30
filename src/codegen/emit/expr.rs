@@ -7,7 +7,7 @@ use super::control::emit_stmt;
 use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, narrow, widen_signed, widen_unsigned,
 };
-use super::places::field_storage;
+use super::places::{emit_place_value, field_storage};
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
@@ -67,6 +67,9 @@ pub(crate) fn emit_expr<M: Module>(
                 .map(|var| bcx.use_var(var))
                 .unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
             c.call_rt(bcx, "alias.closure.new", &[code, env])
+        }
+        Expr::Move { source, .. } => {
+            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
         }
         Expr::Cast { expr, span, .. } => {
             let dst = c.vty(e.ty());

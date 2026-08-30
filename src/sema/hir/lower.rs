@@ -40,6 +40,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("结构体字段", facts.fields.len()),
         ("字段索引", facts.field_indices.len()),
         ("赋值 Place", facts.assignment_places.len()),
+        ("move Place", facts.move_places.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
         ("函数参数类型", facts.params.len()),
         ("函数参数 BindingId", facts.param_ids.len()),
@@ -71,7 +72,9 @@ fn take_required<T>(
 
 fn lower_item(item: &crate::ast::Item, facts: &mut LowerFacts) -> AliasResult<Item> {
     Ok(match item {
-        crate::ast::Item::Binding(binding) => Item::Binding(lower_binding(binding, facts)?),
+        crate::ast::Item::Binding(binding) => {
+            Item::Binding(Box::new(lower_binding(binding, facts)?))
+        }
         crate::ast::Item::StructDef(def) => Item::StructDef(StructDef {
             name: def.name.clone(),
             fields: def
@@ -497,6 +500,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                         info,
                     }
                 }
+                LowerCallTarget::Move => lower_move_expr(callee, args, *span, key, info, facts)?,
                 other => Expr::Call {
                     callee: Box::new(lower_expr(callee, facts)?),
                     args: args
@@ -627,6 +631,53 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     })
 }
 
+fn lower_move_place(expr: Expr, place: LowerPlaceInfo, span: Span) -> AliasResult<Place> {
+    match (expr, place) {
+        (
+            Expr::Ident(_, Some(expr_id), expr_span, info),
+            LowerPlaceInfo::Local { binding_id, ty },
+        ) if expr_id == binding_id && info.ty == ty => Ok(Place::Local {
+            binding_id,
+            info: PlaceInfo {
+                ty,
+                span: expr_span,
+            },
+        }),
+        _ => Err(AliasError {
+            msg: "内部 sema 不变式被破坏: move Place fact 与 source HIR 不一致".into(),
+            span,
+        }),
+    }
+}
+
+// Keep Move's owned temporary HIR values out of lower_expr's recursive stack frame. The parser's
+// bounded recursive descent runs on the configured compiler stack, but ordinary HIR nesting must
+// not become materially more stack-hungry merely because this unrelated operation exists.
+fn lower_move_expr(
+    callee: &crate::ast::Expr,
+    args: &[crate::ast::CallArg],
+    span: Span,
+    key: usize,
+    info: ExprInfo,
+    facts: &mut LowerFacts,
+) -> AliasResult<Expr> {
+    let [_arg] = args else {
+        return Err(AliasError {
+            msg: "内部 sema 不变式被破坏: move 元数不是 1".into(),
+            span,
+        });
+    };
+    let _ = lower_expr(callee, facts)?;
+    let source_expr = lower_expr(&args[0].value, facts)?;
+    let source_fact = take_required(&mut facts.move_places, key, span, "move Place")?;
+    let source = lower_move_place(source_expr, source_fact, span)?;
+    Ok(Expr::Move {
+        source: Box::new(source),
+        span,
+        info,
+    })
+}
+
 fn lower_call_target(
     target: LowerCallTarget,
     args: &[crate::ast::CallArg],
@@ -655,7 +706,9 @@ fn lower_call_target(
             msg: "内部 sema 不变式被破坏: 普通 Call 携带方法 target".into(),
             span,
         }),
-        LowerCallTarget::Typeof | LowerCallTarget::ContextualConversion(_) => Err(AliasError {
+        LowerCallTarget::Typeof
+        | LowerCallTarget::Move
+        | LowerCallTarget::ContextualConversion(_) => Err(AliasError {
             msg: "内部 sema 不变式被破坏: 已解析静态操作进入普通 Call lowering".into(),
             span,
         }),

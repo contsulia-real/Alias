@@ -330,9 +330,19 @@ func i32 main = () -> {
 fn deep_capture_and_type_walk_do_not_depend_on_host_recursion() {
     let depth = 32;
     let source = nested_closure_source(depth);
-    let tokens = crate::lexer::lex(&source).unwrap();
-    let program = crate::parser::parse(tokens).unwrap();
-    let checked = crate::sema::check(program).unwrap();
+    // check/lower still contains bounded recursive descent and the public compiler always runs it
+    // on the configured worker stack. Keep this setup aligned with that real boundary; the type
+    // and capture traversals below deliberately run back on the ordinary test thread.
+    let checked = std::thread::Builder::new()
+        .stack_size(crate::COMPILER_STACK_BYTES)
+        .spawn(move || {
+            let tokens = crate::lexer::lex(&source).unwrap();
+            let program = crate::parser::parse(tokens).unwrap();
+            crate::sema::check(program).unwrap()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 
     let mut visited = 0usize;
     checked.for_each_ty(&mut |ty| {
@@ -518,6 +528,7 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             }
             stack.push(TestNode::Expr(subject));
         }
+        Expr::Move { source, .. } => push_place_exprs(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)

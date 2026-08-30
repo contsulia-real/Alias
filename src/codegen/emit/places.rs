@@ -28,7 +28,7 @@ pub(super) fn field_storage<M: Module>(
     invariant_violation("字段访问索引必须由 sema/HIR 解析到结构体布局")
 }
 
-fn emit_place_value<M: Module>(
+pub(super) fn emit_place_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
@@ -65,7 +65,7 @@ pub(super) fn emit_place_addr<M: Module>(
         } => {
             let (base_value, _) = emit_place_value(c, bcx, frame, base)?;
             let (field_vty, offset) = field_storage(c, base.ty(), *field_index)?;
-            let addr = bcx.ins().iadd_imm(base_value, offset as i64);
+            let addr = bcx.ins().iadd_imm_s(base_value, offset as i64);
             Ok((addr, field_vty))
         }
         Place::Index { base, index, .. } => {
