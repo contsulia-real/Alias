@@ -78,20 +78,20 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     );
     assert_eq!(
         binding_value(stmts, "from_local").category(),
-        Some(ExprCategory::Place)
+        Some(ExprCategory::Value(ValueCategory::InlineValue))
     );
     assert_eq!(
         binding_value(stmts, "from_local").ownership_capability(),
-        None,
-        "Place capability 必须等待 slot relation/dataflow"
+        Some(OwnershipCapability::None),
+        "owning-slot scalar ReadPlace 保持 inline 值语义"
     );
     assert_eq!(
         binding_value(stmts, "from_field").category(),
-        Some(ExprCategory::Place)
+        Some(ExprCategory::Value(ValueCategory::InlineValue))
     );
     assert_eq!(
         binding_value(stmts, "from_index").category(),
-        Some(ExprCategory::Place)
+        Some(ExprCategory::Value(ValueCategory::InlineValue))
     );
 
     let identity_place = binding_value(stmts, "identity_place");
@@ -104,10 +104,23 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     else {
         panic!("same-struct try_from must lower to Identity Convert")
     };
-    assert_eq!(inner.category(), Some(ExprCategory::Place));
-    assert_eq!(info.category, Some(ExprCategory::Place));
-    assert_eq!(inner.ownership_capability(), None);
-    assert_eq!(info.ownership_capability, None);
+    assert!(matches!(inner.as_ref(), Expr::ReadPlace { .. }));
+    assert_eq!(
+        inner.category(),
+        Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+    );
+    assert_eq!(
+        info.category,
+        Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+    );
+    assert_eq!(
+        inner.ownership_capability(),
+        Some(OwnershipCapability::Available)
+    );
+    assert_eq!(
+        info.ownership_capability,
+        Some(OwnershipCapability::Available)
+    );
 
     let identity_owned = binding_value(stmts, "identity_owned");
     let Expr::Convert {
@@ -145,8 +158,8 @@ fn final_hir_gate_rejects_category_shape_drift() {
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")
     };
-    let Expr::Ident(_, Some(_), _, info) = binding_value(stmts, "copy") else {
-        panic!("copy initializer must be resolved Ident")
+    let Expr::ReadPlace { info, .. } = binding_value(stmts, "copy") else {
+        panic!("copy initializer must be resolved ReadPlace")
     };
     info.category = Some(ExprCategory::Value(ValueCategory::General));
 

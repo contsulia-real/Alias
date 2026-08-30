@@ -1,7 +1,7 @@
 // ============================================================
 // demos/structs.as — 当前 struct 演练夹具
 // 覆盖: 定义 (默认值 + 必填字段) / 乱序命名构造 / 字段读 /
-//   var 字段变异 (字段级可变性独立于绑定可变性) / 引用别名 /
+//   var 字段变异 (字段级可变性独立于绑定可变性) / owning binding DeepClone /
 //   传参共享实例 / 嵌套结构体 / 闭包引用捕获 / <struct> 显示
 // ============================================================
 
@@ -40,7 +40,7 @@ func i32 main = () -> {
     val stat b = stat(lines = 3, bytes = 4)
     println b.lines
 
-    // 引用别名: 两个名字, 同一实例
+    // owning binding: 稳定 struct Place 读取建立递归独立副本
     val stat alias = a
     alias.bytes = 555
     println a.bytes
@@ -49,7 +49,7 @@ func i32 main = () -> {
     println add_ten(a)
     println a.bytes
 
-    // 嵌套结构体: 构造实参内联构造, 实例穿透共享
+    // 嵌套结构体: 稳定 Place 构造实参递归 clone
     val frame f = frame(inner = a, origin = point(y = 9))
     println f.origin.y
     println f.inner.bytes

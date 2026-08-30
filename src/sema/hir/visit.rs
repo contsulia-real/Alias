@@ -196,7 +196,9 @@ impl CheckedProgram {
                             }
                             stack.push(TypeNode::Expr(subject));
                         }
-                        Expr::Move { source, .. } => visit_place(source, visit, &mut stack),
+                        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
+                            visit_place(source, visit, &mut stack)
+                        }
                     }
                 }
             }

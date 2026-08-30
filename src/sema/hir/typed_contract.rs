@@ -114,7 +114,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             }
             stack.push(Node::Expr(subject));
         }
-        Expr::Move { source, .. } => push_place_expr_children(stack, source),
+        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
+            push_place_expr_children(stack, source)
+        }
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -312,6 +314,14 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 return Err(invariant(
                     expr.span(),
                     "Propagate HIR 结果类型与 ok payload 不一致",
+                ));
+            }
+        }
+        Expr::ReadPlace { source, .. } => {
+            if !types_match(source.ty(), expr.ty()) {
+                return Err(invariant(
+                    expr.span(),
+                    "Place read source/result 类型不一致",
                 ));
             }
         }

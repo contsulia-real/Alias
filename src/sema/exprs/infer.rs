@@ -241,6 +241,7 @@ impl Checker {
                 let mut elem_ty: Option<Ty> = None;
                 for item in elems {
                     let t = require_value(self.expr(item, env)?, item.span())?;
+                    self.record_owning_slot_read(item, env, &t)?;
                     match &elem_ty {
                         None => elem_ty = Some(t),
                         Some(first) if !types_match(first, &t) => {

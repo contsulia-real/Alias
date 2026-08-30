@@ -54,8 +54,8 @@ fn resolved_hir_freezes_only_proven_owning_relations() {
     );
     assert_eq!(
         binding(stmts, "from_place").relation,
-        None,
-        "动态 Place 普通读取必须等待显式 DeepClone HIR"
+        Some(StorageRelation::Owning),
+        "owning-slot ReadPlace 的动态 DeepClone 结果具有 owning relation"
     );
 }
 

@@ -223,6 +223,7 @@ impl Checker {
                 }
                 Err(e) => return Err(e.into_alias()),
             }
+            self.record_owning_slot_read(&a.value, env, want)?;
         }
         for (f, done) in info.fields.iter().zip(&covered) {
             if !done && !f.has_default {
@@ -256,6 +257,7 @@ impl Checker {
             });
         }
         let t = require_value(self.expr(&arg.value, env)?, arg.value.span())?;
+        self.record_owning_slot_read(&arg.value, env, &t)?;
         Ok(match kind {
             CtorKind::Ok => Ty::Result(Box::new(t), Box::new(Ty::Unknown)),
             CtorKind::Err => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
@@ -356,6 +358,7 @@ impl Checker {
                 span,
             });
         }
+        let inserts_owned_array_element = sig.target(&rt) == Some(MethodTarget::ArrayPush);
         for (i, (a, want)) in args.iter().zip(sig.params()).enumerate() {
             match self.expr_expected(&a.value, env, want) {
                 Ok(_) => {}
@@ -371,6 +374,9 @@ impl Checker {
                     });
                 }
                 Err(e) => return Err(e.into_alias()),
+            }
+            if inserts_owned_array_element {
+                self.record_owning_slot_read(&a.value, env, want)?;
             }
         }
         Ok(sig.ret().clone())

@@ -3,6 +3,7 @@ use super::calls::{emit_call, emit_method_call};
 use super::cells::{
     cell_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope, read_cell,
 };
+use super::clone::emit_deep_clone_place;
 use super::control::emit_stmt;
 use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, narrow, widen_signed, widen_unsigned,
@@ -71,6 +72,7 @@ pub(crate) fn emit_expr<M: Module>(
         Expr::Move { source, .. } => {
             emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
         }
+        Expr::ReadPlace { source, plan, .. } => emit_deep_clone_place(c, bcx, frame, source, plan),
         Expr::Cast { expr, span, .. } => {
             let dst = c.vty(e.ty());
             let src = c.vty(expr.ty());

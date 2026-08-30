@@ -2,10 +2,10 @@
 //!
 //! 当前语义锚点见 `docs/spec-notes.md`：
 //! - 字面量 [e1, e2, ...] 元素类型一致；类型槽 array<T> 恰一参；
-//! - 引用语义：别名共享同一 array wrapper、底层内容与结构版本；
+//! - owning binding 的稳定 Place 读取创建独立 array wrapper/backing；
 //! - 下标读带越界守卫 (i<0 或 i>=len → span-ID 中止存根, exit 1)；
 //!   下标赋值当前未支持并显式拒绝；
-//! - 内建 len/push/pop/iterator 由编译器提供；push/pop 推进共享结构版本，
+//! - 内建 len/push/pop/iterator 由编译器提供；push/pop 推进所属 wrapper 的结构版本，
 //!   pop 空数组运行时中止。
 //!
 //! 列号语义按当前 lexer Span 算法冻结。运行时中止只能由已编译进程产生；
@@ -38,7 +38,7 @@ fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// 正向矩阵 — 字面量 / 下标 / 增长 / LIFO / 别名 / 嵌套 / 结构体元素
+// 正向矩阵 — 字面量 / 下标 / 增长 / LIFO / ownership / 嵌套 / 结构体元素
 // ---------------------------------------------------------------------------
 
 /// 字面量构造 + 下标读往返。
@@ -71,19 +71,18 @@ fn nested_arrays() {
     assert_eq!(run(src).unwrap(), 52);
 }
 
-/// 数组元素为结构体: 经下标的 var 字段写落在实例上, 别名立即可见。
+/// 数组元素为结构体: 从下标 Place 读入 owning binding 时递归 clone 元素。
 #[test]
 fn array_of_struct_field_access() {
     let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val array<cell> cs = [cell(), cell(v = 5)]\n    cs[1].v = 50\n    val cell alias = cs[1]\n    alias.v = alias.v + 1\n    return cs[1].v + cs[0].v\n}\n";
-    assert_eq!(run(src).unwrap(), 51);
+    assert_eq!(run(src).unwrap(), 50);
 }
 
-/// 引用别名: 两个绑定一个实例 — 任一名字 push/pop 对另一名字可见。
+/// array 的 owning binding 读取创建独立 wrapper/backing。
 #[test]
-fn alias_shares_instance() {
-    let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    val array<i32> b = a\n    b.push(9)\n    a.push(8)\n    return a.len() * 10 + b.len() + a[1] + b[2]\n}\n";
-    // len 均 3 → 30+3; a[1]=9, b[2]=8
-    assert_eq!(run(src).unwrap(), 50);
+fn binding_read_deep_clones_array() {
+    let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    val array<i32> b = a\n    b.push(9)\n    a.push(8)\n    return a.len() * 10 + b.len() + a[1] + b[1]\n}\n";
+    assert_eq!(run(src).unwrap(), 39);
 }
 
 /// val 绑定上的 push 合法 (变异在实例不在绑定); 字符串元素 +

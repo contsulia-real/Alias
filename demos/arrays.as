@@ -1,7 +1,7 @@
 // ============================================================
 // demos/arrays.as — 当前 array<T> 演练夹具
 // 覆盖: 字面量构造 / 下标读 / push 越初始容量增长 (realloc 路径) /
-//   len / pop LIFO / 引用别名共享实例 / 嵌套数组 /
+//   len / pop LIFO / owning binding DeepClone / 嵌套数组 /
 //   数组元素为结构体 (字段读 + 经下标的 var 字段写) / 字符串元素 /
 //   插值洞内下标 / <array> 显示
 // ============================================================
@@ -37,7 +37,7 @@ func i32 main = () -> {
     println grow.pop()
     println grow.len()
 
-    // ---- 引用语义: 经别名 push, 原名立即可见 ----
+    // ---- owning binding: 稳定 array Place 读取建立独立 wrapper/backing ----
     val array<i32> alias = grow
     alias.push(99)
     println grow.len()

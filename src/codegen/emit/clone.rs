@@ -1,12 +1,13 @@
 use super::arrays::{array_element_addr, array_len, array_raw, wrap_array};
 use super::expr::emit_expr;
+use super::places::emit_place_value;
 use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::layout::{
     RESULT_OK_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET, RESULT_WORDS, STRING_BYTES,
     STRING_DATA_OFFSET, STRING_LEN_OFFSET,
 };
 use crate::codegen::{invariant_violation, Compiler, Frame};
-use crate::sema::hir::{DeepClonePlan, Expr};
+use crate::sema::hir::{DeepClonePlan, Expr, Place};
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, Value};
@@ -22,6 +23,17 @@ pub(crate) fn emit_deep_clone<M: Module>(
 ) -> AliasResult<Value> {
     let value = emit_expr(c, bcx, frame, source)?;
     let vty = c.vty(source.ty());
+    clone_value(c, bcx, value, &vty, plan)
+}
+
+pub(crate) fn emit_deep_clone_place<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    source: &Place,
+    plan: &DeepClonePlan,
+) -> AliasResult<Value> {
+    let (value, vty) = emit_place_value(c, bcx, frame, source)?;
     clone_value(c, bcx, value, &vty, plan)
 }
 

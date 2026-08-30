@@ -528,7 +528,9 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             }
             stack.push(TestNode::Expr(subject));
         }
-        Expr::Move { source, .. } => push_place_exprs(stack, source),
+        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
+            push_place_exprs(stack, source)
+        }
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)

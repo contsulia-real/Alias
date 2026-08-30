@@ -50,10 +50,11 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 - `CheckedProgram.main_id` 携带 sema 已解析的入口 `BindingId`；
 - 结构体构造实参与字段索引的对应关系已经固化，不把 label/name 带到后端重新查找；
 - 赋值 target 固化为递归 Place projection；当前可表达 `Local`、`Field(base Place)` 与 `Index(base Place, index fact)`，codegen 不从 receiver Expr 形状恢复 storage identity；
+- 当前已知 owning slot 从稳定 Place 普通读取时，source Place 与递归 `DeepClonePlan` 固化为专用 `ReadPlace` HIR；
 - 函数字面量返回类型在 sema 合并完成；
 - 名字解析、目标类型传播、Pattern 合法性与覆盖、调用目标解析均在进入后端前完成。
 
-显式 `clone` / `shallow` 的 capability 判定与递归执行计划同样在 sema 完成，并分别固化为 `DeepClonePlan` / `ShallowClonePlan`；codegen 只能执行已解析 plan，不能按 `Ty` / `VTy` 重新决定一个类型是否允许 clone/shallow。
+显式 `clone`、owning-slot `ReadPlace` 与显式 `shallow` 的 capability 判定及递归执行计划同样在 sema 完成，并固化为对应 plan；codegen 只能执行已解析 plan，不能按 `Ty` / `VTy` 重新决定一个类型是否允许 clone/shallow。
 
 禁止后端通过 AST 形态、名字、函数体、诊断字符串或 fallback 重新推断静态语义。
 
@@ -170,9 +171,22 @@ shallow expr
 
 sema 会把显式 shallow 固化为递归 `ShallowClonePlan`；final-HIR gate 会用同一 capability owner 重新验证 plan。codegen 不重新判断 ShallowCloneable。
 
-3.2/3.3 只描述**当前已经实现的显式 copy intrinsics**。普通动态值的赋值、传参和闭包捕获仍保持本文各类型章节记录的当前共享引用实现事实；`docs/plan.md` 中稳定 Place 普通读取自动 DeepClone、完整 destruction / borrow / free、以及依赖 function/capture effect 的更广 move 语义尚未因此被提前视为已实现。
+### 3.4 owning slot 的稳定 Place 普通读取
 
-### 3.4 显式 move
+当前已经落地的 owning target 包括：非 func binding 初始化、local/field replacement、struct 字段默认值与构造实参、array 字面量元素与 `push` 实参、result 构造 payload。若这些位置的 RHS 是稳定 `Local/Field/Index` Place（允许外层透明 identity conversion），则按最终目标类型执行：
+
+```text
+read stable Place
+-> DeepClonePlan
+-> InlineValue 或 OwnedTemporary
+-> 写入 owning target
+```
+
+source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
+
+普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 尚未完成 effect/loan 合同，当前仍保留既有共享读取事实；这部分不能反推为长期语义。完整 destruction / borrow / free 也尚未落地。
+
+### 3.5 显式 move
 
 当前已实现 ownership-transfer intrinsic：
 
@@ -186,7 +200,7 @@ move place
 - source 必须是完整 local Place；普通 struct field 与 array element 不能被 move-out 后留下 partial-move hole；
 - 对 string、struct、array、result、iterator、function/closure 等携带动态 ownership 的 owning local，结果为 `OwnedTemporary + Available`，source capability 进入 moved 状态；
 - moved local 在重新初始化前不能读取或再次 move；控制流 merge 与 loop back-edge 采用 may-be-moved 的 fail-closed join；
-- 在稳定 Place 普通读取 DeepClone 与 call/capture effect 尚未落地期间，dynamic local 一旦被普通读取或 closure 捕获，就不能再声称 exclusive capability 并 move；
+- 已解析为 owning-slot `ReadPlace` 的读取产生独立副本，不暴露 source alias，因此不阻止后续 move；尚未解析 effect 的其它共享读取或 closure 捕获仍阻止后续 move；
 - `var` local 可由新的 `OwnedTemporary` 重新初始化；
 - scalar `move` 等价于普通值传递，不制造或消费动态 ownership capability；
 - `target = move(source)` 要求 canonical Place relation 为 `Disjoint`，因此 `x = move(x)` 编译失败；
@@ -277,7 +291,7 @@ struct User {
 - `struct` 只能顶层定义；
 - 字段独立声明 `val` 或 `var`；
 - 已登记结构体名可进入类型槽；
-- **普通**赋值、传参、闭包捕获当前仍共享同一实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
+- owning binding 初始化、local/field replacement、字段默认值与构造实参从稳定 Place 读取时按 3.4 节递归 DeepClone；函数传参、返回、方法 receiver、Pattern binding 与闭包捕获仍等待 effect/loan 迁移，当前可共享实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
 - 字段赋值的 receiver 链必须解析为已有 storage Place；当前允许从 binding root 经 Field/Index 继续投影，因此 `cells[0].value = 3` 合法，但 constructor/call/ternary 等临时 Value 不能作为字段赋值 receiver，例如 `cell().value = 1` 是编译错误；
 - 构造使用命名实参；
@@ -326,7 +340,7 @@ pub func Ret Receiver.method = (Args...) -> body
 
 单侧构造可暂含 `Unknown`，但必须在目标上下文或后续统一中确定为完整可用类型后才能进入需要 ABI 的路径。
 
-显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan。若 `T/E` 都满足当前 shallow-safe 规则，显式 `shallow(result)` 同样建立新的 result root，并只对 active payload 执行 `ShallowClonePlan`。普通 result 传递的其余 ownership 语义仍受当前尚未完成的整体 ownership 迁移限制。
+显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan。`ok/err` 构造 payload 从稳定 Place 读取时同样按 3.4 节 clone。若 `T/E` 都满足当前 shallow-safe 规则，显式 `shallow(result)` 建立新的 result root，并只对 active payload 执行 `ShallowClonePlan`。函数返回与 Pattern binding 等其余 result ownership 语义仍受尚未完成的 effect/loan 迁移限制。
 
 result 值显示为 `<ok>` / `<err>`。
 
@@ -374,7 +388,7 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值当前使用 wrapper 引用表示。**普通**赋值、传参和闭包捕获共享同一 wrapper；显式 `clone(array)` 按 3.2 节创建独立 wrapper/backing，并递归 clone 元素。`array<T>` 当前不支持显式 shallow。
+数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素或 `push` 实参从稳定 Place 读取时，按 3.4 节创建独立 wrapper/backing 并递归 clone 元素；函数传参、返回、方法 receiver、Pattern binding 与闭包捕获仍等待 effect/loan 迁移，当前可共享 wrapper。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
 
 ### 8.1 数组
 
@@ -714,7 +728,7 @@ line / col / len
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
 - `borrow`、`free` 等其余计划内显式 ownership 操作；dynamic parameter/capture/global move 仍等待 effect 分析；
-- 稳定 dynamic Place 普通读取自动 DeepClone；
+- 普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 中稳定 dynamic Place 普通读取的 effect/loan 解析；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；

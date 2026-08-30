@@ -69,18 +69,16 @@ func i32 main = () -> {
 }
 
 #[test]
-fn prior_shared_read_prevents_claiming_unique_ownership() {
-    let error = fail(
-        r#"
+fn prior_owning_read_clones_and_preserves_unique_ownership() {
+    let source = r#"
 func i32 main = () -> {
     val string original = 'x'
-    val string alias = original
+    val string copied = original
     val string transferred = move(original)
-    return alias.len() + transferred.len()
+    return copied.len() + transferred.len()
 }
-"#,
-    );
-    assert!(error.msg.contains("无法证明 ownership 唯一"), "{}", error.msg);
+"#;
+    assert_eq!(run(source).unwrap(), 2);
 }
 
 #[test]

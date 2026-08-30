@@ -246,7 +246,7 @@ func i32 main = () -> {
 }
 
 #[test]
-fn array_iterator_is_invalidated_by_structural_alias_mutation() {
+fn cloned_array_mutation_does_not_invalidate_source_iterator() {
     let src = r#"
 func i32 main = () -> {
     val array<i32> xs = [1, 2]
@@ -257,7 +257,7 @@ func i32 main = () -> {
     return 0
 }
 "#;
-    assert_eq!(run(src).unwrap(), 1);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 #[test]

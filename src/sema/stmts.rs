@@ -92,6 +92,7 @@ impl Checker {
                             }
                         }
                     })?;
+            self.record_owning_slot_read(&b.value, env, &declared)?;
             self.binding_types
                 .insert(b as *const Binding as usize, declared.clone());
             Scope::insert(

@@ -1,7 +1,7 @@
 //! struct 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
 //! 当前语义锚点：
-//! - 引用语义：实例为共享堆对象，别名/传参/闭包捕获共享实例；
+//! - owning binding 的稳定 Place 读取执行 DeepClone；传参/闭包捕获仍共享实例；
 //! - 字段级可变性：var 字段可写与持有绑定自身 val/var 无关；
 //! - 顶层名字空间：struct 名与顶层 binding/func 不得重名；词法子作用域可以 shadow constructor；
 //! - 构造全命名：缺字段/重复/未知/类型不符各有独立诊断。
@@ -206,7 +206,7 @@ fn forward_struct_reference_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 正向矩阵 — 引用语义 / 默认值 / shadow / 嵌套 / 闭包捕获
+// 正向矩阵 — ownership / 默认值 / shadow / 嵌套 / 闭包捕获
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -231,11 +231,11 @@ fn parameter_shadow_wins_before_struct_constructor_resolution() {
     );
 }
 
-/// 引用别名: 两个名字一个实例 — 经 b 改, a 可见。
+/// owning binding 从稳定 Place 读取时创建递归独立副本。
 #[test]
-fn reference_aliasing_two_names_one_instance() {
+fn binding_read_deep_clones_struct() {
     let src = "struct box {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val box a = box()\n    val box b = a\n    b.v = 42\n    return a.v\n}\n";
-    assert_eq!(run(src).unwrap(), 42);
+    assert_eq!(run(src).unwrap(), 0);
 }
 
 /// 全默认构造 + 嵌套读取。
@@ -259,10 +259,10 @@ fn param_passing_shares_instance() {
     assert_eq!(run(src).unwrap(), 5);
 }
 
-/// 闭包引用捕获结构体: 每次调用读到累积最新值。别名再次证明同一实例。
+/// 闭包引用捕获结构体: 每次调用读到累积最新值。
 #[test]
 fn closure_capture_reads_latest_field_value() {
-    let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val cell c = cell()\n    func i32 bump = () -> {\n        c.v = c.v + 30\n        return c.v\n    }\n    val i32 first = bump()\n    val i32 second = bump()\n    val cell alias = c\n    alias.v = 100\n    return second - first + c.v - 100\n}\n";
+    let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val cell c = cell()\n    func i32 bump = () -> {\n        c.v = c.v + 30\n        return c.v\n    }\n    val i32 first = bump()\n    val i32 second = bump()\n    return second - first\n}\n";
     assert_eq!(run(src).unwrap(), 30);
 }
 

@@ -148,7 +148,9 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         }
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { body, .. } => push_validation_body(stack, body),
-        Expr::Move { source, .. } => push_place_expr_children(stack, source),
+        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
+            push_place_expr_children(stack, source)
+        }
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
@@ -1077,6 +1079,31 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                             }
                         }
                         stack.push(HirValidationNode::Expr(subject));
+                    }
+                    Expr::ReadPlace { source, plan, .. } => {
+                        validate_place_contract(source, &known_ids, &structs, false)?;
+                        let expected = crate::sema::exprs::deep_clone_plan_with(
+                            source.ty(),
+                            expr.span(),
+                            &|name| {
+                                structs.get(name).map(|def| {
+                                    def.fields
+                                        .iter()
+                                        .map(|field| field.ty.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                            },
+                        )
+                        .map_err(|_| {
+                            invariant(expr.span(), "ReadPlace 使用不可 DeepCloneable 类型")
+                        })?;
+                        if *plan != expected {
+                            return Err(invariant(
+                                expr.span(),
+                                "ReadPlace DeepClone plan 与 resolved Place 类型不一致",
+                            ));
+                        }
+                        push_place_expr_children(&mut stack, source);
                     }
                     Expr::Move { source, .. } => {
                         validate_place_contract(source, &known_ids, &structs, false)?;

@@ -41,7 +41,7 @@ fn corpus_baselines() -> Vec<Baseline> {
         },
         Baseline {
             file: "structs.as",
-            stdout: b"42\n7\n100\n3\n555\n565\n565\n9\n565\ntrue\n565\n<struct>\n",
+            stdout: b"42\n7\n100\n3\n100\n110\n110\n9\n110\nfalse\n110\n<struct>\n",
             stderr: b"",
             exit: 0,
         },
@@ -59,7 +59,7 @@ fn corpus_baselines() -> Vec<Baseline> {
         },
         Baseline {
             file: "arrays.as",
-            stdout: "10\n30\n6\n7\n5\n5\n4\n4\n5\n99\n5\n2\n3\n50\n忠\n3\n犬bc\n<array>\n".as_bytes(),
+            stdout: "10\n30\n6\n7\n5\n5\n4\n4\n4\n3\n5\n2\n3\n50\n忠\n3\n犬bc\n<array>\n".as_bytes(),
             stderr: b"",
             exit: 0,
         },

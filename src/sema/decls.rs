@@ -56,6 +56,7 @@ impl Checker {
                         },
                         other => other.into_alias(),
                     })?;
+                self.record_owning_slot_read(d, env, &ty)?;
             }
             fields.push(FieldInfo {
                 name: f.name.clone(),

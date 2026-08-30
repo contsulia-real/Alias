@@ -41,6 +41,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("字段索引", facts.field_indices.len()),
         ("赋值 Place", facts.assignment_places.len()),
         ("move Place", facts.move_places.len()),
+        ("owning-slot ordinary read", facts.owning_reads.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
         ("函数参数类型", facts.params.len()),
         ("函数参数 BindingId", facts.param_ids.len()),
@@ -338,6 +339,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     // 任一 AST 节点都会让下方 lookup 全部失效。未来若引入 AST rewrite，必须先改为稳定
     // NodeId，不能用 fallback 掩盖 identity 断裂。
     let key = expr as *const crate::ast::Expr as usize;
+    let owning_read = facts.owning_reads.remove(&key);
     let mut lower_info = facts.exprs.remove(&key).ok_or_else(|| AliasError {
         msg: "内部 sema 不变式被破坏: 表达式缺少静态类型".into(),
         span: expr.span(),
@@ -363,6 +365,12 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
     };
 
     if let Some(callee_ty) = implicit_zero_callee {
+        if owning_read.is_some() {
+            return Err(AliasError {
+                msg: "内部 sema 不变式被破坏: 隐式零参调用携带 owning-slot Place read".into(),
+                span: expr.span(),
+            });
+        }
         if !matches!(call_target.take(), Some(LowerCallTarget::FunctionValue)) {
             return Err(AliasError {
                 msg: "内部 sema 不变式被破坏: 隐式零参调用缺少函数调用 target".into(),
@@ -399,7 +407,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         });
     }
 
-    finalize_expr(match expr {
+    let lowered = finalize_expr(match expr {
         crate::ast::Expr::Int(value, span) => Expr::Int(*value, *span, info),
         crate::ast::Expr::Float(value, span) => Expr::Float(*value, *span, info),
         crate::ast::Expr::Bool(value, span) => Expr::Bool(*value, *span, info),
@@ -628,26 +636,116 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             span: *span,
             info,
         },
+    })?;
+    let Some(read) = owning_read else {
+        return Ok(lowered);
+    };
+    let span = lowered.span();
+    let ty = lowered.ty().clone();
+    let source = lower_resolved_place(lowered, read.place, span)?;
+    finalize_expr(Expr::ReadPlace {
+        source: Box::new(source),
+        plan: read.plan,
+        span,
+        info: ExprInfo {
+            ty,
+            category: None,
+            ownership_capability: None,
+        },
     })
 }
 
-fn lower_move_place(expr: Expr, place: LowerPlaceInfo, span: Span) -> AliasResult<Place> {
-    match (expr, place) {
-        (
-            Expr::Ident(_, Some(expr_id), expr_span, info),
-            LowerPlaceInfo::Local { binding_id, ty },
-        ) if expr_id == binding_id && info.ty == ty => Ok(Place::Local {
-            binding_id,
-            info: PlaceInfo {
-                ty,
-                span: expr_span,
-            },
-        }),
-        _ => Err(AliasError {
-            msg: "内部 sema 不变式被破坏: move Place fact 与 source HIR 不一致".into(),
-            span,
-        }),
+fn lower_resolved_place(expr: Expr, place: LowerPlaceInfo, span: Span) -> AliasResult<Place> {
+    enum Projection {
+        Field { field_index: usize, info: PlaceInfo },
+        Index { index: Box<Expr>, info: PlaceInfo },
     }
+
+    let mut current_expr = expr;
+    let mut current_fact = place;
+    let mut projections = Vec::new();
+    let mut lowered = loop {
+        match (current_expr, current_fact) {
+            (
+                Expr::Ident(_, Some(expr_id), expr_span, info),
+                LowerPlaceInfo::Local { binding_id, ty },
+            ) if expr_id == binding_id && info.ty == ty => {
+                break Place::Local {
+                    binding_id,
+                    info: PlaceInfo {
+                        ty,
+                        span: expr_span,
+                    },
+                };
+            }
+            (
+                Expr::Field {
+                    recv,
+                    field_index: expr_field_index,
+                    span: expr_span,
+                    info,
+                },
+                LowerPlaceInfo::Field {
+                    base,
+                    field_index,
+                    ty,
+                },
+            ) if expr_field_index == field_index && info.ty == ty => {
+                projections.push(Projection::Field {
+                    field_index,
+                    info: PlaceInfo {
+                        ty,
+                        span: expr_span,
+                    },
+                });
+                current_expr = *recv;
+                current_fact = *base;
+            }
+            (
+                Expr::Index {
+                    recv,
+                    idx,
+                    span: expr_span,
+                    info,
+                },
+                LowerPlaceInfo::Index { base, ty },
+            ) if info.ty == ty => {
+                projections.push(Projection::Index {
+                    index: idx,
+                    info: PlaceInfo {
+                        ty,
+                        span: expr_span,
+                    },
+                });
+                current_expr = *recv;
+                current_fact = *base;
+            }
+            _ => {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: resolved Place fact 与 source HIR 不一致".into(),
+                    span,
+                });
+            }
+        }
+    };
+
+    // Place depth is user-controlled. Rebuild from the root iteratively so ordinary reads and
+    // Move do not turn a legal projection chain into host-stack consumption during lowering.
+    for projection in projections.into_iter().rev() {
+        lowered = match projection {
+            Projection::Field { field_index, info } => Place::Field {
+                base: Box::new(lowered),
+                field_index,
+                info,
+            },
+            Projection::Index { index, info } => Place::Index {
+                base: Box::new(lowered),
+                index,
+                info,
+            },
+        };
+    }
+    Ok(lowered)
 }
 
 // Keep Move's owned temporary HIR values out of lower_expr's recursive stack frame. The parser's
@@ -670,7 +768,7 @@ fn lower_move_expr(
     let _ = lower_expr(callee, facts)?;
     let source_expr = lower_expr(&args[0].value, facts)?;
     let source_fact = take_required(&mut facts.move_places, key, span, "move Place")?;
-    let source = lower_move_place(source_expr, source_fact, span)?;
+    let source = lower_resolved_place(source_expr, source_fact, span)?;
     Ok(Expr::Move {
         source: Box::new(source),
         span,

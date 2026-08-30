@@ -87,8 +87,9 @@ pub(crate) fn emit_stmt<M: Module>(
             Ok(())
         }
         Stmt::Assign { target, value } => {
-            // Replacement/ownership 语义尚由上游演进；当前运行时顺序必须保持 RHS 先完整
-            // 求值，再求值 Place 内的 Field/Index projection。Place emitter 只执行 resolved 写入。
+            // Replacement 的 ownership 语义由 resolved HIR 决定；运行时顺序必须保持 RHS
+            // （包括 ReadPlace clone）先完整求值，再求值 target 的 Field/Index projection。
+            // 反转顺序会让重叠 Place 的 replacement 观察到错误 source 状态。
             let value = emit_expr(c, bcx, frame, value)?;
             emit_place_write(c, bcx, frame, target, value)
         }

@@ -53,13 +53,12 @@ fn self_read_in_method_body() {
     assert_eq!(run(src).unwrap(), 7);
 }
 
-/// 结构体方法经 self 写 var 字段 — self 绑定不可变但字段级可变性独立;
-/// 改动落在实例上, 别名立即可见 (引用语义穿透方法边界)。
+/// 结构体方法经 self 写 var 字段；由 owning binding 读取形成的两个实例独立。
 #[test]
-fn struct_method_mutates_var_field_visible_via_alias() {
+fn struct_method_mutates_only_the_selected_owner() {
     let src = "struct counter {\n    var i32 n = 0\n}\nfunc i32 counter.bump = (i32 by) -> {\n    self.n = self.n + by\n    return self.n\n}\nfunc i32 main = () -> {\n    val counter c = counter()\n    val counter alias = c\n    val i32 first = c.bump(5)\n    val i32 second = alias.bump(2)\n    return first * 10 + second + c.n\n}\n";
-    // first=5, second=7 (同一实例累积), c.n=7 → 50+7+7
-    assert_eq!(run(src).unwrap(), 64);
+    // first=5, second=2 (独立副本), c.n=5 → 50+2+5
+    assert_eq!(run(src).unwrap(), 57);
 }
 
 /// 链式调用: 返回类型逐级流入静态投影 — upper→lower→len 全程值流动。

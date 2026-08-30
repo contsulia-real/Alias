@@ -410,6 +410,14 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// Ordinary stable-Place read into a semantically owning storage context. The recursive plan
+    /// is frozen by sema; backend execution must not infer cloneability from the physical value.
+    ReadPlace {
+        source: Box<Place>,
+        plan: DeepClonePlan,
+        span: Span,
+        info: ExprInfo,
+    },
     /// Explicit ownership transfer from a sema-resolved Place. Keeping the Place as payload makes
     /// source identity and later overlap checks independent of the original AST expression shape.
     Move {
@@ -444,6 +452,7 @@ impl Expr {
             | Self::FuncLit { info, .. }
             | Self::Match { info, .. }
             | Self::Propagate { info, .. }
+            | Self::ReadPlace { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -472,6 +481,7 @@ impl Expr {
             | Self::FuncLit { info, .. }
             | Self::Match { info, .. }
             | Self::Propagate { info, .. }
+            | Self::ReadPlace { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -519,6 +529,7 @@ impl Expr {
             | Self::FuncLit { span, .. }
             | Self::Match { span, .. }
             | Self::Propagate { span, .. }
+            | Self::ReadPlace { span, .. }
             | Self::Move { span, .. } => *span,
         }
     }

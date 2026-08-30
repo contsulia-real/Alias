@@ -341,6 +341,7 @@ impl Checker {
                         }
                         Err(e) => return Err(e),
                     }
+                    self.record_owning_slot_read(item, env, elem)?;
                 }
                 Ok(expected.clone())
             }
@@ -367,6 +368,7 @@ impl Checker {
                             CtorKind::Err => err.as_ref(),
                         };
                         self.expr_expected(&arg.value, env, payload)?;
+                        self.record_owning_slot_read(&arg.value, env, payload)?;
                         return Ok(expected.clone());
                     }
                 }

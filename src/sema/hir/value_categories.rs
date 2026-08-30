@@ -65,6 +65,7 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
             CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
             CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
         },
+        Expr::ReadPlace { plan, .. } => !matches!(plan, DeepClonePlan::Inline),
         Expr::Move { .. } => carries_dynamic_owner(expr.ty()),
         Expr::MethodCall { target, .. } => match target {
             MethodTarget::StringUpper
@@ -276,7 +277,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
         | Expr::Propagate { expr, .. } => stack.push(Node::Expr(expr)),
-        Expr::Move { source, .. } => push_place_expr_children(stack, source),
+        Expr::ReadPlace { source, .. } | Expr::Move { source, .. } => {
+            push_place_expr_children(stack, source)
+        }
         Expr::Binary { lhs, rhs, .. } => {
             stack.push(Node::Expr(rhs));
             stack.push(Node::Expr(lhs));

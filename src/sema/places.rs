@@ -111,6 +111,7 @@ impl Checker {
                 span: error.span,
             }
         })?;
+        self.record_owning_slot_read(value, env, &info.ty)?;
         Ok(())
     }
 
@@ -160,6 +161,7 @@ impl Checker {
                     span: error.span,
                 }
             })?;
+        self.record_owning_slot_read(value, env, &field_info.ty)?;
         Ok(())
     }
 }

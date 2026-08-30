@@ -1,6 +1,6 @@
 # Pattern / Match 当前语义
 
-**同步日期：** 2026-08-28
+**同步日期：** 2026-08-30
 
 > 本文是 Pattern 专题说明；总规范以 `docs/spec-notes.md` 为准。这里只描述当前有效状态。
 
@@ -47,6 +47,8 @@ match value {
 - 前序 Pattern 已覆盖全部剩余取值后，后续 arm 编译错误。
 
 普通标识符绑定整个主语，而 `ok(name)` / `err(name)` 只绑定对应 payload。
+
+当前 Pattern binding 尚未接入 function/capture effect 与 loan 分析，不属于 `docs/spec-notes.md` 3.4 节已经落地的 owning-slot `ReadPlace`；其现有共享读取是迁移期实现事实，不是长期 ownership 合同。
 
 ## 4. match 结果与控制流
 

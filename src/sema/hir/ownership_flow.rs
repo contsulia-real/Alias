@@ -16,6 +16,7 @@ use std::collections::{HashSet, VecDeque};
 enum Action<'a> {
     Nop,
     Read(BindingId, Span),
+    CloneRead(BindingId, Span),
     Move(&'a Place, Span),
     Declare(BindingId),
     Reinitialize(BindingId),
@@ -90,6 +91,8 @@ enum Task<'a> {
         entry: usize,
         exit: usize,
         loops: LoopTargets,
+        read_root: bool,
+        exposes_alias: bool,
     },
 }
 
@@ -250,7 +253,9 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit,
                     loops,
-                } => self.build_place_eval(place, entry, exit, loops),
+                    read_root,
+                    exposes_alias,
+                } => self.build_place_eval(place, entry, exit, loops, read_root, exposes_alias),
             }
         }
         Ok(self)
@@ -316,6 +321,8 @@ impl<'a> GraphBuilder<'a> {
                     entry: after_value,
                     exit: after_place,
                     loops,
+                    read_root: false,
+                    exposes_alias: true,
                 });
                 let reinitializes =
                     matches!(value.value_category(), Some(ValueCategory::OwnedTemporary));
@@ -477,6 +484,14 @@ impl<'a> GraphBuilder<'a> {
                 }
                 self.action_between(entry, exit, Action::Move(source, *span));
             }
+            Expr::ReadPlace { source, .. } => self.tasks.push(Task::PlaceEval {
+                place: source,
+                entry,
+                exit,
+                loops,
+                read_root: true,
+                exposes_alias: false,
+            }),
             Expr::Str(parts, ..) => {
                 let holes = parts
                     .iter()
@@ -632,6 +647,8 @@ impl<'a> GraphBuilder<'a> {
         entry: usize,
         exit: usize,
         loops: LoopTargets,
+        read_root: bool,
+        exposes_alias: bool,
     ) {
         let mut root = place;
         let mut indices = Vec::new();
@@ -641,8 +658,20 @@ impl<'a> GraphBuilder<'a> {
             }
             root = base;
         }
-        if matches!(place, Place::Local { .. }) {
-            self.edge(entry, exit);
+        if let Place::Local {
+            binding_id, info, ..
+        } = place
+        {
+            if read_root {
+                let action = if exposes_alias {
+                    Action::Read(*binding_id, info.span)
+                } else {
+                    Action::CloneRead(*binding_id, info.span)
+                };
+                self.action_between(entry, exit, action);
+            } else {
+                self.edge(entry, exit);
+            }
             return;
         }
         let Place::Local {
@@ -653,7 +682,12 @@ impl<'a> GraphBuilder<'a> {
             return;
         };
         let after_root = self.node(Action::Nop);
-        self.action_between(entry, after_root, Action::Read(*binding_id, info.span));
+        let action = if exposes_alias {
+            Action::Read(*binding_id, info.span)
+        } else {
+            Action::CloneRead(*binding_id, info.span)
+        };
+        self.action_between(entry, after_root, action);
         indices.reverse();
         self.expression_sequence(indices, after_root, exit, None, loops);
     }
@@ -671,11 +705,16 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize) -> AliasResult<()> {
                 if state.moved.contains(&id) {
                     return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
-                // Ordinary dynamic reads still share the current runtime object. Until their
-                // DeepClone/effect contract is resolved, any such read may have exposed an alias,
-                // so later claiming exclusive ownership through Move would be unsound.
+                // Reads not resolved as owning-slot ReadPlace still share the current runtime
+                // object. Until their call/return/capture effect is resolved, a later Move cannot
+                // claim that the source remained exclusive.
                 if graph.eligible.contains(&id) {
                     state.exposed.insert(id);
+                }
+            }
+            Action::CloneRead(id, span) => {
+                if state.moved.contains(&id) {
+                    return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
             }
             Action::Move(source, span) => {
