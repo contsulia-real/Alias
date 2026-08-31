@@ -201,7 +201,7 @@ impl Checker {
             });
         };
         match sig {
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 if !params.is_empty() {
                     return Err(AliasError {
                         msg: "顶层 func main 不能声明参数".into(),

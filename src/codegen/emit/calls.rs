@@ -230,6 +230,7 @@ pub(crate) fn emit_method_call<M: Module>(
         MethodTarget::User {
             receiver,
             id: method_id,
+            ..
         } => {
             let receiver_vty = c.vty(receiver);
             if receiver_vty != svt {

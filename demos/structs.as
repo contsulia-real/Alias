@@ -2,7 +2,7 @@
 // demos/structs.as — 当前 struct 演练夹具
 // 覆盖: 定义 (默认值 + 必填字段) / 乱序命名构造 / 字段读 /
 //   var 字段变异 (字段级可变性独立于绑定可变性) / owning binding DeepClone /
-//   传参共享实例 / 嵌套结构体 / 闭包引用捕获 / <struct> 显示
+//   WriteBorrow 参数 / 嵌套结构体 / 闭包引用捕获 / <struct> 显示
 // ============================================================
 
 struct point {
@@ -20,7 +20,7 @@ struct frame {
     val point origin
 }
 
-// 引用语义: 形参拿到同一实例 — 函数内的字段改动调用方可见
+// WriteBorrow: caller 为稳定 Place 建立独占 call loan，字段改动对调用方可见
 func i32 add_ten = (stat s) -> {
     s.bytes = s.bytes + 10
     return s.bytes
@@ -45,7 +45,7 @@ func i32 main = () -> {
     alias.bytes = 555
     println a.bytes
 
-    // 传参即共享: 函数内 +10, 出来可见
+    // add_ten 的 s 推导为 WriteBorrow；函数内 +10，调用后可见
     println add_ten(a)
     println a.bytes
 

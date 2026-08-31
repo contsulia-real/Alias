@@ -1,7 +1,7 @@
 //! typed HIR data model. No name resolution or backend inference belongs here.
 
 pub use crate::ast::{BinOp, BindKind, CtorKind, Pattern};
-use crate::sema::types::Ty;
+use crate::sema::types::{ParamEffect, Ty};
 use crate::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -12,6 +12,9 @@ pub(crate) struct MethodId(pub(crate) u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct LoanId(pub(crate) u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FunctionId(pub(crate) u32);
 
 #[derive(Debug, Clone)]
 pub(crate) struct CheckedProgram {
@@ -77,6 +80,7 @@ pub(crate) enum Body {
 pub(crate) struct Param {
     pub(crate) binding_id: BindingId,
     pub(crate) ty: Ty,
+    pub(crate) effect: Option<ParamEffect>,
 }
 
 /// 闭包环境保存 binding cell，但捕获对 referent 的静态权限必须独立固化为普通 loan。
@@ -198,6 +202,19 @@ pub(crate) struct MatchArm {
 #[derive(Debug, Clone)]
 pub(crate) struct CallArg {
     pub(crate) value: Expr,
+    pub(crate) pass: Option<ArgumentPass>,
+}
+
+/// Caller-side execution contract resolved from the callee's frozen parameter effect. Borrow
+/// variants carry the canonical source Place and loan generation; codegen only evaluates `value`
+/// because the pass contract is a static ownership fact, not a second runtime calling convention.
+#[derive(Debug, Clone)]
+pub(crate) enum ArgumentPass {
+    Inline,
+    ReadBorrow { loan_id: LoanId, source: Place },
+    WriteBorrow { loan_id: LoanId, source: Place },
+    BorrowTemporary { kind: BorrowKind },
+    Owned,
 }
 
 /// sema 已经裁决好的 deep-clone 执行计划。codegen 只能逐层执行该 plan，不能根据
@@ -260,7 +277,11 @@ pub(crate) enum MethodTarget {
     ArrayPush,
     ArrayPop,
     ArrayIterator,
-    User { receiver: Ty, id: MethodId },
+    User {
+        receiver: Ty,
+        id: MethodId,
+        param_effects: Option<Vec<ParamEffect>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -399,6 +420,7 @@ pub(crate) enum Expr {
     },
     MethodCall {
         recv: Box<Expr>,
+        receiver_pass: Option<ArgumentPass>,
         args: Vec<CallArg>,
         target: MethodTarget,
         span: Span,
@@ -422,6 +444,7 @@ pub(crate) enum Expr {
         info: ExprInfo,
     },
     FuncLit {
+        function_id: FunctionId,
         params: Vec<Param>,
         implicit_bindings: Vec<BindingId>,
         captures: Vec<Capture>,

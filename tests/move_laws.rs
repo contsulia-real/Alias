@@ -233,16 +233,10 @@ func i32 main = () -> {
 }
 
 #[test]
-fn dynamic_parameter_move_waits_for_parameter_effects() {
-    let error = fail(
-        r#"
+fn dynamic_parameter_move_infers_owned_effect() {
+    let source = r#"
 func string take = (string value) -> return move(value)
 func i32 main = () -> return take('x').len()
-"#,
-    );
-    assert!(
-        error.msg.contains("当前函数内的 owning local"),
-        "{}",
-        error.msg
-    );
+"#;
+    assert_eq!(run(source).unwrap(), 1);
 }

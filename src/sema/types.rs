@@ -55,6 +55,13 @@ impl FloatW {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ParamEffect {
+    ReadBorrow,
+    WriteBorrow,
+    Owned,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Ty {
     Int(IntW),
@@ -65,6 +72,9 @@ pub(crate) enum Ty {
     Unit,
     Func {
         params: Vec<Ty>,
+        /// check 阶段尚未拥有函数体 fixed-point 事实，因此为 None；parameter-effect
+        /// finalization 必须在 final HIR 前写回完整、与 params 等长的向量。
+        param_effects: Option<Vec<ParamEffect>>,
         ret: Box<Ty>,
     },
     FuncPoly,
@@ -112,7 +122,7 @@ impl Ty {
     pub(crate) fn contains_unknown(&self) -> bool {
         match self {
             Ty::Unknown => true,
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 params.iter().any(Ty::contains_unknown) || ret.contains_unknown()
             }
             Ty::Result(ok, err) => ok.contains_unknown() || err.contains_unknown(),
@@ -124,7 +134,9 @@ impl Ty {
     pub(crate) fn contains_unit(&self) -> bool {
         match self {
             Ty::Unit => true,
-            Ty::Func { params, ret } => params.iter().any(Ty::contains_unit) || ret.contains_unit(),
+            Ty::Func { params, ret, .. } => {
+                params.iter().any(Ty::contains_unit) || ret.contains_unit()
+            }
             Ty::Result(ok, err) => ok.contains_unit() || err.contains_unit(),
             Ty::Array(elem) | Ty::Iterator(elem) => elem.contains_unit(),
             _ => false,

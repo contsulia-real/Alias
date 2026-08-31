@@ -165,7 +165,7 @@ impl Checker {
             Expr::Juxtapose { lhs, rhs, span } => {
                 let lhs_ty = self.expr_raw_callable(lhs, env)?;
                 match &lhs_ty {
-                    Ty::Func { params, ret } if params.len() == 1 => {
+                    Ty::Func { params, ret, .. } if params.len() == 1 => {
                         match self.expr_expected(rhs, env, &params[0]) {
                             Ok(_) => {}
                             Err(ExprCheckError::Mismatch { actual, .. }) => {

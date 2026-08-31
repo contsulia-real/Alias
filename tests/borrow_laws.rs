@@ -211,7 +211,7 @@ func i32 main = () -> {
 }
 
 #[test]
-fn borrowed_value_cannot_enter_unresolved_function_effects() {
+fn borrowed_value_cannot_bypass_referent_loan_forwarding() {
     let error = fail(
         r#"
 func i32 length = (string value) -> return value.len()
@@ -221,7 +221,11 @@ func i32 main = () -> {
 }
 "#,
     );
-    assert!(error.msg.contains("BorrowedValue"), "{}", error.msg);
+    assert!(
+        error.msg.contains("referent-loan forwarding"),
+        "{}",
+        error.msg
+    );
 }
 
 #[test]

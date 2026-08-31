@@ -98,7 +98,7 @@ impl Checker {
 
         let ft = self.expr_raw_callable(callee, env)?;
         match ft {
-            Ty::Func { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 if args.len() != params.len() {
                     return Err(AliasError {
                         msg: format!("期望 {} 个参数, 实际 {} 个", params.len(), args.len()),

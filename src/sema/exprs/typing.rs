@@ -136,6 +136,7 @@ impl Checker {
             callee,
             Ty::Func {
                 params,
+                param_effects: None,
                 ret: Box::new(result.clone()),
             },
         );
@@ -189,7 +190,7 @@ impl Checker {
     }
 
     fn maybe_implicit_zero_call(&mut self, e: &Expr, raw: Ty) -> Ty {
-        let Ty::Func { params, ret } = &raw else {
+        let Ty::Func { params, ret, .. } = &raw else {
             return raw;
         };
         if !params.is_empty() {

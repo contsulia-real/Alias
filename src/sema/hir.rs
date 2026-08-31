@@ -3,10 +3,12 @@
 mod binding_contract;
 mod borrow_contract;
 mod capture;
+mod expr_places;
 mod lower;
 mod model;
 mod ownership_capabilities;
 mod ownership_flow;
+mod parameter_effects;
 mod place_relation;
 mod storage_relations;
 mod typed_contract;
@@ -27,6 +29,8 @@ mod move_tests;
 #[cfg(test)]
 mod ordinary_read_tests;
 #[cfg(test)]
+mod parameter_effect_tests;
+#[cfg(test)]
 mod place_relation_tests;
 #[cfg(test)]
 mod shallow_clone_tests;
@@ -40,11 +44,11 @@ mod typed_contract_tests;
 mod value_category_tests;
 
 pub(crate) use model::{
-    ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind, BuiltinCall,
-    CallArg, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory,
-    ExprInfo, Item, LoanId, MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern,
-    Place, PlaceInfo, ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart,
-    StructDef, StructField, ValueCategory,
+    ArgumentPass, ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind,
+    BuiltinCall, CallArg, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr,
+    ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm, MethodId, MethodTarget,
+    OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, ShallowClonePlan,
+    Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -105,6 +109,7 @@ pub(super) struct LowerBorrowInfo {
 /// 被精确消费；它不是 final HIR model，也不能越过 lower 存活到 capture/validation/codegen。
 pub(super) struct LowerFacts {
     pub(super) next_loan_id: u32,
+    pub(super) next_function_id: u32,
     pub(super) exprs: HashMap<usize, crate::sema::LowerExprInfo>,
     pub(super) bindings: HashMap<usize, Ty>,
     pub(super) binding_ids: HashMap<usize, BindingId>,
@@ -144,6 +149,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     // Stable identity must be closed before analyses recompute capture/free-use graphs. Otherwise a
     // duplicate BindingId can masquerade as capture drift and steal the diagnostic from its owner.
     binding_contract::validate(program)?;
+    parameter_effects::validate(program)?;
     borrow_contract::validate(program)?;
     place_relation::validate(program)?;
     ownership_flow::validate(program)?;

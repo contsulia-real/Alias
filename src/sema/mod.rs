@@ -91,6 +91,7 @@ impl MethodInfo {
             Self::User { id, .. } => Some(MethodTarget::User {
                 receiver: receiver.clone(),
                 id: *id,
+                param_effects: None,
             }),
         }
     }
@@ -407,6 +408,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                                     id,
                                     ty: Ty::Func {
                                         params: ptys,
+                                        param_effects: None,
                                         ret: Box::new(ret),
                                     },
                                     mutable: false,
@@ -425,6 +427,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
         program,
         hir::LowerFacts {
             next_loan_id: ck.next_loan_id,
+            next_function_id: 0,
             exprs: ck.expr_facts,
             bindings: ck.binding_types,
             binding_ids: ck.binding_ids,

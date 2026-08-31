@@ -1,7 +1,7 @@
 //! struct 当前法律测试 — 正负矩阵，负向断言精确中文消息 + 行:列。
 //!
 //! 当前语义锚点：
-//! - owning binding 的稳定 Place 读取执行 DeepClone；传参/闭包捕获仍共享实例；
+//! - owning binding 的稳定 Place 读取执行 DeepClone；用户调用按 parameter effect 建立 call loan；
 //! - 字段级可变性：var 字段可写与持有绑定自身 val/var 无关；
 //! - 顶层名字空间：struct 名与顶层 binding/func 不得重名；词法子作用域可以 shadow constructor；
 //! - 构造全命名：缺字段/重复/未知/类型不符各有独立诊断。
@@ -252,9 +252,9 @@ fn out_of_order_ctor_and_var_field_mutation() {
     assert_eq!(run(src).unwrap(), 39);
 }
 
-/// 传参即共享: 函数内字段改动调用方可见。
+/// WriteBorrow 参数：函数内字段改动调用方可见。
 #[test]
-fn param_passing_shares_instance() {
+fn write_borrow_parameter_mutates_the_caller_instance() {
     let src = "struct bag {\n    var i32 n = 0\n}\nfunc i32 touch = (bag b) -> {\n    b.n = b.n + 5\n    return b.n\n}\nfunc i32 main = () -> {\n    val bag x = bag()\n    val i32 r = touch(x)\n    return x.n\n}\n";
     assert_eq!(run(src).unwrap(), 5);
 }

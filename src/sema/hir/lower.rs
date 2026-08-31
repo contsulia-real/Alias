@@ -1,7 +1,7 @@
 use super::{
     ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallTarget,
-    CheckedProgram, Expr, ExprInfo, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param, Place,
-    PlaceInfo, Stmt, StrPart, StructDef, StructField,
+    CheckedProgram, Expr, ExprInfo, FunctionId, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param,
+    Place, PlaceInfo, Stmt, StrPart, StructDef, StructField,
 };
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
@@ -25,6 +25,7 @@ pub(super) fn lower(
     // initial ownership capability；每个显式 Binding 同时固化当前可证明的 storage relation。
     // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked, &mut facts.next_loan_id)?;
+    super::parameter_effects::finalize(&mut checked, &mut facts.next_loan_id)?;
     super::borrow_contract::validate(&checked)?;
     // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
     // only after captures are known; otherwise a closure use could be omitted from the loan region.
@@ -525,6 +526,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 callee: Box::new(lower_expr(lhs, facts)?),
                 args: vec![CallArg {
                     value: lower_expr(rhs, facts)?,
+                    pass: None,
                 }],
                 target: CallTarget::FunctionValue,
                 span: *span,
@@ -539,6 +541,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 }
                 Expr::MethodCall {
                     recv: Box::new(lower_expr(lhs, facts)?),
+                    receiver_pass: None,
                     args: Vec::new(),
                     target,
                     span: *span,
@@ -556,6 +559,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             recv, args, span, ..
         } => Expr::MethodCall {
             recv: Box::new(lower_expr(recv, facts)?),
+            receiver_pass: None,
             args: args
                 .iter()
                 .map(|arg| lower_call_arg(arg, facts))
@@ -593,6 +597,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             info,
         },
         crate::ast::Expr::FuncLit { params, body, span } => Expr::FuncLit {
+            function_id: fresh_function_id(facts, *span)?,
             params: params
                 .iter()
                 .map(|param| {
@@ -608,6 +613,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                             msg: "内部 sema 不变式被破坏: 函数参数缺少静态类型".into(),
                             span: param.span,
                         })?,
+                        effect: None,
                     })
                 })
                 .collect::<AliasResult<Vec<_>>>()?,
@@ -846,7 +852,20 @@ fn lower_call_target(
 fn lower_call_arg(arg: &crate::ast::CallArg, facts: &mut LowerFacts) -> AliasResult<CallArg> {
     Ok(CallArg {
         value: lower_expr(&arg.value, facts)?,
+        pass: None,
     })
+}
+
+fn fresh_function_id(facts: &mut LowerFacts, span: Span) -> AliasResult<FunctionId> {
+    let id = FunctionId(facts.next_function_id);
+    facts.next_function_id = facts
+        .next_function_id
+        .checked_add(1)
+        .ok_or_else(|| AliasError {
+            msg: "函数字面量数量超过编译器上限".into(),
+            span,
+        })?;
+    Ok(id)
 }
 
 fn lower_match_arm(arm: &crate::ast::MatchArm, facts: &mut LowerFacts) -> AliasResult<MatchArm> {

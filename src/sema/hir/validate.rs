@@ -320,7 +320,7 @@ fn collect_user_methods(
         if receiver.contains_unknown() {
             return Err(invariant(binding.span, "用户方法接收者类型未确定"));
         }
-        let Ty::Func { params, ret } = &binding.ty else {
+        let Ty::Func { params, ret, .. } = &binding.ty else {
             return Err(invariant(binding.span, "用户方法绑定缺少完整函数类型"));
         };
         if params.first() != Some(receiver) {
@@ -373,7 +373,7 @@ fn validate_main_contract(program: &CheckedProgram) -> AliasResult<()> {
             "CheckedProgram.main_id 未指向顶层 main 绑定",
         ));
     }
-    let Ty::Func { params, ret } = &main.ty else {
+    let Ty::Func { params, ret, .. } = &main.ty else {
         return Err(invariant(main.span, "顶层 main HIR 类型不是函数"));
     };
     if !params.is_empty() || !matches!(ret.as_ref(), Ty::Int(IntW::W32)) {
@@ -446,7 +446,7 @@ fn validate_call_target(
 ) -> AliasResult<()> {
     match target {
         CallTarget::FunctionValue => {
-            let Ty::Func { params, ret } = callee.ty() else {
+            let Ty::Func { params, ret, .. } = callee.ty() else {
                 return Err(invariant(
                     callee.span(),
                     "FunctionValue target 的 callee 不是完整函数类型",
@@ -1044,7 +1044,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         recv, args, target, ..
                     } => {
                         match target {
-                            MethodTarget::User { receiver, id } => validate_user_method_target(
+                            MethodTarget::User { receiver, id, .. } => validate_user_method_target(
                                 expr,
                                 recv,
                                 args,

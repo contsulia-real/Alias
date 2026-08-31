@@ -5,10 +5,11 @@
 //! unioning every capability that may already have been moved.
 
 use super::{
-    place_relation, ArmBody, BindingId, Body, BorrowKind, CheckedProgram, Expr, Item, LoanId,
-    Place, PlaceRelation, ResolvedConversion, Stmt, StorageRelation, StrPart, ValueCategory,
+    place_relation, ArgumentPass, ArmBody, BindingId, Body, BorrowKind, CallArg, CheckedProgram,
+    Expr, Item, LoanId, Place, PlaceRelation, ResolvedConversion, Stmt, StorageRelation, StrPart,
+    ValueCategory,
 };
-use crate::sema::types::Ty;
+use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -47,13 +48,18 @@ enum Action<'a> {
     Nop,
     Read(BindingId, AccessKind, Span),
     CloneRead(&'a Place, Span),
+    ProjectedRead(&'a Expr, Span),
     Borrow {
         loan_id: LoanId,
         source: &'a Place,
         declared_kind: Option<BorrowKind>,
         span: Span,
     },
+    // A borrowed slot rebind replaces its one referent generation; a call/closure holder owns all
+    // argument/capture loans simultaneously. Collapsing both into replacement makes earlier call
+    // arguments die before invocation and misses conflicts between overlapping parameters.
     BindLoan(LoanHolder, LoanId),
+    AddLoan(LoanHolder, LoanId),
     UseLoanHolder(LoanHolder),
     Write(&'a Place, Span),
     Move(&'a Place, Span),
@@ -134,6 +140,14 @@ enum Task<'a> {
         loops: LoopTargets,
         mode: PlaceEvalMode,
     },
+    Argument {
+        value: &'a Expr,
+        pass: &'a ArgumentPass,
+        holder: LoanHolder,
+        entry: usize,
+        exit: usize,
+        loops: LoopTargets,
+    },
 }
 
 struct GraphBuilder<'a> {
@@ -143,6 +157,7 @@ struct GraphBuilder<'a> {
     owning: HashSet<BindingId>,
     borrowed: HashSet<BindingId>,
     capture_permissions: HashMap<BindingId, BorrowKind>,
+    parameter_permissions: HashMap<BindingId, ParamEffect>,
     loan_holder_bindings: HashSet<BindingId>,
     nested_functions: Vec<&'a Expr>,
     next_temporary_holder: u32,
@@ -175,6 +190,17 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
             _ => return None,
         }
     }
+}
+
+fn resolved_arguments(args: &[CallArg], span: Span) -> AliasResult<Vec<(&Expr, &ArgumentPass)>> {
+    args.iter()
+        .map(|arg| {
+            arg.pass
+                .as_ref()
+                .map(|pass| (&arg.value, pass))
+                .ok_or_else(|| error(span, "user call argument 缺少 resolved parameter pass"))
+        })
+        .collect()
 }
 
 fn projected_expr_root(expr: &Expr) -> Option<(BindingId, Span, Vec<&Expr>)> {
@@ -210,6 +236,7 @@ impl<'a> GraphBuilder<'a> {
             owning: HashSet::new(),
             borrowed: HashSet::new(),
             capture_permissions: HashMap::new(),
+            parameter_permissions: HashMap::new(),
             loan_holder_bindings: HashSet::new(),
             nested_functions: Vec::new(),
             next_temporary_holder: 0,
@@ -266,6 +293,36 @@ impl<'a> GraphBuilder<'a> {
                 exit: boundaries[index + 1],
                 replacement,
                 capture_holder: None,
+                loops,
+            });
+        }
+    }
+
+    fn argument_sequence(
+        &mut self,
+        arguments: Vec<(&'a Expr, &'a ArgumentPass)>,
+        holder: LoanHolder,
+        entry: usize,
+        exit: usize,
+        loops: LoopTargets,
+    ) {
+        if arguments.is_empty() {
+            self.edge(entry, exit);
+            return;
+        }
+        let mut boundaries = Vec::with_capacity(arguments.len() + 1);
+        boundaries.push(entry);
+        for _ in 1..arguments.len() {
+            boundaries.push(self.node(Action::Nop));
+        }
+        boundaries.push(exit);
+        for (index, (value, pass)) in arguments.into_iter().enumerate().rev() {
+            self.tasks.push(Task::Argument {
+                value,
+                pass,
+                holder,
+                entry: boundaries[index],
+                exit: boundaries[index + 1],
                 loops,
             });
         }
@@ -351,6 +408,14 @@ impl<'a> GraphBuilder<'a> {
                     loops,
                     mode,
                 } => self.build_place_eval(place, entry, exit, loops, mode),
+                Task::Argument {
+                    value,
+                    pass,
+                    holder,
+                    entry,
+                    exit,
+                    loops,
+                } => self.build_argument(value, pass, holder, entry, exit, loops)?,
             }
         }
         Ok(self)
@@ -784,13 +849,8 @@ impl<'a> GraphBuilder<'a> {
                         capture_holder: Some(holder),
                         loops,
                     });
-                    self.expression_sequence(
-                        args.iter().map(|arg| &arg.value).collect(),
-                        after_callee,
-                        before_call,
-                        replacement,
-                        loops,
-                    );
+                    let arguments = resolved_arguments(args, expr.span())?;
+                    self.argument_sequence(arguments, holder, after_callee, before_call, loops);
                     self.action_between(before_call, exit, Action::UseLoanHolder(holder));
                     return Ok(());
                 }
@@ -799,8 +859,39 @@ impl<'a> GraphBuilder<'a> {
                 self.expression_sequence(expressions, entry, exit, replacement, loops);
             }
             Expr::MethodCall {
-                recv, args, target, ..
+                recv,
+                receiver_pass,
+                args,
+                target,
+                ..
             } => {
+                if matches!(target, super::MethodTarget::User { .. }) {
+                    let holder = LoanHolder::Temporary(self.next_temporary_holder);
+                    self.next_temporary_holder = self
+                        .next_temporary_holder
+                        .checked_add(1)
+                        .ok_or_else(|| error(expr.span(), "临时 call loan holder 数量超限"))?;
+                    let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
+                        error(
+                            expr.span(),
+                            "user method receiver 缺少 resolved argument pass",
+                        )
+                    })?;
+                    let after_receiver = self.node(Action::Nop);
+                    let before_call = self.node(Action::Nop);
+                    self.tasks.push(Task::Argument {
+                        value: recv,
+                        pass: receiver_pass,
+                        holder,
+                        entry,
+                        exit: after_receiver,
+                        loops,
+                    });
+                    let arguments = resolved_arguments(args, expr.span())?;
+                    self.argument_sequence(arguments, holder, after_receiver, before_call, loops);
+                    self.action_between(before_call, exit, Action::UseLoanHolder(holder));
+                    return Ok(());
+                }
                 if matches!(
                     target,
                     super::MethodTarget::ArrayPush | super::MethodTarget::ArrayPop
@@ -829,16 +920,39 @@ impl<'a> GraphBuilder<'a> {
                 expressions.extend(args.iter().map(|arg| &arg.value));
                 self.expression_sequence(expressions, entry, exit, replacement, loops);
             }
-            Expr::Field { recv, .. } => self.tasks.push(Task::Expr {
-                expr: recv,
-                entry,
-                exit,
-                replacement,
-                capture_holder: None,
-                loops,
-            }),
+            Expr::Field { recv, .. } => {
+                if !dynamic_owner(expr.ty()) && super::expr_places::from_expr(expr).is_some() {
+                    self.action_between(entry, exit, Action::ProjectedRead(expr, expr.span()));
+                } else {
+                    self.tasks.push(Task::Expr {
+                        expr: recv,
+                        entry,
+                        exit,
+                        replacement,
+                        capture_holder: None,
+                        loops,
+                    });
+                }
+            }
             Expr::Index { recv, idx, .. } => {
-                self.expression_sequence(vec![recv, idx], entry, exit, replacement, loops)
+                if !dynamic_owner(expr.ty()) && super::expr_places::from_expr(expr).is_some() {
+                    let after_index = self.node(Action::Nop);
+                    self.tasks.push(Task::Expr {
+                        expr: idx,
+                        entry,
+                        exit: after_index,
+                        replacement: None,
+                        capture_holder: None,
+                        loops,
+                    });
+                    self.action_between(
+                        after_index,
+                        exit,
+                        Action::ProjectedRead(expr, expr.span()),
+                    );
+                } else {
+                    self.expression_sequence(vec![recv, idx], entry, exit, replacement, loops);
+                }
             }
             Expr::ArrayLit { elems, .. } => {
                 self.expression_sequence(elems.iter().collect(), entry, exit, replacement, loops)
@@ -876,7 +990,7 @@ impl<'a> GraphBuilder<'a> {
                         self.action_between(
                             after_borrow,
                             next,
-                            Action::BindLoan(holder, capture.loan_id),
+                            Action::AddLoan(holder, capture.loan_id),
                         );
                         current = next;
                     }
@@ -975,6 +1089,62 @@ impl<'a> GraphBuilder<'a> {
         self.expression_sequence(indices, after_root, exit, None, loops);
     }
 
+    fn build_argument(
+        &mut self,
+        value: &'a Expr,
+        pass: &'a ArgumentPass,
+        holder: LoanHolder,
+        entry: usize,
+        exit: usize,
+        loops: LoopTargets,
+    ) -> AliasResult<()> {
+        match pass {
+            ArgumentPass::Inline | ArgumentPass::Owned => self.tasks.push(Task::Expr {
+                expr: value,
+                entry,
+                exit,
+                replacement: None,
+                capture_holder: Some(holder),
+                loops,
+            }),
+            ArgumentPass::BorrowTemporary { kind } => {
+                // The temporary has no external Place to protect, but a function temporary may
+                // itself hold capture loans until the call consumes this holder.
+                let _borrow_kind = *kind;
+                self.tasks.push(Task::Expr {
+                    expr: value,
+                    entry,
+                    exit,
+                    replacement: None,
+                    capture_holder: Some(holder),
+                    loops,
+                });
+            }
+            ArgumentPass::ReadBorrow { loan_id, source }
+            | ArgumentPass::WriteBorrow { loan_id, source } => {
+                let kind = if matches!(pass, ArgumentPass::ReadBorrow { .. }) {
+                    BorrowKind::Read
+                } else {
+                    BorrowKind::Write
+                };
+                let after_borrow = self.node(Action::Nop);
+                self.build_borrow(
+                    BorrowSpec {
+                        loan_id: *loan_id,
+                        source,
+                        declared_kind: Some(kind),
+                        span: value.span(),
+                    },
+                    entry,
+                    after_borrow,
+                    loops,
+                );
+                self.action_between(after_borrow, exit, Action::AddLoan(holder, *loan_id));
+            }
+        }
+        Ok(())
+    }
+
     fn build_borrow(
         &mut self,
         spec: BorrowSpec<'a>,
@@ -1044,8 +1214,14 @@ fn compute_reaching(graph: &GraphBuilder<'_>, entry: usize) -> Vec<Option<Reachi
     let mut queue = VecDeque::from([entry]);
     while let Some(node_id) = queue.pop_front() {
         let mut state = inputs[node_id].clone().unwrap_or_default();
-        if let Action::BindLoan(binding, loan_id) = graph.nodes[node_id].action {
-            state.insert(binding, HashSet::from([loan_id]));
+        match graph.nodes[node_id].action {
+            Action::BindLoan(binding, loan_id) => {
+                state.insert(binding, HashSet::from([loan_id]));
+            }
+            Action::AddLoan(binding, loan_id) => {
+                state.entry(binding).or_default().insert(loan_id);
+            }
+            _ => {}
         }
         for successor in &graph.nodes[node_id].successors {
             let changed = match &mut inputs[*successor] {
@@ -1182,7 +1358,9 @@ fn derive_loan_facts<'a>(
                     *kind = BorrowKind::Write;
                 }
             }
-            Action::BindLoan(binding, loan_id) if live_out[node_id].contains(&binding) => {
+            Action::BindLoan(binding, loan_id) | Action::AddLoan(binding, loan_id)
+                if live_out[node_id].contains(&binding) =>
+            {
                 live.insert(loan_id);
             }
             _ => {}
@@ -1262,6 +1440,11 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 if state.moved.contains(&id) {
                     return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
+                if access == AccessKind::Write
+                    && graph.parameter_permissions.get(&id) == Some(&ParamEffect::ReadBorrow)
+                {
+                    return Err(error(span, "parameter write 超出 ReadBorrow effect"));
+                }
                 if active.iter().any(|loan_id| {
                     facts.sources[loan_id].root_binding_id() == id
                         && (access == AccessKind::Write
@@ -1288,6 +1471,24 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "owner read 与 live WriteLoan 冲突"));
                 }
             }
+            Action::ProjectedRead(expr, span) => {
+                let source = super::expr_places::from_expr(expr).ok_or_else(|| {
+                    error(
+                        span,
+                        "内部 sema 不变式被破坏: ProjectedRead 无法恢复 resolved Place",
+                    )
+                })?;
+                let root = source.root_binding_id();
+                if state.moved.contains(&root) {
+                    return Err(error(span, "值已被 move，重新初始化前不能读取"));
+                }
+                if active.iter().any(|loan_id| {
+                    loan_overlaps(facts, *loan_id, &source)
+                        && facts.kinds[loan_id] == BorrowKind::Write
+                }) {
+                    return Err(error(span, "owner read 与 live WriteLoan 冲突"));
+                }
+            }
             Action::Borrow {
                 loan_id,
                 source,
@@ -1295,7 +1496,13 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 span,
             } => {
                 let root = source.root_binding_id();
-                if let Some(parent_kind) = graph.capture_permissions.get(&root) {
+                if let Some(parameter_effect) = graph.parameter_permissions.get(&root) {
+                    if facts.kinds[&loan_id] == BorrowKind::Write
+                        && *parameter_effect == ParamEffect::ReadBorrow
+                    {
+                        return Err(error(span, "WriteLoan 超出 parameter ReadBorrow effect"));
+                    }
+                } else if let Some(parent_kind) = graph.capture_permissions.get(&root) {
                     if facts.kinds[&loan_id] == BorrowKind::Write
                         && *parent_kind != BorrowKind::Write
                     {
@@ -1330,9 +1537,12 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "新 loan 与现有 live loan 冲突"));
                 }
             }
-            Action::BindLoan(_, _) | Action::UseLoanHolder(_) => {}
+            Action::BindLoan(_, _) | Action::AddLoan(_, _) | Action::UseLoanHolder(_) => {}
             Action::Write(target, span) => {
                 let root = target.root_binding_id();
+                if graph.parameter_permissions.get(&root) == Some(&ParamEffect::ReadBorrow) {
+                    return Err(error(span, "parameter write 超出 ReadBorrow effect"));
+                }
                 if state.moved.contains(&root) {
                     return Err(error(span, "值已被 move，重新初始化前不能写入"));
                 }
@@ -1459,6 +1669,186 @@ fn merge_graph_kinds(
     Ok(())
 }
 
+fn configure_function_parameters(
+    builder: &mut GraphBuilder<'_>,
+    function: &Expr,
+) -> AliasResult<()> {
+    let Expr::FuncLit {
+        params,
+        implicit_bindings,
+        ..
+    } = function
+    else {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: parameter permission 入口不是 FuncLit",
+        ));
+    };
+    let Ty::Func {
+        params: parameter_types,
+        param_effects: Some(parameter_effects),
+        ..
+    } = function.ty()
+    else {
+        return Err(error(
+            function.span(),
+            "函数缺少 resolved parameter-effect signature",
+        ));
+    };
+    let mut ids = implicit_bindings.clone();
+    ids.extend(params.iter().map(|param| param.binding_id));
+    if ids.len() != parameter_types.len() || ids.len() != parameter_effects.len() {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: parameter permission 数量漂移",
+        ));
+    }
+    for ((id, ty), effect) in ids.into_iter().zip(parameter_types).zip(parameter_effects) {
+        builder.parameter_permissions.insert(id, *effect);
+        if *effect == ParamEffect::Owned {
+            builder.owning.insert(id);
+            if dynamic_owner(ty) {
+                builder.eligible.insert(id);
+            }
+        }
+    }
+    for (param, effect) in params
+        .iter()
+        .zip(&parameter_effects[implicit_bindings.len()..])
+    {
+        if param.effect != Some(*effect) {
+            return Err(error(function.span(), "HIR Param effect 与函数签名漂移"));
+        }
+    }
+    Ok(())
+}
+
+fn join_parameter_effect(current: ParamEffect, required: ParamEffect) -> ParamEffect {
+    use ParamEffect::{Owned, ReadBorrow, WriteBorrow};
+    match (current, required) {
+        (Owned, _) | (_, Owned) => Owned,
+        (WriteBorrow, _) | (_, WriteBorrow) => WriteBorrow,
+        (ReadBorrow, ReadBorrow) => ReadBorrow,
+    }
+}
+
+pub(super) fn infer_parameter_effects_for_function(
+    function: &Expr,
+    inferred_nested: &HashMap<LoanId, BorrowKind>,
+) -> AliasResult<Vec<ParamEffect>> {
+    let Expr::FuncLit {
+        params,
+        implicit_bindings,
+        body,
+        ..
+    } = function
+    else {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: parameter effect 入口不是 FuncLit",
+        ));
+    };
+    let Ty::Func {
+        params: parameter_types,
+        ..
+    } = function.ty()
+    else {
+        return Err(error(function.span(), "FuncLit 缺少完整函数类型"));
+    };
+    let mut parameter_ids = implicit_bindings.clone();
+    parameter_ids.extend(params.iter().map(|param| param.binding_id));
+    if parameter_ids.len() != parameter_types.len() {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: parameter effect 参数数量漂移",
+        ));
+    }
+    let indices: HashMap<BindingId, usize> = parameter_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+    let mut effects: Vec<ParamEffect> = parameter_types
+        .iter()
+        .map(|ty| {
+            if dynamic_owner(ty) {
+                ParamEffect::ReadBorrow
+            } else {
+                ParamEffect::Owned
+            }
+        })
+        .collect();
+    let mut builder = GraphBuilder::new();
+    let entry = builder.node(Action::Nop);
+    let exit = builder.node(Action::Nop);
+    builder = builder.build(Task::Body {
+        body,
+        entry,
+        exit,
+        loops: LoopTargets::default(),
+    })?;
+    let facts = derive_loan_facts(&builder, entry, inferred_nested)?;
+    for node in &builder.nodes {
+        let (root, required) = match node.action {
+            Action::Read(id, access, _) => (
+                id,
+                if access == AccessKind::Write {
+                    ParamEffect::WriteBorrow
+                } else {
+                    ParamEffect::ReadBorrow
+                },
+            ),
+            Action::CloneRead(source, _) => (source.root_binding_id(), ParamEffect::ReadBorrow),
+            Action::ProjectedRead(expr, _) => (
+                super::expr_places::from_expr(expr)
+                    .ok_or_else(|| {
+                        error(
+                            expr.span(),
+                            "内部 sema 不变式被破坏: ProjectedRead 无法恢复 parameter Place",
+                        )
+                    })?
+                    .root_binding_id(),
+                ParamEffect::ReadBorrow,
+            ),
+            Action::Borrow {
+                loan_id, source, ..
+            } => {
+                if !facts.live.contains(&loan_id) {
+                    continue;
+                }
+                (
+                    source.root_binding_id(),
+                    if facts.kinds[&loan_id] == BorrowKind::Write {
+                        ParamEffect::WriteBorrow
+                    } else {
+                        ParamEffect::ReadBorrow
+                    },
+                )
+            }
+            Action::Write(target, _) => (target.root_binding_id(), ParamEffect::WriteBorrow),
+            Action::Move(source, _) => (
+                source.root_binding_id(),
+                if dynamic_owner(source.ty()) {
+                    ParamEffect::Owned
+                } else {
+                    ParamEffect::ReadBorrow
+                },
+            ),
+            Action::Nop
+            | Action::BindLoan(_, _)
+            | Action::AddLoan(_, _)
+            | Action::UseLoanHolder(_)
+            | Action::Declare(_)
+            | Action::Reinitialize(_, _) => continue,
+        };
+        let Some(index) = indices.get(&root) else {
+            continue;
+        };
+        effects[*index] = join_parameter_effect(effects[*index], required);
+    }
+    Ok(effects)
+}
+
 fn analyze_function<'a>(
     function: &'a Expr,
     queue: &mut Vec<&'a Expr>,
@@ -1472,6 +1862,7 @@ fn analyze_function<'a>(
         ));
     };
     let mut builder = GraphBuilder::new();
+    configure_function_parameters(&mut builder, function)?;
     builder.capture_permissions = captures
         .iter()
         .map(|capture| {
@@ -1597,6 +1988,17 @@ pub(super) fn infer_capture_kinds_for_function(
                 },
             ),
             Action::CloneRead(source, _) => (source.root_binding_id(), BorrowKind::Read),
+            Action::ProjectedRead(expr, _) => (
+                super::expr_places::from_expr(expr)
+                    .ok_or_else(|| {
+                        error(
+                            expr.span(),
+                            "内部 sema 不变式被破坏: ProjectedRead 无法恢复 capture Place",
+                        )
+                    })?
+                    .root_binding_id(),
+                BorrowKind::Read,
+            ),
             Action::Borrow {
                 loan_id, source, ..
             } => (source.root_binding_id(), facts.kinds[&loan_id]),
@@ -1611,6 +2013,7 @@ pub(super) fn infer_capture_kinds_for_function(
             ),
             Action::Nop
             | Action::BindLoan(_, _)
+            | Action::AddLoan(_, _)
             | Action::UseLoanHolder(_)
             | Action::Declare(_)
             | Action::Reinitialize(_, _) => continue,
@@ -1793,6 +2196,37 @@ fn apply_kinds(
     program: &mut CheckedProgram,
     kinds: &HashMap<LoanId, BorrowKind>,
 ) -> AliasResult<()> {
+    fn record_argument_loan(
+        pass: &ArgumentPass,
+        span: Span,
+        kinds: &HashMap<LoanId, BorrowKind>,
+        seen: &mut HashSet<LoanId>,
+    ) -> AliasResult<()> {
+        let (loan_id, expected) = match pass {
+            ArgumentPass::ReadBorrow { loan_id, .. } => (*loan_id, BorrowKind::Read),
+            ArgumentPass::WriteBorrow { loan_id, .. } => (*loan_id, BorrowKind::Write),
+            ArgumentPass::Inline | ArgumentPass::BorrowTemporary { .. } | ArgumentPass::Owned => {
+                return Ok(())
+            }
+        };
+        let inferred = kinds.get(&loan_id).copied().ok_or_else(|| {
+            error(
+                span,
+                "内部 sema 不变式被破坏: call argument 缺少 NLL kind fact",
+            )
+        })?;
+        if inferred != expected {
+            return Err(error(
+                span,
+                "内部 sema 不变式被破坏: call argument loan kind 与 parameter effect 漂移",
+            ));
+        }
+        if !seen.insert(loan_id) {
+            return Err(error(span, "内部 sema 不变式被破坏: LoanId 在 HIR 中重复"));
+        }
+        Ok(())
+    }
+
     let mut stack = Vec::new();
     for item in program.items.iter_mut().rev() {
         match item {
@@ -1811,6 +2245,48 @@ fn apply_kinds(
         match node {
             MutNode::Stmt(stmt) => push_stmt_mut(&mut stack, stmt),
             MutNode::Expr(expr) => {
+                match expr {
+                    Expr::Call {
+                        args,
+                        target: super::CallTarget::FunctionValue,
+                        ..
+                    } => {
+                        for arg in args.iter() {
+                            let pass = arg.pass.as_ref().ok_or_else(|| {
+                                error(
+                                    arg.value.span(),
+                                    "内部 sema 不变式被破坏: FunctionValue CallArg 缺少 pass fact",
+                                )
+                            })?;
+                            record_argument_loan(pass, arg.value.span(), kinds, &mut seen)?;
+                        }
+                    }
+                    Expr::MethodCall {
+                        receiver_pass,
+                        recv,
+                        args,
+                        target: super::MethodTarget::User { .. },
+                        ..
+                    } => {
+                        let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
+                            error(
+                                recv.span(),
+                                "内部 sema 不变式被破坏: user method receiver 缺少 pass fact",
+                            )
+                        })?;
+                        record_argument_loan(receiver_pass, recv.span(), kinds, &mut seen)?;
+                        for arg in args.iter() {
+                            let pass = arg.pass.as_ref().ok_or_else(|| {
+                                error(
+                                    arg.value.span(),
+                                    "内部 sema 不变式被破坏: user method CallArg 缺少 pass fact",
+                                )
+                            })?;
+                            record_argument_loan(pass, arg.value.span(), kinds, &mut seen)?;
+                        }
+                    }
+                    _ => {}
+                }
                 if let Expr::FuncLit { captures, .. } = expr {
                     for capture in captures {
                         let inferred = kinds.get(&capture.loan_id).copied().ok_or_else(|| {

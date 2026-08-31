@@ -259,9 +259,20 @@ fn compile_program<M: Module>(
         else {
             unreachable!("pending_methods 只收方法绑定");
         };
+        let Ty::Func {
+            param_effects: Some(param_effects),
+            ..
+        } = &b.ty
+        else {
+            invariant_violation("方法绑定缺少 resolved parameter effects")
+        };
+        let Some(self_effect) = param_effects.first().copied() else {
+            invariant_violation("方法绑定缺少 self parameter effect")
+        };
         let self_param = Param {
             binding_id: *self_id,
             ty: recv.clone(),
+            effect: Some(self_effect),
         };
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);

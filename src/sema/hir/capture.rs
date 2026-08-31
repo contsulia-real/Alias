@@ -1,6 +1,6 @@
 use super::{
-    ArmBody, BindingId, Body, BorrowKind, CallTarget, Capture, CheckedProgram, Expr, Item, LoanId,
-    MatchArm, MethodTarget, Place, PlaceInfo, Stmt, StrPart, ValueCategory,
+    ArmBody, BindingId, Body, BorrowKind, Capture, CheckedProgram, Expr, Item, LoanId, MatchArm,
+    Place, PlaceInfo, Stmt, StrPart, ValueCategory,
 };
 use crate::sema::types::types_match;
 use crate::{AliasError, AliasResult, Span};
@@ -129,9 +129,10 @@ fn validate_capture_payloads(program: &CheckedProgram) -> AliasResult<()> {
     Ok(())
 }
 
-fn infer_loan_kinds(program: &CheckedProgram) -> AliasResult<HashMap<LoanId, BorrowKind>> {
+pub(super) fn infer_loan_kinds(
+    program: &CheckedProgram,
+) -> AliasResult<HashMap<LoanId, BorrowKind>> {
     let functions = function_preorder(program);
-    validate_effect_boundaries(&functions)?;
     let mut kinds = HashMap::new();
     for function in functions.into_iter().rev() {
         let function_kinds =
@@ -173,7 +174,8 @@ fn expr_uses_capture(expr: &Expr, captures: &HashSet<BindingId>) -> bool {
     false
 }
 
-fn validate_effect_boundaries(functions: &[&Expr]) -> AliasResult<()> {
+pub(super) fn validate_effect_boundaries(program: &CheckedProgram) -> AliasResult<()> {
+    let functions = function_preorder(program);
     for function in functions {
         let Expr::FuncLit { captures, body, .. } = function else {
             return Err(capture_invariant("effect boundary 入口不是 FuncLit"));
@@ -200,39 +202,8 @@ fn validate_effect_boundaries(functions: &[&Expr]) -> AliasResult<()> {
                 }
                 Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
                 Node::Expr(expr) => {
-                    match expr {
-                        Expr::Call {
-                            args,
-                            target: CallTarget::FunctionValue,
-                            ..
-                        } if args
-                            .iter()
-                            .any(|arg| expr_uses_capture(&arg.value, &capture_ids)) =>
-                        {
-                            return Err(AliasError {
-                                msg: "captured argument 的 function parameter effect 尚未固化"
-                                    .into(),
-                                span: expr.span(),
-                            });
-                        }
-                        Expr::MethodCall {
-                            recv,
-                            args,
-                            target: MethodTarget::User { .. },
-                            ..
-                        } if expr_uses_capture(recv, &capture_ids)
-                            || args
-                                .iter()
-                                .any(|arg| expr_uses_capture(&arg.value, &capture_ids)) =>
-                        {
-                            return Err(AliasError {
-                                msg: "captured receiver/argument 的 user method effect 尚未固化"
-                                    .into(),
-                                span: expr.span(),
-                            });
-                        }
-                        Expr::FuncLit { .. } => continue,
-                        _ => {}
+                    if matches!(expr, Expr::FuncLit { .. }) {
+                        continue;
                     }
                     push_expr_children(&mut stack, expr);
                 }

@@ -192,18 +192,16 @@ func i32 main = () -> {
 }
 
 #[test]
-fn captured_argument_requires_a_resolved_parameter_effect() {
-    let error = fail(
-        r#"
+fn captured_argument_uses_the_callee_read_borrow_effect() {
+    let source = r#"
 func i32 length = (string value) -> return value.len()
 func i32 main = () -> {
     val string owner = 'x'
     func i32 call_length = () -> return length(owner)
     return call_length()
 }
-"#,
-    );
-    assert!(error.msg.contains("parameter effect"), "{}", error.msg);
+"#;
+    assert_eq!(run(source).unwrap(), 1);
 }
 
 #[test]

@@ -341,7 +341,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     {
                         return Err(error(
                             expr.span(),
-                            "borrowed argument 的函数 parameter effect 尚未解析",
+                            "borrowed argument 的 referent-loan forwarding 尚未解析",
                         ));
                     }
                     Expr::MethodCall {
@@ -356,7 +356,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     {
                         return Err(error(
                             expr.span(),
-                            "borrowed receiver/argument 的 user method effect 尚未解析",
+                            "borrowed receiver/argument 的 referent-loan forwarding 尚未解析",
                         ));
                     }
                     Expr::Match { subject, .. }

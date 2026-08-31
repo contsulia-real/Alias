@@ -199,7 +199,7 @@ fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
         Ty::Bool => VTy::Bool,
         Ty::Str => VTy::Str,
         Ty::Unit => VTy::Unit,
-        Ty::Func { params, ret } => {
+        Ty::Func { params, ret, .. } => {
             for param in params {
                 insert_projection(param, table);
             }
@@ -414,6 +414,7 @@ mod tests {
             (
                 Ty::Func {
                     params: vec![Ty::Int(IntW::W32), Ty::Str],
+                    param_effects: None,
                     ret: Box::new(Ty::Bool),
                 },
                 VTy::Func(vec![VTy::I(IntW::W32), VTy::Str], Box::new(VTy::Bool)),

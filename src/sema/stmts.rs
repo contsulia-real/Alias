@@ -173,6 +173,7 @@ impl Checker {
                 id: this_scope_id,
                 ty: Ty::Func {
                     params: param_tys.clone(),
+                    param_effects: None,
                     ret: Box::new(ret_ty.clone()),
                 },
                 mutable: false,
@@ -233,6 +234,7 @@ impl Checker {
         Ok((
             Ty::Func {
                 params: param_tys,
+                param_effects: None,
                 ret: Box::new(inferred_ret),
             },
             param_ids,
