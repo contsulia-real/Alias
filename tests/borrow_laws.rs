@@ -225,21 +225,6 @@ func i32 main = () -> {
 }
 
 #[test]
-fn borrowed_alias_capture_waits_for_capture_loan_resolution() {
-    let error = fail(
-        r#"
-func i32 main = () -> {
-    val string owner = 'x'
-    val string alias = borrow owner
-    func i32 length = () -> return alias.len()
-    return length()
-}
-"#,
-    );
-    assert!(error.msg.contains("closure capture loan"), "{}", error.msg);
-}
-
-#[test]
 fn disjoint_field_loans_do_not_conflict() {
     let source = r#"
 struct pair {

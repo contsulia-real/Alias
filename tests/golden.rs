@@ -106,11 +106,11 @@ fn golden_table() -> Vec<Golden> {
             stderr: b"",
             exit: 0,
         },
-        // ---- 闭包引用捕获: cond 闭包读到外层 n 的最新值 ----
+        // ---- 闭包写捕获: closure 在独占 loan 内更新并读取同一外层 cell ----
         Golden {
-            name: "closure_reference_capture_latest_value",
+            name: "closure_write_capture_controls_loop",
             input: Input::Inline(
-                "func i32 main = () -> {\n    var i32 n = 0;\n    func bool lt3 = (i32 cap) -> return n < cap\n    var i32 rounds = 0;\n    while lt3(3) {\n        increase n\n        increase rounds\n    }\n    return rounds\n}\n",
+                "func i32 main = () -> {\n    var i32 n = 0;\n    func bool step = (i32 cap) -> {\n        if n >= cap { return false }\n        increase n\n        return true\n    }\n    var i32 rounds = 0;\n    while step(3) {\n        increase rounds\n    }\n    return rounds\n}\n",
             ),
             stdout: b"",
             stderr: b"",

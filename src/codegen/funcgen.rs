@@ -7,7 +7,7 @@ use crate::codegen::{
     bound_vty, invariant_violation, native_err, Compiler, Frame, PendingFn, Slot,
 };
 use crate::sema::hir::StorageRelation;
-use crate::sema::hir::{BindKind, BindingId, Body, Expr, Item, Param};
+use crate::sema::hir::{BindKind, BindingId, Body, Capture, Expr, Item, Param};
 use crate::sema::types::{IntW, Ty};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::{
@@ -271,7 +271,7 @@ pub(crate) fn emit_funclit_value<M: Module>(
     frame: &mut Frame,
     params: &[Param],
     body: &Body,
-    captures: &[BindingId],
+    captures: &[Capture],
     funclit_type: &Ty,
 ) -> AliasResult<Value> {
     let VTy::Func(_, ret_vty) = c.vty(funclit_type) else {
@@ -287,7 +287,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     frame: &mut Frame,
     params: &[Param],
     body: &Body,
-    captures: &[BindingId],
+    captures: &[Capture],
     ret_vty: VTy,
 ) -> AliasResult<Value> {
     let param_vtys: Vec<VTy> = params.iter().map(|p| c.vty(&p.ty)).collect();
@@ -296,11 +296,12 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
     let cap_vtys: Vec<(BindingId, VTy, Option<StorageRelation>)> = captures
         .iter()
-        .map(|id| {
+        .map(|capture| {
+            let id = capture.binding_id;
             (
-                *id,
-                bound_vty(c, frame, *id),
-                crate::codegen::bound_relation(c, frame, *id),
+                id,
+                bound_vty(c, frame, id),
+                crate::codegen::bound_relation(c, frame, id),
             )
         })
         .collect();
@@ -325,7 +326,8 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
         let ecall = bcx.ins().call(eref, &[len]);
         first_result(bcx, ecall)
     };
-    for (i, id) in captures.iter().enumerate() {
+    for (i, capture) in captures.iter().enumerate() {
+        let id = &capture.binding_id;
         let cellw = if let Some(idx) = frame.caps.get(id) {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
             bcx.ins().load(

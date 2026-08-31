@@ -24,7 +24,7 @@ pub(super) fn lower(
     // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 value category 与当前可证明的
     // initial ownership capability；每个显式 Binding 同时固化当前可证明的 storage relation。
     // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
-    super::capture::populate_captures(&mut checked)?;
+    super::capture::populate_captures(&mut checked, &mut facts.next_loan_id)?;
     super::borrow_contract::validate(&checked)?;
     // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
     // only after captures are known; otherwise a closure use could be omitted from the loan region.

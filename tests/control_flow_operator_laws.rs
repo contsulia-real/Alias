@@ -192,28 +192,30 @@ func i32 main = () -> return 0
 fn short_circuit_and_ternary_only_evaluate_selected_paths() {
     let src = r#"
 func i32 main = () -> {
-    var i32 hits = 0
+    var i32 touch_hits = 0
+    var i32 left_hits = 0
+    var i32 right_hits = 0
     func bool touch = () -> {
-        increase hits
+        increase touch_hits
         return true
     }
     func i32 left = () -> {
-        increase hits
+        increase left_hits
         return 10
     }
     func i32 right = () -> {
-        increase hits
-        increase hits
+        increase right_hits
+        increase right_hits
         return 20
     }
 
     val bool a = false && touch()
     val bool b = true || touch()
     val i32 picked = true ? left() : right()
-    return hits
+    return touch_hits * 100 + left_hits * 10 + right_hits
 }
 "#;
-    assert_eq!(run(src).unwrap(), 1);
+    assert_eq!(run(src).unwrap(), 10);
 }
 
 #[test]

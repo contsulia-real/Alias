@@ -936,23 +936,53 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         validate_funclit_contract(expr, params, implicit_bindings)?;
                         let locals = collect_function_locals(expr);
                         let mut seen = HashSet::new();
-                        for id in captures {
-                            if !seen.insert(*id) {
+                        let mut loan_ids = HashSet::new();
+                        for capture in captures {
+                            let id = capture.binding_id;
+                            if !seen.insert(id) {
                                 return Err(invariant(expr.span(), format!("capture 重复 {id:?}")));
                             }
-                            if !known_ids.contains(id) {
+                            if !loan_ids.insert(capture.loan_id) {
+                                return Err(invariant(
+                                    expr.span(),
+                                    format!("capture LoanId 重复 {:?}", capture.loan_id),
+                                ));
+                            }
+                            if capture.kind.is_none() {
+                                return Err(invariant(
+                                    expr.span(),
+                                    "capture 缺少 resolved loan kind",
+                                ));
+                            }
+                            let Place::Local {
+                                binding_id: source_id,
+                                info,
+                            } = &capture.source
+                            else {
+                                return Err(invariant(
+                                    expr.span(),
+                                    "capture source 不是 root Local Place",
+                                ));
+                            };
+                            if *source_id != id || info.ty.contains_unknown() {
+                                return Err(invariant(
+                                    expr.span(),
+                                    "capture source 与 captured BindingId/type 不一致",
+                                ));
+                            }
+                            if !known_ids.contains(&id) {
                                 return Err(invariant(
                                     expr.span(),
                                     format!("capture 引用未知 BindingId {id:?}"),
                                 ));
                             }
-                            if globals.contains(id) {
+                            if globals.contains(&id) {
                                 return Err(invariant(
                                     expr.span(),
                                     format!("全局 BindingId {id:?} 不应进入 capture"),
                                 ));
                             }
-                            if locals.contains(id) {
+                            if locals.contains(&id) {
                                 return Err(invariant(
                                     expr.span(),
                                     format!("函数自身 local {id:?} 不应进入 capture"),

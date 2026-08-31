@@ -107,21 +107,22 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - `hir/ownership_capabilities.rs` 独立固化当前可证明的 initial capability：`InlineValue → None`、`OwnedTemporary → Available`、`BorrowedValue → None`；Place / General 在当前迁移阶段没有可伪造的 capability fact，codegen 不得把缺失 fact 当 fallback；
 - 显式 Binding 由 `hir/storage_relations.rs` 固化当前可证明的 slot relation：InlineValue / OwnedTemporary 及已解析 owning-slot `ReadPlace` 为 `Owning`，显式 BorrowedValue local 为 `Borrowed`；动态函数返回与尚未纳入 effect/loan 的读取上下文不得提前猜 relation；
 - `hir/place_relation.rs` 是 resolved Place 三态关系 `Disjoint / Overlap / Unknown` 的唯一 owner；不同 Local root、字段 divergence、常量 index divergence 等证明只在这里完成，动态 index 无充分事实时保持 `Unknown`，final gate 同时验证自反与 ancestor overlap 不变量；
-- `hir/ownership_flow.rs` 以显式 CFG/worklist 统一验证 dynamic local 的程序点 capability 与 local borrow loan；branch/loop join 对 may-be-moved / may-be-exposed fail-closed；reaching-definition + backward liveness 推导每个 loan generation 的 NLL region，并按实际 referent use 固化 ReadLoan/WriteLoan；loan conflict 与 Move replacement 都消费 canonical Place relation，只有 `Disjoint` 授权独立；分析不得把用户 HIR nesting 映射到宿主递归；
+- `hir/ownership_flow.rs` 以显式 CFG/worklist 统一验证 dynamic local 的程序点 capability、local borrow 与 closure capture loan；branch/loop join 对 may-be-moved / may-be-exposed fail-closed；reaching-definition + backward liveness 推导每个 loan generation 的 NLL region，并按实际 referent use 固化 ReadLoan/WriteLoan；命名 closure binding 与立即调用临时值都是显式 loan holder，嵌套 closure holder dependency 继续保持被捕获 closure 的内层 loans；loan conflict 与 Move replacement 都消费 canonical Place relation，只有 `Disjoint` 授权独立；分析不得把用户 HIR nesting 映射到宿主递归；
+- `hir/capture.rs` 以 child-before-parent 的有限遍历分配并固化 capture loan；捕获 dynamic value 跨越尚未解析的 parameter/return/user-method effect 边界时 fail-closed，不能把当前共享机器表示当成 read effect；
 - 显式 `clone` 固化为 `CallTarget::Builtin(BuiltinCall::DeepClone(DeepClonePlan))`；dynamic ownership-bearing clone 是 `OwnedTemporary + Available`，标量 clone 保持 `InlineValue + None`；
-- 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；普通函数实参/返回、方法 receiver、Pattern/for/capture 仍等待 effect/loan；
+- 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；普通函数实参/返回、方法 receiver 与 Pattern/for 仍等待 effect；capture 不走 owning read，而由结构化 capture loan 管理；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
-- 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow 与未解析的 call/return/capture escape，closure capture loan、function borrow effects 与 reborrow 仍 fail-closed；
+- 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow、borrowed alias capture 与未解析的 call/return escape，function borrow effects 与 reborrow 仍 fail-closed；
 - 显式 `move(place)` 固化为专用 `Expr::Move { source: Place }`；当前 dynamic source 只接受同一函数内已证明 owning 的完整 local，field/array partial move-out 以及缺少 parameter/capture/global effect 的 move 均 fail-closed；scalar move 保持 InlineValue 值语义；
 - Binding/Method/字段/构造器索引均已结构化解析；
 - 当前赋值统一固化为递归 resolved `Place`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId 与字段索引/可写合同都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
-- value category、当前可证明的 initial capability / storage relation 与 capture 列表都在最终 HIR validation 前写回；
+- value category、当前可证明的 initial capability / storage relation，以及每项 capture 的 BindingId/LoanId/root Place/final ReadLoan|WriteLoan 都在最终 HIR validation 前写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作一旦进入当前 HIR，就必须在进入 codegen 前固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / Move/loan flow / Borrow kind / `ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / Move/loan flow / Borrow kind / capture loan / `ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free/effect 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
 
 ### codegen
 
@@ -247,7 +248,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 测试按**行为 contract**分层，不按数量评价质量。
 
-- `*_laws.rs`：各语言子系统的静态/动态法律；显式 deep/shallow copy、owning-slot 普通读取、move 与 local borrow/NLL 的 native/静态行为分别由 `clone_laws.rs` / `shallow_laws.rs` / `ordinary_read_laws.rs` / `move_laws.rs` / `borrow_laws.rs` 覆盖；
+- `*_laws.rs`：各语言子系统的静态/动态法律；显式 deep/shallow copy、owning-slot 普通读取、move、local borrow/NLL 与 closure capture loan 的 native/静态行为分别由 `clone_laws.rs` / `shallow_laws.rs` / `ordinary_read_laws.rs` / `move_laws.rs` / `borrow_laws.rs` / `capture_laws.rs` 覆盖；
 - `golden.rs`：需要冻结 stdout/stderr/exit 或诊断字节的代表性黄金行为；
 - `smoke.rs`：少量跨层主链烟雾检查，不复制完整法律；
 - `demo_corpus.rs`：机械枚举所有 `demos/*.as` 并冻结每个 demo 的三元组；

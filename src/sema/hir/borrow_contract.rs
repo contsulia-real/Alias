@@ -22,16 +22,6 @@ fn error(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-fn root_binding(place: &Place) -> BindingId {
-    let mut current = place;
-    loop {
-        match current {
-            Place::Local { binding_id, .. } => return *binding_id,
-            Place::Field { base, .. } | Place::Index { base, .. } => current = base,
-        }
-    }
-}
-
 fn push_place_indices<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
     let mut places = vec![place];
     while let Some(place) = places.pop() {
@@ -104,7 +94,7 @@ fn expr_uses_borrowed_binding(expr: &Expr, borrowed: &HashSet<BindingId>) -> boo
                     Expr::ReadPlace { source, .. }
                     | Expr::Borrow { source, .. }
                     | Expr::Move { source, .. }
-                        if borrowed.contains(&root_binding(source)) =>
+                        if borrowed.contains(&source.root_binding_id()) =>
                     {
                         return true;
                     }
@@ -323,7 +313,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 }
                 match expr {
                     Expr::Borrow { source, .. }
-                        if relations.get(&root_binding(source))
+                        if relations.get(&source.root_binding_id())
                             != Some(&StorageRelation::Owning) =>
                     {
                         return Err(error(
@@ -332,11 +322,13 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         ));
                     }
                     Expr::FuncLit { captures, .. }
-                        if captures.iter().any(|id| borrowed.contains(id)) =>
+                        if captures
+                            .iter()
+                            .any(|capture| borrowed.contains(&capture.binding_id)) =>
                     {
                         return Err(error(
                             expr.span(),
-                            "closure capture loan 尚未解析，borrowed alias 当前不能被捕获",
+                            "borrowed alias capture 缺少可固化的 referent loan generation",
                         ));
                     }
                     Expr::Call {

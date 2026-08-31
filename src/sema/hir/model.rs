@@ -79,6 +79,17 @@ pub(crate) struct Param {
     pub(crate) ty: Ty,
 }
 
+/// 闭包环境保存 binding cell，但捕获对 referent 的静态权限必须独立固化为普通 loan。
+/// 若只保留 BindingId，ownership flow 就只能把 capture 当成永久 alias exposure，无法按
+/// closure value 的最后一次使用结束 NLL region。
+#[derive(Debug, Clone)]
+pub(crate) struct Capture {
+    pub(crate) binding_id: BindingId,
+    pub(crate) loan_id: LoanId,
+    pub(crate) source: Place,
+    pub(crate) kind: Option<BorrowKind>,
+}
+
 /// sema 已解析的 Place projection。Place 只表达 storage identity/projection；读取、写入、
 /// borrow、move 等外层操作另行决定语义。Field/Index 的 base 必须继续是 Place，不能退回
 /// 任意 Expr，否则 overlap/loan 会再次依赖源码形状或运行时地址猜测。
@@ -119,6 +130,16 @@ impl Place {
 
     pub(crate) fn span(&self) -> Span {
         self.info().span
+    }
+
+    pub(crate) fn root_binding_id(&self) -> BindingId {
+        let mut place = self;
+        loop {
+            match place {
+                Self::Local { binding_id, .. } => return *binding_id,
+                Self::Field { base, .. } | Self::Index { base, .. } => place = base,
+            }
+        }
     }
 }
 
@@ -403,7 +424,7 @@ pub(crate) enum Expr {
     FuncLit {
         params: Vec<Param>,
         implicit_bindings: Vec<BindingId>,
-        captures: Vec<BindingId>,
+        captures: Vec<Capture>,
         body: Box<Body>,
         span: Span,
         info: ExprInfo,

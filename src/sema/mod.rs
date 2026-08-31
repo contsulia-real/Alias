@@ -424,6 +424,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
     hir::lower(
         program,
         hir::LowerFacts {
+            next_loan_id: ck.next_loan_id,
             exprs: ck.expr_facts,
             bindings: ck.binding_types,
             binding_ids: ck.binding_ids,

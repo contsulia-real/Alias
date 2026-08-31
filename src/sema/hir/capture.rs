@@ -1,6 +1,10 @@
-use super::{ArmBody, BindingId, Body, CheckedProgram, Expr, Item, MatchArm, Place, Stmt, StrPart};
+use super::{
+    ArmBody, BindingId, Body, BorrowKind, CallTarget, Capture, CheckedProgram, Expr, Item, LoanId,
+    MatchArm, MethodTarget, Place, PlaceInfo, Stmt, StrPart, ValueCategory,
+};
+use crate::sema::types::types_match;
 use crate::{AliasError, AliasResult, Span};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 enum Node<'a> {
     Expr(&'a Expr),
@@ -16,10 +20,63 @@ enum MutNode<'a> {
 struct CaptureFrame {
     ordinal: usize,
     seen: HashSet<BindingId>,
-    ordered: Vec<BindingId>,
+    ordered: Vec<CaptureSeed>,
 }
 
-pub(super) fn populate_captures(program: &mut CheckedProgram) -> AliasResult<()> {
+#[derive(Clone)]
+struct CaptureSeed {
+    binding_id: BindingId,
+    source: Place,
+}
+
+pub(super) fn populate_captures(
+    program: &mut CheckedProgram,
+    next_loan_id: &mut u32,
+) -> AliasResult<()> {
+    let seeds = collect_capture_seeds(program)?;
+    let mut captures = materialize_captures(seeds, next_loan_id)?;
+
+    // 第 3 遍以相同 preorder 写回；最终 HIR gate 在 mutation 完成后验证这些向量。
+    apply_captures(program, &mut captures)?;
+    Ok(())
+}
+
+/// Capture kind is a property of the closure body, while its conflict region belongs to the
+/// parent's CFG. Functions are therefore inferred child-before-parent, then written back before
+/// the unified ownership-flow pass sees any closure creation site.
+pub(super) fn finalize_loan_kinds(program: &mut CheckedProgram) -> AliasResult<()> {
+    let kinds = infer_loan_kinds(program)?;
+    apply_loan_kinds(program, &kinds)
+}
+
+pub(super) fn validate_loan_kinds(program: &CheckedProgram) -> AliasResult<()> {
+    validate_capture_payloads(program)?;
+    let inferred = infer_loan_kinds(program)?;
+    let functions = function_preorder(program);
+    let mut seen = HashSet::new();
+    for function in functions {
+        let Expr::FuncLit { captures, .. } = function else {
+            return Err(capture_invariant("loan kind validation 入口不是 FuncLit"));
+        };
+        for capture in captures {
+            if capture.kind != inferred.get(&capture.loan_id).copied() {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: capture loan kind 与 body use 漂移".into(),
+                    span: capture.source.span(),
+                });
+            }
+            if !seen.insert(capture.loan_id) {
+                return Err(capture_invariant("capture LoanId 在 HIR 中重复"));
+            }
+        }
+    }
+    if seen.len() != inferred.len() {
+        return Err(capture_invariant("存在未验证的 capture loan kind"));
+    }
+    Ok(())
+}
+
+fn collect_capture_seeds(program: &CheckedProgram) -> AliasResult<Vec<Vec<CaptureSeed>>> {
     let globals: HashSet<BindingId> = program
         .items
         .iter()
@@ -29,16 +86,212 @@ pub(super) fn populate_captures(program: &mut CheckedProgram) -> AliasResult<()>
         })
         .collect();
 
-    // 第 1 遍收集每个函数的完整局部 BindingId。ordinal 只用于三遍遍历之间对齐，
-    // 不是语言 identity；改变任一遍的 preorder 都会把 capture 写入错误 FuncLit。
+    // ordinal 只在两次同序显式遍历间对齐，不是语言 identity。新增 HIR child 若只进入
+    // 一遍，capture 会被写给错误 FuncLit，因此 final gate 会重算并逐项比较 payload。
     let locals = collect_function_locals(program)?;
+    collect_function_captures(program, &globals, &locals)
+}
 
-    // 第 2 遍用显式 enter/exit 事件按源码顺序扫描 use。子函数退出时把其 capture
-    // 传播给暂停的父函数，既保留传递捕获，又不把不可信嵌套交给宿主递归。
-    let mut captures = collect_function_captures(program, &globals, &locals)?;
+fn validate_capture_payloads(program: &CheckedProgram) -> AliasResult<()> {
+    let expected = collect_capture_seeds(program)?;
+    let functions = function_preorder(program);
+    if expected.len() != functions.len() {
+        return Err(capture_invariant("capture payload validation 函数数量漂移"));
+    }
+    for (function, seeds) in functions.into_iter().zip(expected) {
+        let Expr::FuncLit { captures, .. } = function else {
+            return Err(capture_invariant(
+                "capture payload validation 入口不是 FuncLit",
+            ));
+        };
+        if captures.len() != seeds.len() {
+            return Err(capture_invariant("capture 列表与 body free-use 漂移"));
+        }
+        for (capture, seed) in captures.iter().zip(seeds) {
+            let Place::Local {
+                binding_id: source_id,
+                info,
+            } = &capture.source
+            else {
+                return Err(capture_invariant("capture source 不是 root Local Place"));
+            };
+            if capture.binding_id != seed.binding_id
+                || *source_id != seed.binding_id
+                || !types_match(&info.ty, seed.source.ty())
+                || info.span != seed.source.span()
+            {
+                return Err(capture_invariant(
+                    "capture BindingId/root Place 与 body free-use 漂移",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
-    // 第 3 遍以相同 preorder 写回；最终 HIR gate 在 mutation 完成后验证这些向量。
-    apply_captures(program, &mut captures)?;
+fn infer_loan_kinds(program: &CheckedProgram) -> AliasResult<HashMap<LoanId, BorrowKind>> {
+    let functions = function_preorder(program);
+    validate_effect_boundaries(&functions)?;
+    let mut kinds = HashMap::new();
+    for function in functions.into_iter().rev() {
+        let function_kinds =
+            super::ownership_flow::infer_capture_kinds_for_function(function, &kinds)?;
+        for (loan_id, kind) in function_kinds {
+            if kinds.insert(loan_id, kind).is_some() {
+                return Err(capture_invariant("capture LoanId 跨函数重复"));
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+fn expr_uses_capture(expr: &Expr, captures: &HashSet<BindingId>) -> bool {
+    let mut stack = vec![Node::Expr(expr)];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::ExitFunc(_) => {}
+            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
+            Node::Expr(expr) => {
+                match expr {
+                    Expr::Ident(_, Some(id), ..) if captures.contains(id) => return true,
+                    Expr::ReadPlace { source, .. }
+                    | Expr::Borrow { source, .. }
+                    | Expr::Move { source, .. }
+                        if captures.contains(&source.root_binding_id()) =>
+                    {
+                        return true;
+                    }
+                    // A nested closure owns a separate capture contract. Counting its body here
+                    // would turn a deferred use into an immediate call/return effect.
+                    Expr::FuncLit { .. } => continue,
+                    _ => {}
+                }
+                push_expr_children(&mut stack, expr);
+            }
+        }
+    }
+    false
+}
+
+fn validate_effect_boundaries(functions: &[&Expr]) -> AliasResult<()> {
+    for function in functions {
+        let Expr::FuncLit { captures, body, .. } = function else {
+            return Err(capture_invariant("effect boundary 入口不是 FuncLit"));
+        };
+        let capture_ids: HashSet<BindingId> =
+            captures.iter().map(|capture| capture.binding_id).collect();
+        if capture_ids.is_empty() {
+            continue;
+        }
+        let mut stack = Vec::new();
+        push_body(&mut stack, body);
+        while let Some(node) = stack.pop() {
+            match node {
+                Node::ExitFunc(_) => {}
+                Node::Stmt(Stmt::Return { value: Some(value) })
+                    if super::value_categories::type_carries_dynamic_owner(value.ty())
+                        && value.value_category() != Some(ValueCategory::OwnedTemporary)
+                        && expr_uses_capture(value, &capture_ids) =>
+                {
+                    return Err(AliasError {
+                        msg: "captured dynamic value 的 return effect 尚未固化".into(),
+                        span: value.span(),
+                    });
+                }
+                Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
+                Node::Expr(expr) => {
+                    match expr {
+                        Expr::Call {
+                            args,
+                            target: CallTarget::FunctionValue,
+                            ..
+                        } if args
+                            .iter()
+                            .any(|arg| expr_uses_capture(&arg.value, &capture_ids)) =>
+                        {
+                            return Err(AliasError {
+                                msg: "captured argument 的 function parameter effect 尚未固化"
+                                    .into(),
+                                span: expr.span(),
+                            });
+                        }
+                        Expr::MethodCall {
+                            recv,
+                            args,
+                            target: MethodTarget::User { .. },
+                            ..
+                        } if expr_uses_capture(recv, &capture_ids)
+                            || args
+                                .iter()
+                                .any(|arg| expr_uses_capture(&arg.value, &capture_ids)) =>
+                        {
+                            return Err(AliasError {
+                                msg: "captured receiver/argument 的 user method effect 尚未固化"
+                                    .into(),
+                                span: expr.span(),
+                            });
+                        }
+                        Expr::FuncLit { .. } => continue,
+                        _ => {}
+                    }
+                    push_expr_children(&mut stack, expr);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn function_preorder(program: &CheckedProgram) -> Vec<&Expr> {
+    let mut functions = Vec::new();
+    let mut stack = root_nodes(program);
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::ExitFunc(_) => {}
+            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
+            Node::Expr(expr) => {
+                if let Expr::FuncLit { body, .. } = expr {
+                    functions.push(expr);
+                    push_body(&mut stack, body);
+                } else {
+                    push_expr_children(&mut stack, expr);
+                }
+            }
+        }
+    }
+    functions
+}
+
+fn apply_loan_kinds(
+    program: &mut CheckedProgram,
+    kinds: &HashMap<LoanId, BorrowKind>,
+) -> AliasResult<()> {
+    let mut seen = HashSet::new();
+    let mut stack = root_nodes_mut(program);
+    while let Some(node) = stack.pop() {
+        match node {
+            MutNode::Stmt(stmt) => push_stmt_children_mut(&mut stack, stmt),
+            MutNode::Expr(expr) => {
+                if let Expr::FuncLit { captures, body, .. } = expr {
+                    for capture in captures {
+                        capture.kind =
+                            Some(kinds.get(&capture.loan_id).copied().ok_or_else(|| {
+                                capture_invariant("capture 缺少 inferred loan kind")
+                            })?);
+                        if !seen.insert(capture.loan_id) {
+                            return Err(capture_invariant("capture LoanId 在 HIR 中重复"));
+                        }
+                    }
+                    push_body_mut(&mut stack, body);
+                } else {
+                    push_expr_children_mut(&mut stack, expr);
+                }
+            }
+        }
+    }
+    if seen.len() != kinds.len() {
+        return Err(capture_invariant("存在未写回的 capture loan kind"));
+    }
     Ok(())
 }
 
@@ -128,7 +381,7 @@ fn collect_function_captures(
     program: &CheckedProgram,
     globals: &HashSet<BindingId>,
     locals: &[HashSet<BindingId>],
-) -> AliasResult<Vec<Vec<BindingId>>> {
+) -> AliasResult<Vec<Vec<CaptureSeed>>> {
     let mut captures = vec![Vec::new(); locals.len()];
     let mut frames: Vec<CaptureFrame> = Vec::new();
     let mut next_ordinal = 0usize;
@@ -148,8 +401,8 @@ fn collect_function_captures(
                     .ok_or_else(|| capture_invariant("FuncLit capture ordinal 越界"))?;
                 *slot = frame.ordered;
                 if let Some(parent) = frames.last_mut() {
-                    for id in slot.iter().copied() {
-                        record_use(parent, locals, globals, id)?;
+                    for seed in slot.iter() {
+                        record_use(parent, locals, globals, seed.clone())?;
                     }
                 }
             }
@@ -175,7 +428,21 @@ fn collect_function_captures(
                 }
                 Expr::Ident(_, Some(id), ..) => {
                     if let Some(frame) = frames.last_mut() {
-                        record_use(frame, locals, globals, *id)?;
+                        record_use(
+                            frame,
+                            locals,
+                            globals,
+                            CaptureSeed {
+                                binding_id: *id,
+                                source: Place::Local {
+                                    binding_id: *id,
+                                    info: PlaceInfo {
+                                        ty: expr.ty().clone(),
+                                        span: expr.span(),
+                                    },
+                                },
+                            },
+                        )?;
                     }
                 }
                 Expr::ReadPlace { source, .. }
@@ -207,13 +474,14 @@ fn record_use(
     frame: &mut CaptureFrame,
     locals: &[HashSet<BindingId>],
     globals: &HashSet<BindingId>,
-    id: BindingId,
+    seed: CaptureSeed,
 ) -> AliasResult<()> {
     let local = locals
         .get(frame.ordinal)
         .ok_or_else(|| capture_invariant("capture use 的函数 ordinal 越界"))?;
+    let id = seed.binding_id;
     if !local.contains(&id) && !globals.contains(&id) && frame.seen.insert(id) {
-        frame.ordered.push(id);
+        frame.ordered.push(seed);
     }
     Ok(())
 }
@@ -228,7 +496,15 @@ fn record_place_uses(
     while let Some(place) = places.pop() {
         match place {
             Place::Local { binding_id, .. } => {
-                record_use(frame, locals, globals, *binding_id)?;
+                record_use(
+                    frame,
+                    locals,
+                    globals,
+                    CaptureSeed {
+                        binding_id: *binding_id,
+                        source: place.clone(),
+                    },
+                )?;
             }
             Place::Field { base, .. } | Place::Index { base, .. } => places.push(base),
         }
@@ -236,10 +512,33 @@ fn record_place_uses(
     Ok(())
 }
 
-fn apply_captures(
-    program: &mut CheckedProgram,
-    captures: &mut [Vec<BindingId>],
-) -> AliasResult<()> {
+fn materialize_captures(
+    seeds: Vec<Vec<CaptureSeed>>,
+    next_loan_id: &mut u32,
+) -> AliasResult<Vec<Vec<Capture>>> {
+    seeds
+        .into_iter()
+        .map(|function| {
+            function
+                .into_iter()
+                .map(|seed| {
+                    let loan_id = LoanId(*next_loan_id);
+                    *next_loan_id = next_loan_id.checked_add(1).ok_or_else(|| {
+                        capture_invariant("LoanId 在 capture materialization 中耗尽")
+                    })?;
+                    Ok(Capture {
+                        binding_id: seed.binding_id,
+                        loan_id,
+                        source: seed.source,
+                        kind: None,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn apply_captures(program: &mut CheckedProgram, captures: &mut [Vec<Capture>]) -> AliasResult<()> {
     let mut next_ordinal = 0usize;
     let mut stack = root_nodes_mut(program);
     while let Some(node) = stack.pop() {

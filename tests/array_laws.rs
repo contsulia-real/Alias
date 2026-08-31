@@ -94,10 +94,10 @@ fn string_elements_and_val_binding_push() {
     assert_eq!(run(src).unwrap(), 306);
 }
 
-/// 闭包引用捕获数组绑定: 捕获后 push, 闭包内读到最新长度 (引用捕获)。
+/// 闭包通过捕获 cell 读取数组；冲突 mutation 必须发生在 capture loan 建立前。
 #[test]
-fn closure_captures_array_by_reference() {
-    let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    func i32 reader = () -> return a.len() * 10 + a[0]\n    a.push(5)\n    return reader()\n}\n";
+fn closure_reads_the_captured_array_cell() {
+    let src = "func i32 main = () -> {\n    var array<i32> a = [1]\n    a.push(5)\n    func i32 reader = () -> return a.len() * 10 + a[0]\n    return reader()\n}\n";
     assert_eq!(run(src).unwrap(), 21);
 }
 

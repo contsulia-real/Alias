@@ -18,6 +18,15 @@ enum AccessKind {
     Write,
 }
 
+/// Loan liveness is tied either to a named alias/closure cell or to one temporary function value
+/// consumed by an immediate call. Keeping this distinct from BindingId prevents synthetic compiler
+/// identities from leaking into the language binding graph.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum LoanHolder {
+    Binding(BindingId),
+    Temporary(u32),
+}
+
 #[derive(Clone, Copy)]
 struct PlaceEvalMode {
     read_root: bool,
@@ -44,7 +53,8 @@ enum Action<'a> {
         declared_kind: Option<BorrowKind>,
         span: Span,
     },
-    BindLoan(BindingId, LoanId),
+    BindLoan(LoanHolder, LoanId),
+    UseLoanHolder(LoanHolder),
     Write(&'a Place, Span),
     Move(&'a Place, Span),
     Declare(BindingId),
@@ -89,6 +99,7 @@ enum Task<'a> {
         entry: usize,
         exit: usize,
         replacement: Option<&'a Place>,
+        capture_holder: Option<LoanHolder>,
         loops: LoopTargets,
     },
     Stmt {
@@ -113,6 +124,7 @@ enum Task<'a> {
         arm: &'a super::MatchArm,
         entry: usize,
         exit: usize,
+        capture_holder: Option<LoanHolder>,
         loops: LoopTargets,
     },
     PlaceEval {
@@ -130,7 +142,10 @@ struct GraphBuilder<'a> {
     eligible: HashSet<BindingId>,
     owning: HashSet<BindingId>,
     borrowed: HashSet<BindingId>,
+    capture_permissions: HashMap<BindingId, BorrowKind>,
+    loan_holder_bindings: HashSet<BindingId>,
     nested_functions: Vec<&'a Expr>,
+    next_temporary_holder: u32,
     return_sink: usize,
 }
 
@@ -162,12 +177,26 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
     }
 }
 
-fn root_binding(place: &Place) -> BindingId {
-    let mut current = place;
+fn projected_expr_root(expr: &Expr) -> Option<(BindingId, Span, Vec<&Expr>)> {
+    let mut current = expr;
+    let mut indices = Vec::new();
     loop {
         match current {
-            Place::Local { binding_id, .. } => return *binding_id,
-            Place::Field { base, .. } | Place::Index { base, .. } => current = base,
+            Expr::Ident(_, Some(binding_id), span, _) => {
+                indices.reverse();
+                return Some((*binding_id, *span, indices));
+            }
+            Expr::Field { recv, .. } => current = recv,
+            Expr::Index { recv, idx, .. } => {
+                indices.push(idx);
+                current = recv;
+            }
+            Expr::Convert {
+                expr,
+                mode: ResolvedConversion::Identity,
+                ..
+            } => current = expr,
+            _ => return None,
         }
     }
 }
@@ -180,7 +209,10 @@ impl<'a> GraphBuilder<'a> {
             eligible: HashSet::new(),
             owning: HashSet::new(),
             borrowed: HashSet::new(),
+            capture_permissions: HashMap::new(),
+            loan_holder_bindings: HashSet::new(),
             nested_functions: Vec::new(),
+            next_temporary_holder: 0,
             return_sink: 0,
         };
         graph.return_sink = graph.node(Action::Nop);
@@ -233,6 +265,7 @@ impl<'a> GraphBuilder<'a> {
                 entry: boundaries[index],
                 exit: boundaries[index + 1],
                 replacement,
+                capture_holder: None,
                 loops,
             });
         }
@@ -247,8 +280,9 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit,
                     replacement,
+                    capture_holder,
                     loops,
-                } => self.build_expr(expr, entry, exit, replacement, loops)?,
+                } => self.build_expr(expr, entry, exit, replacement, capture_holder, loops)?,
                 Task::Stmt {
                     stmt,
                     entry,
@@ -284,6 +318,7 @@ impl<'a> GraphBuilder<'a> {
                     arm,
                     entry,
                     exit,
+                    capture_holder,
                     loops,
                 } => match &arm.body {
                     ArmBody::Block(stmts) => self.tasks.push(Task::Stmts {
@@ -297,6 +332,7 @@ impl<'a> GraphBuilder<'a> {
                         entry,
                         exit,
                         replacement: None,
+                        capture_holder,
                         loops,
                     }),
                     ArmBody::Ret(value) => self.tasks.push(Task::Expr {
@@ -304,6 +340,7 @@ impl<'a> GraphBuilder<'a> {
                         entry,
                         exit: self.return_sink,
                         replacement: None,
+                        capture_holder: None,
                         loops,
                     }),
                 },
@@ -350,11 +387,18 @@ impl<'a> GraphBuilder<'a> {
         match stmt {
             Stmt::Binding(binding) => {
                 let after_value = self.node(Action::Nop);
+                let capture_holder = if matches!(binding.ty, Ty::Func { .. }) {
+                    self.loan_holder_bindings.insert(binding.binding_id);
+                    Some(LoanHolder::Binding(binding.binding_id))
+                } else {
+                    None
+                };
                 self.tasks.push(Task::Expr {
                     expr: &binding.value,
                     entry,
                     exit: after_value,
                     replacement: None,
+                    capture_holder,
                     loops,
                 });
                 if binding.relation == Some(StorageRelation::Borrowed) {
@@ -368,7 +412,7 @@ impl<'a> GraphBuilder<'a> {
                     self.action_between(
                         after_value,
                         exit,
-                        Action::BindLoan(binding.binding_id, loan_id),
+                        Action::BindLoan(LoanHolder::Binding(binding.binding_id), loan_id),
                     );
                 } else if binding.relation == Some(StorageRelation::Owning) {
                     self.owning.insert(binding.binding_id);
@@ -390,6 +434,7 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit: after_value,
                     replacement: Some(target),
+                    capture_holder: None,
                     loops,
                 });
                 self.tasks.push(Task::PlaceEval {
@@ -414,7 +459,7 @@ impl<'a> GraphBuilder<'a> {
                         self.action_between(
                             after_place,
                             exit,
-                            Action::BindLoan(*binding_id, loan_id),
+                            Action::BindLoan(LoanHolder::Binding(*binding_id), loan_id),
                         );
                         return Ok(());
                     }
@@ -430,7 +475,7 @@ impl<'a> GraphBuilder<'a> {
                     }
                 }
                 let after_write = self.node(Action::Nop);
-                if self.borrowed.contains(&root_binding(target)) {
+                if self.borrowed.contains(&target.root_binding_id()) {
                     self.edge(after_place, after_write);
                 } else {
                     self.action_between(
@@ -446,6 +491,7 @@ impl<'a> GraphBuilder<'a> {
                 entry,
                 exit,
                 replacement: None,
+                capture_holder: None,
                 loops,
             }),
             Stmt::Return { value } => {
@@ -455,6 +501,7 @@ impl<'a> GraphBuilder<'a> {
                         entry,
                         exit: self.return_sink,
                         replacement: None,
+                        capture_holder: None,
                         loops,
                     });
                 } else {
@@ -473,6 +520,7 @@ impl<'a> GraphBuilder<'a> {
                         entry: condition_entry,
                         exit: condition_exit,
                         replacement: None,
+                        capture_holder: None,
                         loops,
                     });
                     self.tasks.push(Task::Stmts {
@@ -504,6 +552,7 @@ impl<'a> GraphBuilder<'a> {
                     entry: header,
                     exit: after_condition,
                     replacement: None,
+                    capture_holder: None,
                     loops,
                 });
                 self.edge(after_condition, exit);
@@ -526,6 +575,7 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit: header,
                     replacement: None,
+                    capture_holder: None,
                     loops,
                 });
                 self.edge(header, exit);
@@ -568,6 +618,7 @@ impl<'a> GraphBuilder<'a> {
         entry: usize,
         exit: usize,
         replacement: Option<&'a Place>,
+        capture_holder: Option<LoanHolder>,
         loops: LoopTargets,
     ) -> AliasResult<()> {
         match expr {
@@ -633,6 +684,7 @@ impl<'a> GraphBuilder<'a> {
                 entry,
                 exit,
                 replacement,
+                capture_holder,
                 loops,
             }),
             Expr::Binary {
@@ -647,6 +699,7 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit: gate,
                     replacement,
+                    capture_holder: None,
                     loops,
                 });
                 self.edge(gate, exit);
@@ -655,6 +708,7 @@ impl<'a> GraphBuilder<'a> {
                     entry: gate,
                     exit,
                     replacement,
+                    capture_holder: None,
                     loops,
                 });
             }
@@ -673,6 +727,7 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit: gate,
                     replacement: None,
+                    capture_holder: None,
                     loops,
                 });
                 for branch in [then_expr.as_ref(), else_expr.as_ref()] {
@@ -681,6 +736,7 @@ impl<'a> GraphBuilder<'a> {
                         entry: gate,
                         exit,
                         replacement,
+                        capture_holder,
                         loops,
                     });
                 }
@@ -712,10 +768,33 @@ impl<'a> GraphBuilder<'a> {
                     self.action_between(entry, exit, Action::Read(*id, AccessKind::Write, *span));
                     return Ok(());
                 }
-                let mut expressions = Vec::with_capacity(args.len() + 1);
                 if matches!(target, super::CallTarget::FunctionValue) {
-                    expressions.push(callee.as_ref());
+                    let holder = LoanHolder::Temporary(self.next_temporary_holder);
+                    self.next_temporary_holder = self
+                        .next_temporary_holder
+                        .checked_add(1)
+                        .ok_or_else(|| error(expr.span(), "临时 closure loan holder 数量超限"))?;
+                    let after_callee = self.node(Action::Nop);
+                    let before_call = self.node(Action::Nop);
+                    self.tasks.push(Task::Expr {
+                        expr: callee,
+                        entry,
+                        exit: after_callee,
+                        replacement: None,
+                        capture_holder: Some(holder),
+                        loops,
+                    });
+                    self.expression_sequence(
+                        args.iter().map(|arg| &arg.value).collect(),
+                        after_callee,
+                        before_call,
+                        replacement,
+                        loops,
+                    );
+                    self.action_between(before_call, exit, Action::UseLoanHolder(holder));
+                    return Ok(());
                 }
+                let mut expressions = Vec::with_capacity(args.len() + 1);
                 expressions.extend(args.iter().map(|arg| &arg.value));
                 self.expression_sequence(expressions, entry, exit, replacement, loops);
             }
@@ -726,12 +805,14 @@ impl<'a> GraphBuilder<'a> {
                     target,
                     super::MethodTarget::ArrayPush | super::MethodTarget::ArrayPop
                 ) {
-                    if let Expr::Ident(_, Some(id), span, _) = recv.as_ref() {
+                    if let Some((id, span, indices)) = projected_expr_root(recv) {
+                        let after_indices = self.node(Action::Nop);
                         let after_receiver = self.node(Action::Nop);
+                        self.expression_sequence(indices, entry, after_indices, replacement, loops);
                         self.action_between(
-                            entry,
+                            after_indices,
                             after_receiver,
-                            Action::Read(*id, AccessKind::Write, *span),
+                            Action::Read(id, AccessKind::Write, span),
                         );
                         self.expression_sequence(
                             args.iter().map(|arg| &arg.value).collect(),
@@ -753,6 +834,7 @@ impl<'a> GraphBuilder<'a> {
                 entry,
                 exit,
                 replacement,
+                capture_holder: None,
                 loops,
             }),
             Expr::Index { recv, idx, .. } => {
@@ -766,17 +848,35 @@ impl<'a> GraphBuilder<'a> {
                 if captures.is_empty() {
                     self.edge(entry, exit);
                 } else {
+                    let holder = capture_holder.ok_or_else(|| {
+                        error(
+                            expr.span(),
+                            "捕获闭包缺少可证明的 closure value lifetime，不能逃逸或存入容器",
+                        )
+                    })?;
                     let mut current = entry;
-                    for (index, id) in captures.iter().enumerate() {
+                    for (index, capture) in captures.iter().enumerate() {
+                        let after_borrow = self.node(Action::Nop);
+                        self.build_borrow(
+                            BorrowSpec {
+                                loan_id: capture.loan_id,
+                                source: &capture.source,
+                                declared_kind: capture.kind,
+                                span: expr.span(),
+                            },
+                            current,
+                            after_borrow,
+                            loops,
+                        );
                         let next = if index + 1 == captures.len() {
                             exit
                         } else {
                             self.node(Action::Nop)
                         };
                         self.action_between(
-                            current,
+                            after_borrow,
                             next,
-                            Action::Read(*id, AccessKind::Read, expr.span()),
+                            Action::BindLoan(holder, capture.loan_id),
                         );
                         current = next;
                     }
@@ -789,6 +889,7 @@ impl<'a> GraphBuilder<'a> {
                     entry,
                     exit: gate,
                     replacement: None,
+                    capture_holder: None,
                     loops,
                 });
                 for arm in arms {
@@ -796,6 +897,7 @@ impl<'a> GraphBuilder<'a> {
                         arm,
                         entry: gate,
                         exit,
+                        capture_holder,
                         loops,
                     });
                 }
@@ -923,7 +1025,7 @@ impl<'a> GraphBuilder<'a> {
     }
 }
 
-type ReachingState = HashMap<BindingId, HashSet<LoanId>>;
+type ReachingState = HashMap<LoanHolder, HashSet<LoanId>>;
 
 fn join_reaching(target: &mut ReachingState, source: &ReachingState) -> bool {
     let mut changed = false;
@@ -963,7 +1065,7 @@ fn compute_reaching(graph: &GraphBuilder<'_>, entry: usize) -> Vec<Option<Reachi
 
 fn compute_liveness(
     graph: &GraphBuilder<'_>,
-) -> (Vec<HashSet<BindingId>>, Vec<HashSet<BindingId>>) {
+) -> (Vec<HashSet<LoanHolder>>, Vec<HashSet<LoanHolder>>) {
     let mut predecessors = vec![Vec::new(); graph.nodes.len()];
     for (node_id, node) in graph.nodes.iter().enumerate() {
         for successor in &node.successors {
@@ -985,8 +1087,20 @@ fn compute_liveness(
             next_in.remove(&binding);
         }
         if let Action::Read(binding, _, _) = graph.nodes[node_id].action {
-            if graph.borrowed.contains(&binding) {
-                next_in.insert(binding);
+            if graph.borrowed.contains(&binding) || graph.loan_holder_bindings.contains(&binding) {
+                next_in.insert(LoanHolder::Binding(binding));
+            }
+        }
+        if let Action::UseLoanHolder(holder) = graph.nodes[node_id].action {
+            next_in.insert(holder);
+        }
+        if let Action::Borrow { source, .. } = graph.nodes[node_id].action {
+            let source_holder = source.root_binding_id();
+            if graph.loan_holder_bindings.contains(&source_holder) {
+                // Capturing another closure uses that closure value now. Its own capture loans stay
+                // live through this creation, then active_loans follows the new loan dependency for
+                // as long as the outer closure remains live.
+                next_in.insert(LoanHolder::Binding(source_holder));
             }
         }
         if next_in != live_in[node_id] || next_out != live_out[node_id] {
@@ -1008,30 +1122,48 @@ struct LoanFacts<'a> {
     kinds: HashMap<LoanId, BorrowKind>,
     live: HashSet<LoanId>,
     reaching: Vec<Option<ReachingState>>,
-    live_in: Vec<HashSet<BindingId>>,
+    live_in: Vec<HashSet<LoanHolder>>,
 }
 
-fn derive_loan_facts<'a>(graph: &GraphBuilder<'a>, entry: usize) -> AliasResult<LoanFacts<'a>> {
+fn derive_loan_facts<'a>(
+    graph: &GraphBuilder<'a>,
+    entry: usize,
+    inferred_capture_kinds: &HashMap<LoanId, BorrowKind>,
+) -> AliasResult<LoanFacts<'a>> {
     let reaching = compute_reaching(graph, entry);
     let (live_in, live_out) = compute_liveness(graph);
     let mut sources = HashMap::new();
+    let mut declared_kinds = HashMap::new();
     for node in &graph.nodes {
         if let Action::Borrow {
             loan_id,
             source,
-            declared_kind: _,
+            declared_kind,
             span,
         } = node.action
         {
             if sources.insert(loan_id, source).is_some() {
                 return Err(error(span, "内部 sema 不变式被破坏: LoanId 重复"));
             }
+            if let Some(kind) =
+                declared_kind.or_else(|| inferred_capture_kinds.get(&loan_id).copied())
+            {
+                declared_kinds.insert(loan_id, kind);
+            }
         }
     }
     let mut kinds: HashMap<LoanId, BorrowKind> = sources
         .keys()
         .copied()
-        .map(|loan_id| (loan_id, BorrowKind::Read))
+        .map(|loan_id| {
+            (
+                loan_id,
+                declared_kinds
+                    .get(&loan_id)
+                    .copied()
+                    .unwrap_or(BorrowKind::Read),
+            )
+        })
         .collect();
     let mut live = HashSet::new();
     for (node_id, node) in graph.nodes.iter().enumerate() {
@@ -1039,7 +1171,7 @@ fn derive_loan_facts<'a>(graph: &GraphBuilder<'a>, entry: usize) -> AliasResult<
             Action::Read(binding, AccessKind::Write, span) if graph.borrowed.contains(&binding) => {
                 let loans = reaching[node_id]
                     .as_ref()
-                    .and_then(|state| state.get(&binding))
+                    .and_then(|state| state.get(&LoanHolder::Binding(binding)))
                     .ok_or_else(|| {
                         error(span, "borrowed binding 使用点缺少 reaching loan definition")
                     })?;
@@ -1065,14 +1197,33 @@ fn derive_loan_facts<'a>(graph: &GraphBuilder<'a>, entry: usize) -> AliasResult<
     })
 }
 
-fn active_loans(facts: &LoanFacts<'_>, node_id: usize) -> HashSet<LoanId> {
+fn active_loans(
+    graph: &GraphBuilder<'_>,
+    facts: &LoanFacts<'_>,
+    node_id: usize,
+) -> HashSet<LoanId> {
     let mut active = HashSet::new();
     let Some(reaching) = &facts.reaching[node_id] else {
         return active;
     };
-    for binding in &facts.live_in[node_id] {
-        if let Some(loans) = reaching.get(binding) {
+    for holder in &facts.live_in[node_id] {
+        if let Some(loans) = reaching.get(holder) {
             active.extend(loans.iter().copied());
+        }
+    }
+    let mut pending: Vec<LoanId> = active.iter().copied().collect();
+    while let Some(loan_id) = pending.pop() {
+        let source_holder = facts.sources[&loan_id].root_binding_id();
+        if !graph.loan_holder_bindings.contains(&source_holder) {
+            continue;
+        }
+        let Some(dependencies) = reaching.get(&LoanHolder::Binding(source_holder)) else {
+            continue;
+        };
+        for dependency in dependencies {
+            if active.insert(*dependency) {
+                pending.push(*dependency);
+            }
         }
     }
     active
@@ -1091,14 +1242,14 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
     let mut queue = VecDeque::from([entry]);
     while let Some(node_id) = queue.pop_front() {
         let mut state = inputs[node_id].clone().unwrap_or_default();
-        let active = active_loans(facts, node_id);
+        let active = active_loans(graph, facts, node_id);
         match graph.nodes[node_id].action {
             Action::Nop => {}
             Action::Read(id, access, span) => {
                 if graph.borrowed.contains(&id) {
                     if facts.reaching[node_id]
                         .as_ref()
-                        .and_then(|reaching| reaching.get(&id))
+                        .and_then(|reaching| reaching.get(&LoanHolder::Binding(id)))
                         .is_none()
                     {
                         return Err(error(span, "borrowed binding 使用点没有 live loan"));
@@ -1112,7 +1263,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
                 if active.iter().any(|loan_id| {
-                    root_binding(facts.sources[loan_id]) == id
+                    facts.sources[loan_id].root_binding_id() == id
                         && (access == AccessKind::Write
                             || facts.kinds[loan_id] == BorrowKind::Write)
                 }) {
@@ -1126,7 +1277,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 }
             }
             Action::CloneRead(source, span) => {
-                let root = root_binding(source);
+                let root = source.root_binding_id();
                 if state.moved.contains(&root) {
                     return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
@@ -1143,8 +1294,17 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 declared_kind: _,
                 span,
             } => {
-                let root = root_binding(source);
-                if !graph.owning.contains(&root) {
+                let root = source.root_binding_id();
+                if let Some(parent_kind) = graph.capture_permissions.get(&root) {
+                    if facts.kinds[&loan_id] == BorrowKind::Write
+                        && *parent_kind != BorrowKind::Write
+                    {
+                        return Err(error(
+                            span,
+                            "nested closure WriteLoan 超出 parent capture permission",
+                        ));
+                    }
+                } else if !graph.owning.contains(&root) {
                     return Err(error(
                         span,
                         "borrow source 尚未证明为当前函数内的 owning Place",
@@ -1157,7 +1317,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 if kind == BorrowKind::Write && state.exposed.contains(&root) {
                     return Err(error(
                         span,
-                        "WriteLoan source 已被先前共享读取或 closure 捕获",
+                        "WriteLoan source 已被先前未解析 effect 的共享读取暴露",
                     ));
                 }
                 if facts.live.contains(&loan_id)
@@ -1170,9 +1330,9 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "新 loan 与现有 live loan 冲突"));
                 }
             }
-            Action::BindLoan(_, _) => {}
+            Action::BindLoan(_, _) | Action::UseLoanHolder(_) => {}
             Action::Write(target, span) => {
-                let root = root_binding(target);
+                let root = target.root_binding_id();
                 if state.moved.contains(&root) {
                     return Err(error(span, "值已被 move，重新初始化前不能写入"));
                 }
@@ -1184,24 +1344,32 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 }
             }
             Action::Move(source, span) => {
-                let root = root_binding(source);
-                if !graph.owning.contains(&root) {
-                    let message = if graph.borrowed.contains(&root) {
-                        "borrowed Place 不携带 ownership capability，不能 move"
-                    } else {
-                        "move source 尚未证明为当前函数内的 owning local"
-                    };
-                    return Err(error(span, message));
-                }
-                if active
-                    .iter()
-                    .any(|loan_id| loan_overlaps(facts, *loan_id, source))
-                {
-                    return Err(error(span, "move source 与 live loan 冲突"));
-                }
+                let root = source.root_binding_id();
                 if !dynamic_owner(source.ty()) {
-                    // Scalar move is ordinary value passing and carries no consumable capability.
+                    if active.iter().any(|loan_id| {
+                        loan_overlaps(facts, *loan_id, source)
+                            && facts.kinds[loan_id] == BorrowKind::Write
+                    }) {
+                        return Err(error(span, "scalar move read 与 live WriteLoan 冲突"));
+                    }
+                    // Scalar move is an ordinary read and carries no consumable capability. A
+                    // ReadLoan may coexist with it; treating the spelling as destruction would make
+                    // inline value semantics depend on an ownership-only keyword.
                 } else {
+                    if !graph.owning.contains(&root) {
+                        let message = if graph.borrowed.contains(&root) {
+                            "borrowed Place 不携带 ownership capability，不能 move"
+                        } else {
+                            "move source 尚未证明为当前函数内的 owning local"
+                        };
+                        return Err(error(span, message));
+                    }
+                    if active
+                        .iter()
+                        .any(|loan_id| loan_overlaps(facts, *loan_id, source))
+                    {
+                        return Err(error(span, "move source 与 live loan 冲突"));
+                    }
                     let Place::Local { binding_id, .. } = source else {
                         return Err(error(span, "move source 必须是完整 local owning Place"));
                     };
@@ -1214,7 +1382,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     if state.exposed.contains(binding_id) {
                         return Err(error(
                             span,
-                            "move source 已被先前普通读取或 closure 捕获，无法证明 ownership 唯一",
+                            "move source 已被先前未解析 effect 的共享读取暴露，无法证明 ownership 唯一",
                         ));
                     }
                     if !state.moved.insert(*binding_id) {
@@ -1228,7 +1396,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
             Action::Reinitialize(id, span) => {
                 if active
                     .iter()
-                    .any(|loan_id| root_binding(facts.sources[loan_id]) == id)
+                    .any(|loan_id| facts.sources[loan_id].root_binding_id() == id)
                 {
                     return Err(error(span, "owner reinitialization 与 live loan 冲突"));
                 }
@@ -1297,13 +1465,22 @@ fn analyze_function<'a>(
     kinds: &mut HashMap<LoanId, BorrowKind>,
     verify_declared: bool,
 ) -> AliasResult<()> {
-    let Expr::FuncLit { body, .. } = function else {
+    let Expr::FuncLit { captures, body, .. } = function else {
         return Err(error(
             function.span(),
             "内部 sema 不变式被破坏: ownership flow 入口不是 FuncLit",
         ));
     };
     let mut builder = GraphBuilder::new();
+    builder.capture_permissions = captures
+        .iter()
+        .map(|capture| {
+            capture
+                .kind
+                .map(|kind| (capture.binding_id, kind))
+                .ok_or_else(|| error(function.span(), "capture 缺少 resolved loan kind"))
+        })
+        .collect::<AliasResult<HashMap<_, _>>>()?;
     let entry = builder.node(Action::Nop);
     let exit = builder.node(Action::Nop);
     builder = builder.build(Task::Body {
@@ -1312,7 +1489,7 @@ fn analyze_function<'a>(
         exit,
         loops: LoopTargets::default(),
     })?;
-    let facts = derive_loan_facts(&builder, entry)?;
+    let facts = derive_loan_facts(&builder, entry, &HashMap::new())?;
     run_dataflow(&builder, entry, &facts)?;
     merge_graph_kinds(&builder, &facts, kinds, verify_declared)?;
     queue.extend(builder.nested_functions);
@@ -1337,9 +1514,10 @@ fn analyze_root_expr<'a>(
         entry,
         exit,
         replacement: None,
+        capture_holder: None,
         loops: LoopTargets::default(),
     })?;
-    let facts = derive_loan_facts(&builder, entry)?;
+    let facts = derive_loan_facts(&builder, entry, &HashMap::new())?;
     run_dataflow(&builder, entry, &facts)?;
     merge_graph_kinds(&builder, &facts, kinds, verify_declared)?;
     queue.extend(builder.nested_functions);
@@ -1368,6 +1546,91 @@ fn analyze_program(
     }
     while let Some(function) = functions.pop() {
         analyze_function(function, &mut functions, &mut kinds, verify_declared)?;
+    }
+    Ok(kinds)
+}
+
+pub(super) fn infer_capture_kinds_for_function(
+    function: &Expr,
+    inferred_nested: &HashMap<LoanId, BorrowKind>,
+) -> AliasResult<HashMap<LoanId, BorrowKind>> {
+    let Expr::FuncLit { captures, body, .. } = function else {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: capture kind 入口不是 FuncLit",
+        ));
+    };
+    let by_binding: HashMap<BindingId, LoanId> = captures
+        .iter()
+        .map(|capture| (capture.binding_id, capture.loan_id))
+        .collect();
+    if by_binding.len() != captures.len() {
+        return Err(error(
+            function.span(),
+            "内部 sema 不变式被破坏: capture 重复",
+        ));
+    }
+    let mut kinds: HashMap<LoanId, BorrowKind> = captures
+        .iter()
+        .map(|capture| (capture.loan_id, BorrowKind::Read))
+        .collect();
+    let mut used = HashSet::new();
+    let mut builder = GraphBuilder::new();
+    let entry = builder.node(Action::Nop);
+    let exit = builder.node(Action::Nop);
+    builder = builder.build(Task::Body {
+        body,
+        entry,
+        exit,
+        loops: LoopTargets::default(),
+    })?;
+    let facts = derive_loan_facts(&builder, entry, inferred_nested)?;
+
+    for node in &builder.nodes {
+        let (binding, required) = match node.action {
+            Action::Read(binding, access, _) => (
+                binding,
+                if access == AccessKind::Write {
+                    BorrowKind::Write
+                } else {
+                    BorrowKind::Read
+                },
+            ),
+            Action::CloneRead(source, _) => (source.root_binding_id(), BorrowKind::Read),
+            Action::Borrow {
+                loan_id, source, ..
+            } => (source.root_binding_id(), facts.kinds[&loan_id]),
+            Action::Write(target, _) => (target.root_binding_id(), BorrowKind::Write),
+            Action::Move(target, _) => (
+                target.root_binding_id(),
+                if dynamic_owner(target.ty()) {
+                    BorrowKind::Write
+                } else {
+                    BorrowKind::Read
+                },
+            ),
+            Action::Nop
+            | Action::BindLoan(_, _)
+            | Action::UseLoanHolder(_)
+            | Action::Declare(_)
+            | Action::Reinitialize(_, _) => continue,
+        };
+        let Some(loan_id) = by_binding.get(&binding) else {
+            continue;
+        };
+        used.insert(*loan_id);
+        if required == BorrowKind::Write {
+            kinds.insert(*loan_id, BorrowKind::Write);
+        }
+    }
+
+    for capture in captures {
+        if !used.contains(&capture.loan_id) {
+            return Err(error(
+                function.span(),
+                "内部 sema 不变式被破坏: capture 没有对应 body use",
+            ));
+        }
     }
     Ok(kinds)
 }
@@ -1548,6 +1811,23 @@ fn apply_kinds(
         match node {
             MutNode::Stmt(stmt) => push_stmt_mut(&mut stack, stmt),
             MutNode::Expr(expr) => {
+                if let Expr::FuncLit { captures, .. } = expr {
+                    for capture in captures {
+                        let inferred = kinds.get(&capture.loan_id).copied().ok_or_else(|| {
+                            error(
+                                capture.source.span(),
+                                "内部 sema 不变式被破坏: capture 缺少 NLL kind fact",
+                            )
+                        })?;
+                        capture.kind = Some(inferred);
+                        if !seen.insert(capture.loan_id) {
+                            return Err(error(
+                                capture.source.span(),
+                                "内部 sema 不变式被破坏: LoanId 在 HIR 中重复",
+                            ));
+                        }
+                    }
+                }
                 if let Expr::Borrow {
                     loan_id,
                     kind,
@@ -1577,10 +1857,12 @@ fn apply_kinds(
 }
 
 pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
+    super::capture::finalize_loan_kinds(program)?;
     let kinds = analyze_program(program, false)?;
     apply_kinds(program, &kinds)
 }
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
+    super::capture::validate_loan_kinds(program)?;
     analyze_program(program, true).map(|_| ())
 }

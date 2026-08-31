@@ -184,7 +184,7 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 尚未完成 effect/loan 合同，当前仍保留既有共享读取事实；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，但完整 destruction / free 仍未落地。
+普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding 与 for iterable 尚未完成 effect 合同，当前仍保留既有共享读取事实；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -200,11 +200,11 @@ move place
 - source 必须是完整 local Place；普通 struct field 与 array element 不能被 move-out 后留下 partial-move hole；
 - 对 string、struct、array、result、iterator、function/closure 等携带动态 ownership 的 owning local，结果为 `OwnedTemporary + Available`，source capability 进入 moved 状态；
 - moved local 在重新初始化前不能读取或再次 move；控制流 merge 与 loop back-edge 采用 may-be-moved 的 fail-closed join；
-- 已解析为 owning-slot `ReadPlace` 的读取产生独立副本，不暴露 source alias，因此不阻止后续 move；尚未解析 effect 的其它共享读取或 closure 捕获仍阻止后续 move；
+- 已解析为 owning-slot `ReadPlace` 的读取产生独立副本，不暴露 source alias，因此不阻止后续 move；closure capture 只在其 NLL live region 内阻止冲突 move，尚未解析 effect 的其它共享读取仍按 fail-closed exposure 处理；
 - `var` local 可由新的 `OwnedTemporary` 重新初始化；
-- scalar `move` 等价于普通值传递，不制造或消费动态 ownership capability；
+- scalar `move` 等价于普通 Place 读取，可用于 readable local/parameter/capture/global，不制造或消费动态 ownership capability；
 - `target = move(source)` 要求 canonical Place relation 为 `Disjoint`，因此 `x = move(x)` 编译失败；
-- parameter、capture、global 的 dynamic move 要等待 function/capture effect 固化后开放，当前不会把缺失 effect 当 owning fallback；
+- parameter、captured Place、global 的 dynamic move 要等待 function effect/transfer source 固化后开放，当前不会把缺失 effect 当 owning fallback；
 - `move(place)` 与 `move place` 使用同一 semantic resolution、resolved Place 和 ownership dataflow。
 
 sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前 runtime 仍未实现 destruction/deallocation，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前泄漏式实现限制。
@@ -227,7 +227,7 @@ borrow place
 - loan 在 alias 最后一次实际使用后结束；控制流分支、merge 与 loop back-edge 由显式 CFG/worklist 计算，不按词法块寿命粗放延长；
 - `var` borrowed slot 重新绑定只替换 alias 本身，不算对旧 referent write-through，并为新 source 建立独立 loan generation；
 - 普通读取 borrowed Place 进入 owning slot 时执行 `DeepClone`，不把 borrow 偷渡进 owning object graph；
-- closure capture loan、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow 与 terminal Index write-through 尚未开放，缺失合同不会被当作共享引用 fallback。
+- borrowed alias capture 的 referent-loan forwarding、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow 与 terminal Index write-through 尚未开放，缺失合同不会被当作共享引用 fallback。
 
 sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/WriteLoan` kind 的专用 HIR；final-HIR gate 重算 loan facts 并拒绝漂移。codegen 只物化 borrowed alias cell 与 canonical referent address，不执行 borrow checker，也不从机器地址猜 relation。
 
@@ -283,7 +283,16 @@ sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/
 
 ### 4.4 闭包与函数值
 
-闭包引用捕获外层绑定单元格，因此观察到捕获变量的最新值。
+闭包环境保存外层 binding cell 的地址；这只是物理寻址方式，不授予绕过静态 loan 的共享修改权限。每个 owning capture 在 HIR 中固化独立 `LoanId`、root `Local Place` 与由闭包体实际使用推导的 `ReadLoan/WriteLoan`：
+
+- capture loan 在 closure value 创建时建立，到该 closure value 的最后一次实际使用结束；未使用闭包不会把 loan 粗放延长到词法块末尾；
+- 立即调用的捕获函数字面量使用 expression-temporary loan holder；命名 closure 使用其 binding holder；
+- 嵌套 closure 捕获另一个 closure 时，外层 holder 的 live region 会传递保持内层 capture loans，不允许通过转捕获提前结束 referent loan；
+- `ReadLoan` 允许其它只读访问，但拒绝冲突 owner write 与 dynamic move；`WriteLoan` 对重叠 Place 独占；inline scalar 的 `move` 仍是 read，因此可与 `ReadLoan` 共存、与 `WriteLoan` 冲突；
+- 捕获 closure 不能逃逸进普通持久字段/容器；捕获 borrowed alias 仍因无法固化 rebind-sensitive referent loan generation 而静态拒绝。
+- captured dynamic value 进入普通用户函数/用户方法或直接作为非 fresh-owner return 时，仍因 parameter/return effect 尚未固化而静态拒绝；显式 `clone` 等产生 `OwnedTemporary` 的返回不受此限制。
+
+因此，闭包执行时会通过 cell 观察其获准 live region 内的当前值；但创建读捕获之后再从外部写同一 Place，并不是合法的“按引用更新”捷径。
 
 任何静态类型为完整函数签名的表达式都可作为调用后缀的被调方，包括：
 
@@ -313,7 +322,7 @@ struct User {
 - `struct` 只能顶层定义；
 - 字段独立声明 `val` 或 `var`；
 - 已登记结构体名可进入类型槽；
-- owning binding 初始化、local/field replacement、字段默认值与构造实参从稳定 Place 读取时按 3.4 节递归 DeepClone；函数传参、返回、方法 receiver、Pattern binding 与闭包捕获仍等待 effect/loan 迁移，当前可共享实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
+- owning binding 初始化、local/field replacement、字段默认值与构造实参从稳定 Place 读取时按 3.4 节递归 DeepClone；closure capture 按 4.4 节建立 loan；函数传参、返回、方法 receiver 与 Pattern binding 仍等待 effect 迁移，当前可共享实例；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
 - 字段赋值的 receiver 链必须解析为已有 storage Place；当前允许从 binding root 经 Field/Index 继续投影，因此 `cells[0].value = 3` 合法，但 constructor/call/ternary 等临时 Value 不能作为字段赋值 receiver，例如 `cell().value = 1` 是编译错误；
 - 构造使用命名实参；
@@ -410,7 +419,7 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素或 `push` 实参从稳定 Place 读取时，按 3.4 节创建独立 wrapper/backing 并递归 clone 元素；函数传参、返回、方法 receiver、Pattern binding 与闭包捕获仍等待 effect/loan 迁移，当前可共享 wrapper。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
+数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素或 `push` 实参从稳定 Place 读取时，按 3.4 节创建独立 wrapper/backing 并递归 clone 元素；closure capture 按 4.4 节借用现有 wrapper；函数传参、返回、方法 receiver 与 Pattern binding 仍等待 effect 迁移，当前可共享 wrapper。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
 
 ### 8.1 数组
 
@@ -751,8 +760,8 @@ line / col / len
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
 - `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic parameter/capture/global move 仍等待 effect 分析；
-- closure capture loan、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow、top-level/global borrow 与 terminal Index write-through；
-- 普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding、for iterable 与 closure capture 中稳定 dynamic Place 普通读取的 effect/loan 解析；
+- borrowed alias capture 的 referent-loan forwarding、borrowed parameter/return effect、用户调用中的 borrowed receiver/argument、reborrow、top-level/global borrow 与 terminal Index write-through；
+- 普通函数/用户方法实参、函数返回、方法 receiver、match/Pattern binding 与 for iterable 中稳定 dynamic Place 普通读取的 effect 解析；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；

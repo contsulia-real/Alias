@@ -23,8 +23,8 @@ fn run_api_executes_closure_and_loop_path() {
     let src = "
 func i32 main = () -> {
     var i32 n = 0;
-    func bool lt3 = (i32 cap) -> return n < cap
-    while lt3(3) {
+    func bool lt3 = (i32 current, i32 cap) -> return current < cap
+    while lt3(n, 3) {
         increase n
     }
     return n

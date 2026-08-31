@@ -41,6 +41,24 @@ func i32 main = () -> {
 }
 
 #[test]
+fn scalar_parameter_move_remains_ordinary_value_passing() {
+    let source = r#"
+func i32 copy = (i32 value) -> return move value
+func i32 main = () -> return copy(3)
+"#;
+    assert_eq!(run(source).unwrap(), 3);
+}
+
+#[test]
+fn scalar_global_move_remains_ordinary_value_passing() {
+    let source = r#"
+val i32 global = 4
+func i32 main = () -> return move global
+"#;
+    assert_eq!(run(source).unwrap(), 4);
+}
+
+#[test]
 fn moved_dynamic_local_cannot_be_read() {
     let error = fail(
         r#"
@@ -93,7 +111,51 @@ func i32 main = () -> {
 }
 "#,
     );
-    assert!(error.msg.contains("closure 捕获"), "{}", error.msg);
+    assert!(
+        error.msg.contains("move source") && error.msg.contains("live loan"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
+fn capture_loan_ends_after_the_closure_last_use() {
+    let source = r#"
+func i32 main = () -> {
+    val string original = 'x'
+    func i32 length = () -> return original.len()
+    val i32 before_move = length()
+    val string transferred = move original
+    return before_move + transferred.len()
+}
+"#;
+    assert_eq!(run(source).unwrap(), 2);
+}
+
+#[test]
+fn unused_closure_does_not_keep_its_capture_loan_live() {
+    let source = r#"
+func i32 main = () -> {
+    val string original = 'x'
+    func i32 length = () -> return original.len()
+    val string transferred = move original
+    return transferred.len()
+}
+"#;
+    assert_eq!(run(source).unwrap(), 1);
+}
+
+#[test]
+fn scalar_move_is_a_read_under_a_capture_read_loan() {
+    let source = r#"
+func i32 main = () -> {
+    val i32 original = 3
+    func i32 read = () -> return original
+    val i32 copied = move original
+    return copied + read()
+}
+"#;
+    assert_eq!(run(source).unwrap(), 6);
 }
 
 #[test]

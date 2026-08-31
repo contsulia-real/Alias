@@ -17,6 +17,8 @@ mod visit;
 #[cfg(test)]
 mod borrow_tests;
 #[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
 mod contract_tests;
 #[cfg(test)]
 mod deep_clone_tests;
@@ -39,10 +41,10 @@ mod value_category_tests;
 
 pub(crate) use model::{
     ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind, BuiltinCall,
-    CallArg, CallTarget, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo,
-    Item, LoanId, MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern, Place,
-    PlaceInfo, ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef,
-    StructField, ValueCategory,
+    CallArg, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory,
+    ExprInfo, Item, LoanId, MatchArm, MethodId, MethodTarget, OwnershipCapability, Param, Pattern,
+    Place, PlaceInfo, ResolvedConversion, ShallowClonePlan, Stmt, StorageRelation, StrPart,
+    StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -102,6 +104,7 @@ pub(super) struct LowerBorrowInfo {
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时
 /// 被精确消费；它不是 final HIR model，也不能越过 lower 存活到 capture/validation/codegen。
 pub(super) struct LowerFacts {
+    pub(super) next_loan_id: u32,
     pub(super) exprs: HashMap<usize, crate::sema::LowerExprInfo>,
     pub(super) bindings: HashMap<usize, Ty>,
     pub(super) binding_ids: HashMap<usize, BindingId>,
@@ -138,10 +141,12 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     value_categories::validate(program)?;
     ownership_capabilities::validate(program)?;
     storage_relations::validate(program)?;
+    // Stable identity must be closed before analyses recompute capture/free-use graphs. Otherwise a
+    // duplicate BindingId can masquerade as capture drift and steal the diagnostic from its owner.
+    binding_contract::validate(program)?;
     borrow_contract::validate(program)?;
     place_relation::validate(program)?;
     ownership_flow::validate(program)?;
-    binding_contract::validate(program)?;
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)
 }
