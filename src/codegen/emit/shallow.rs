@@ -1,5 +1,5 @@
 use super::expr::emit_expr;
-use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, VTy};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::layout::{
     RESULT_OK_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET, RESULT_WORDS,
 };
@@ -73,7 +73,7 @@ fn shallow_struct<M: Module>(
     for (field, plan) in layout.fields.iter().zip(plans) {
         let raw = bcx
             .ins()
-            .load(field.vty.abi().storage, MemFlagsData::new(), source, field.offset);
+            .load(cl_type(&field.vty), MemFlagsData::new(), source, field.offset);
         let value = norm_load(bcx, raw, &field.vty);
         // 当前 struct/result 物理表示仍以 heap pointer 承载 aggregate root。即使语义上的
         // shallow-safe child 未来可 inline，当前后端也必须为它创建独立 root；直接复制旧

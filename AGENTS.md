@@ -159,7 +159,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 当前实现事实：
 
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
-- 当前 `ValueAbi` 以单个 Cranelift `Type` 表达 register/storage/param/ret；
+- `ValueAbi` 已显式区分 scalar 与 multi-lane expression、scalar 与 aggregate storage、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；当前已接入的语言类型仍全部投影为 scalar 形态，aggregate caller/callee lowering 尚未开放并 fail-closed；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
 - `storage_word` / `restore_word` 当前承担一-word 容器与具体值表示之间的边界；
@@ -168,7 +168,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 - `unit` 与 `Unknown` 没有值 ABI，到达需要值 ABI 的位置属于内部不变式失败；
 - 结构体布局必须统一处理字段对齐与最终尾部 padding。
 
-以上单-scalar / universal one-word 结构是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI 与 typed aggregate/container layout；实施时必须让 ABI owner 能表达 aggregate / multi-lane value，不能为了保住旧 `ValueAbi` 而把 `ptr<T>` 压成 I64 handle、把 array/result 继续强制塞回 universal 8-byte payload，或建立第二套临时 ABI。
+以上当前语言类型仍使用 scalar / universal one-word 的结构是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI 与 typed aggregate/container layout；实施时必须沿现有 aggregate-capable `ValueAbi` 继续接入 pointer 与 container，不能把 `ptr<T>` 压成 I64 handle、把 array/result 继续强制塞回 universal 8-byte payload，或建立第二套临时 ABI。
 
 当前已实现用户函数机器前缀是 `[globals, closure_env, ...]`。`docs/plan.md` 已冻结需要 sret 时的目标内部 ABI 前缀 `[sret?, globals, closure_env, ...]`。迁移必须由统一 signature/ABI owner 一次性决定 caller/callee 两侧，不能在调用点和函数生成器各复制一套隐藏参数规则，也不能为了兼容开发期旧 ABI 保留双路径。
 

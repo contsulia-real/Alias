@@ -1,7 +1,7 @@
 use super::arrays::{array_element_addr, array_len, array_raw, wrap_array};
 use super::expr::emit_expr;
 use super::places::emit_place_value;
-use crate::codegen::abi::{norm_load, norm_store, restore_word, storage_word, VTy};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
 use crate::codegen::layout::{
     RESULT_OK_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET, RESULT_WORDS, STRING_BYTES,
     STRING_DATA_OFFSET, STRING_LEN_OFFSET,
@@ -167,7 +167,7 @@ fn clone_struct<M: Module>(
     for (field, plan) in layout.fields.iter().zip(plans) {
         let raw = bcx
             .ins()
-            .load(field.vty.abi().storage, MemFlagsData::new(), source, field.offset);
+            .load(cl_type(&field.vty), MemFlagsData::new(), source, field.offset);
         let value = norm_load(bcx, raw, &field.vty);
         let cloned = clone_value(c, bcx, value, &field.vty, plan)?;
         let stored = norm_store(bcx, cloned, &field.vty);
@@ -207,7 +207,7 @@ fn clone_array<M: Module>(
     let addr = array_element_addr(bcx, source_raw, current);
     let raw = bcx
         .ins()
-        .load(elem_vty.abi().storage, MemFlagsData::new(), addr, 0);
+        .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
     let value = norm_load(bcx, raw, elem_vty);
     let cloned = clone_value(c, bcx, value, elem_vty, elem_plan)?;
     let word = storage_word(bcx, cloned, elem_vty);

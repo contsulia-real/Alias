@@ -43,22 +43,6 @@ pub(crate) enum WordRepr {
     Direct,
 }
 
-/// 一个静态值跨 Cranelift 表达式、内存/调用边界和通用 word 容器时的物理合同。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ValueAbi {
-    /// 后端表达式内部的规范寄存器类型；窄整数统一提升到 I64，减少算术路径分叉。
-    pub(crate) register: Type,
-    /// cell/struct field 等真实存储宽度。
-    pub(crate) storage: Type,
-    pub(crate) storage_bytes: usize,
-    pub(crate) align_bytes: usize,
-    /// 用户函数机器签名仍保留声明宽度，不能把内部 I64 规范化泄漏到 ABI。
-    pub(crate) param: Type,
-    pub(crate) ret: Type,
-    /// 写入 array/result/env 等 64-bit 通用槽时采用的编码。
-    pub(crate) word: WordRepr,
-}
-
 /// Canonical physical storage layout for one language value. `stride` is kept distinct from
 /// `size`: aggregates and container elements may require tail padding even when every current
 /// scalar happens to have `stride == size`. If callers recompute this tuple independently, pointer
@@ -70,29 +54,130 @@ pub(crate) struct ValueLayout {
     pub(crate) stride: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExpressionAbi {
+    lanes: Vec<Type>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StorageAbi {
+    scalar: Option<Type>,
+    layout: ValueLayout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ParameterAbi {
+    direct: Option<Type>,
+    indirect_by_value: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReturnAbi {
+    direct: Option<Type>,
+    explicit_sret: bool,
+}
+
+/// 一个静态值跨 Cranelift expression、storage 与用户函数边界时的唯一物理合同。
+/// aggregate 形态必须保留为 aggregate；把它压回单个 I64 会丢失 capability lanes。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValueAbi {
+    expression: ExpressionAbi,
+    storage: StorageAbi,
+    parameter: ParameterAbi,
+    result: ReturnAbi,
+    /// `None` 表示该值不能进入历史 universal-word container；这不是可选 fallback。
+    word: Option<WordRepr>,
+}
+
+impl ValueAbi {
+    fn scalar(register: Type, storage: Type, align: usize, word: WordRepr) -> Self {
+        let size = storage.bytes() as usize;
+        Self {
+            expression: ExpressionAbi {
+                lanes: vec![register],
+            },
+            storage: StorageAbi {
+                scalar: Some(storage),
+                layout: ValueLayout {
+                    size,
+                    align,
+                    stride: align_to(size, align),
+                },
+            },
+            parameter: ParameterAbi {
+                direct: Some(storage),
+                indirect_by_value: false,
+            },
+            result: ReturnAbi {
+                direct: Some(storage),
+                explicit_sret: false,
+            },
+            word: Some(word),
+        }
+    }
+
+    fn scalar_register(&self) -> Type {
+        match self.expression.lanes.as_slice() {
+            [ty] => *ty,
+            lanes => panic!(
+                "内部 ABI 不变式被破坏: {}-lane aggregate 进入 scalar expression 路径",
+                lanes.len()
+            ),
+        }
+    }
+
+    fn scalar_storage(&self) -> Type {
+        self.storage.scalar.unwrap_or_else(|| {
+            panic!(
+                "内部 ABI 不变式被破坏: {}-byte aggregate 进入 scalar storage 路径",
+                self.storage.layout.size
+            )
+        })
+    }
+
+    fn direct_parameter(&self) -> Type {
+        match (self.parameter.direct, self.parameter.indirect_by_value) {
+            (Some(ty), false) => ty,
+            (None, true) => panic!(
+                "内部 ABI 不变式被破坏: IndirectByValue({}, {}) 尚未进入 caller/callee lowering",
+                self.storage.layout.size, self.storage.layout.align
+            ),
+            _ => panic!("内部 ABI 不变式被破坏: parameter ABI 形态冲突"),
+        }
+    }
+
+    fn direct_result(&self) -> Type {
+        match (self.result.direct, self.result.explicit_sret) {
+            (Some(ty), false) => ty,
+            (None, true) => panic!(
+                "内部 ABI 不变式被破坏: ExplicitSRet({}, {}) 尚未进入 caller/callee lowering",
+                self.storage.layout.size, self.storage.layout.align
+            ),
+            _ => panic!("内部 ABI 不变式被破坏: return ABI 形态冲突"),
+        }
+    }
+
+    fn word(&self) -> WordRepr {
+        self.word.unwrap_or_else(|| {
+            panic!(
+                "内部 ABI 不变式被破坏: {}-byte aggregate 不能进入 universal word",
+                self.storage.layout.size
+            )
+        })
+    }
+}
+
 impl VTy {
     pub(crate) fn abi(&self) -> ValueAbi {
         match self {
             VTy::I(w) => integer_abi(w.bits(), true),
             VTy::U(w) => integer_abi(w.bits(), false),
-            VTy::F(FloatW::F32) => ValueAbi {
-                register: types::F32,
-                storage: types::F32,
-                storage_bytes: 4,
-                align_bytes: 4,
-                param: types::F32,
-                ret: types::F32,
-                word: WordRepr::F32Bits,
-            },
-            VTy::F(FloatW::F64) => ValueAbi {
-                register: types::F64,
-                storage: types::F64,
-                storage_bytes: 8,
-                align_bytes: 8,
-                param: types::F64,
-                ret: types::F64,
-                word: WordRepr::F64Bits,
-            },
+            VTy::F(FloatW::F32) => {
+                ValueAbi::scalar(types::F32, types::F32, 4, WordRepr::F32Bits)
+            }
+            VTy::F(FloatW::F64) => {
+                ValueAbi::scalar(types::F64, types::F64, 8, WordRepr::F64Bits)
+            }
             VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
             VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
             VTy::Bool
@@ -103,15 +188,9 @@ impl VTy {
             | VTy::Struct(_)
             | VTy::Result(..)
             | VTy::Array(_)
-            | VTy::Iterator(_) => ValueAbi {
-                register: types::I64,
-                storage: types::I64,
-                storage_bytes: 8,
-                align_bytes: 8,
-                param: types::I64,
-                ret: types::I64,
-                word: WordRepr::Direct,
-            },
+            | VTy::Iterator(_) => {
+                ValueAbi::scalar(types::I64, types::I64, 8, WordRepr::Direct)
+            }
         }
     }
 
@@ -124,19 +203,16 @@ fn integer_abi(bits: u32, signed: bool) -> ValueAbi {
     let storage = ir_type_bits(bits);
     // 算术/比较发射统一处理 I64 形式，但 memory 与函数边界必须保持源码声明宽度；
     // 否则 i8/i16/i32 的布局和 Windows 调用签名会被内部规范化意外扩大。
-    ValueAbi {
-        register: types::I64,
+    ValueAbi::scalar(
+        types::I64,
         storage,
-        storage_bytes: (bits / 8) as usize,
-        align_bytes: (bits / 8) as usize,
-        param: storage,
-        ret: storage,
-        word: if signed {
+        (bits / 8) as usize,
+        if signed {
             WordRepr::Signed
         } else {
             WordRepr::Unsigned
         },
-    }
+    )
 }
 
 pub(crate) fn ir_type_bits(bits: u32) -> Type {
@@ -150,16 +226,11 @@ pub(crate) fn ir_type_bits(bits: u32) -> Type {
 }
 
 pub(crate) fn cl_type(vty: &VTy) -> Type {
-    vty.abi().storage
+    vty.abi().scalar_storage()
 }
 
 pub(crate) fn value_layout(vty: &VTy) -> ValueLayout {
-    let abi = vty.abi();
-    ValueLayout {
-        size: abi.storage_bytes,
-        align: abi.align_bytes,
-        stride: align_to(abi.storage_bytes, abi.align_bytes),
-    }
+    vty.abi().storage.layout
 }
 
 pub(crate) fn align_to(off: usize, align: usize) -> usize {
@@ -177,9 +248,9 @@ pub(crate) fn user_signature(
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
     sig.params
-        .extend(params.iter().map(|p| AbiParam::new(p.abi().param)));
+        .extend(params.iter().map(|p| AbiParam::new(p.abi().direct_parameter())));
     if *ret != VTy::Unit {
-        sig.returns.push(AbiParam::new(ret.abi().ret));
+        sig.returns.push(AbiParam::new(ret.abi().direct_result()));
     }
     sig
 }
@@ -305,14 +376,16 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
 
 pub(crate) fn norm_load(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
     let abi = vty.abi();
+    let storage = abi.scalar_storage();
+    let register = abi.scalar_register();
     // 从真实 storage 边界进入表达式世界时恢复规范寄存器形式；窄有符号/无符号
     // 必须分别扩展，否则高位语义会在后续 I64 算术和比较中被破坏。
-    if abi.storage == abi.register {
+    if storage == register {
         raw
     } else if matches!(vty, VTy::I(_)) {
-        bcx.ins().sextend(abi.register, raw)
+        bcx.ins().sextend(register, raw)
     } else if matches!(vty, VTy::U(_)) {
-        bcx.ins().uextend(abi.register, raw)
+        bcx.ins().uextend(register, raw)
     } else {
         raw
     }
@@ -320,14 +393,15 @@ pub(crate) fn norm_load(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Val
 
 pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> Value {
     let abi = vty.abi();
+    let storage = abi.scalar_storage();
     let actual = bcx.func.dfg.value_type(value);
-    if actual == abi.storage {
+    if actual == storage {
         return value;
     }
     // 写回 cell/field/参数边界前恢复声明宽度；float promotion/demotion 只处理真实
     // F32/F64 数值，不与通用 word 的 bit encoding 混用。
     match vty {
-        VTy::I(_) | VTy::U(_) => bcx.ins().ireduce(abi.storage, value),
+        VTy::I(_) | VTy::U(_) => bcx.ins().ireduce(storage, value),
         VTy::F(FloatW::F32) if actual == types::F64 => bcx.ins().fdemote(types::F32, value),
         VTy::F(FloatW::F64) if actual == types::F32 => bcx.ins().fpromote(types::F64, value),
         _ => value,
@@ -336,17 +410,19 @@ pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> 
 
 pub(crate) fn storage_word(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> Value {
     let abi = vty.abi();
+    let storage = abi.scalar_storage();
+    let word = abi.word();
     // 通用容器永远只有一个 I64 word。整数按符号规范扩展；float 必须保存 IEEE bit
     // pattern，而不是执行数值转换，否则 result/array/env 往返后值会改变。
-    match abi.word {
+    match word {
         WordRepr::F32Bits => {
             let bits = bcx.ins().bitcast(types::I32, MemFlagsData::new(), value);
             bcx.ins().uextend(types::I64, bits)
         }
         WordRepr::F64Bits => bcx.ins().bitcast(types::I64, MemFlagsData::new(), value),
-        WordRepr::Signed | WordRepr::Unsigned if abi.storage != types::I64 => {
-            let reduced = bcx.ins().ireduce(abi.storage, value);
-            if abi.word == WordRepr::Signed {
+        WordRepr::Signed | WordRepr::Unsigned if storage != types::I64 => {
+            let reduced = bcx.ins().ireduce(storage, value);
+            if word == WordRepr::Signed {
                 bcx.ins().sextend(types::I64, reduced)
             } else {
                 bcx.ins().uextend(types::I64, reduced)
@@ -359,7 +435,7 @@ pub(crate) fn storage_word(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -
 pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
     // 整数 word 在 storage_word 时已经规范扩展，可直接作为表达式 I64；只有 float
     // 需要把保存的 bit pattern 重解释回真实浮点寄存器类型。
-    match vty.abi().word {
+    match vty.abi().word() {
         WordRepr::F32Bits => {
             let bits = bcx.ins().ireduce(types::I32, raw);
             bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits)
@@ -371,16 +447,17 @@ pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> 
 
 pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, elem_vty: &VTy) {
     let abi = elem_vty.abi();
+    let storage = abi.scalar_storage();
     // array backing store 按元素真实 storage 宽度写入，而 array runtime 的槽步长仍由
     // VALUE_WORD_BYTES 管理；因此写入前必须把通用 word 恢复成元素 storage 表示。
-    let value = match abi.word {
+    let value = match abi.word() {
         WordRepr::F32Bits => {
             let bits = bcx.ins().ireduce(types::I32, word);
             bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits)
         }
         WordRepr::F64Bits => bcx.ins().bitcast(types::F64, MemFlagsData::new(), word),
-        WordRepr::Signed | WordRepr::Unsigned if abi.storage != types::I64 => {
-            bcx.ins().ireduce(abi.storage, word)
+        WordRepr::Signed | WordRepr::Unsigned if storage != types::I64 => {
+            bcx.ins().ireduce(storage, word)
         }
         _ => word,
     };
@@ -391,9 +468,11 @@ pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, el
 mod tests {
     use super::{
         build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
-        value_layout, ProjectionTable, VTy,
+        value_layout, ExpressionAbi, ParameterAbi, ProjectionTable, ReturnAbi, StorageAbi,
+        ValueAbi, ValueLayout, VTy,
     };
     use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
+    use cranelift_codegen::ir::types;
 
     #[test]
     fn primitive_abi_matrix_is_complete_and_consistent() {
@@ -418,16 +497,57 @@ mod tests {
         for value in values {
             let abi = value.abi();
             let layout = value_layout(&value);
-            assert!(abi.storage_bytes > 0);
-            assert!(abi.align_bytes.is_power_of_two());
-            assert_eq!(abi.storage_bytes, abi.storage.bytes() as usize);
-            assert_eq!(abi.param, abi.storage);
-            assert_eq!(abi.ret, abi.storage);
-            assert_eq!(layout.size, abi.storage_bytes);
-            assert_eq!(layout.align, abi.align_bytes);
+            let storage = abi.scalar_storage();
+            assert!(layout.size > 0);
+            assert!(layout.align.is_power_of_two());
+            assert_eq!(layout.size, storage.bytes() as usize);
+            assert_eq!(abi.parameter.direct, Some(storage));
+            assert!(!abi.parameter.indirect_by_value);
+            assert_eq!(abi.result.direct, Some(storage));
+            assert!(!abi.result.explicit_sret);
             assert!(layout.stride >= layout.size);
             assert_eq!(layout.stride % layout.align, 0);
         }
+    }
+
+    #[test]
+    fn value_abi_can_represent_multi_lane_aggregate_without_scalar_collapse() {
+        static LANES: [cranelift_codegen::ir::Type; 2] = [types::I32, types::I64];
+        let layout = ValueLayout {
+            size: 16,
+            align: 8,
+            stride: 16,
+        };
+        let abi = ValueAbi {
+            expression: ExpressionAbi {
+                lanes: LANES.to_vec(),
+            },
+            storage: StorageAbi {
+                scalar: None,
+                layout,
+            },
+            parameter: ParameterAbi {
+                direct: None,
+                indirect_by_value: true,
+            },
+            result: ReturnAbi {
+                direct: None,
+                explicit_sret: true,
+            },
+            word: None,
+        };
+
+        assert_eq!(abi.expression.lanes, LANES);
+        assert_eq!(abi.storage.scalar, None);
+        assert_eq!(abi.storage.layout, layout);
+        assert!(abi.parameter.indirect_by_value);
+        assert!(abi.result.explicit_sret);
+        assert_eq!(abi.word, None);
+        assert!(std::panic::catch_unwind(|| abi.scalar_register()).is_err());
+        assert!(std::panic::catch_unwind(|| abi.scalar_storage()).is_err());
+        assert!(std::panic::catch_unwind(|| abi.direct_parameter()).is_err());
+        assert!(std::panic::catch_unwind(|| abi.direct_result()).is_err());
+        assert!(std::panic::catch_unwind(|| abi.word()).is_err());
     }
 
     #[test]
