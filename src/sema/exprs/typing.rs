@@ -15,8 +15,8 @@ pub(in crate::sema) type ExprCheckResult<T> = Result<T, ExprCheckError>;
 
 pub(in crate::sema) enum ExprCheckError {
     Mismatch {
-        expected: Ty,
-        actual: Ty,
+        expected: Box<Ty>,
+        actual: Box<Ty>,
         span: Span,
     },
     LiteralOutOfRange {
@@ -137,6 +137,7 @@ impl Checker {
             Ty::Func {
                 params,
                 param_effects: None,
+                return_effect: None,
                 ret: Box::new(result.clone()),
             },
         );
@@ -233,8 +234,8 @@ impl Checker {
                             let ty = self.check_borrow_call(e, args, *span, env)?;
                             if !types_match(expected, &ty) {
                                 return Err(ExprCheckError::Mismatch {
-                                    expected: expected.clone(),
-                                    actual: ty,
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(ty),
                                     span: e.span(),
                                 });
                             }
@@ -245,8 +246,8 @@ impl Checker {
                             let ty = self.check_move_call(e, args, *span, env)?;
                             if !types_match(expected, &ty) {
                                 return Err(ExprCheckError::Mismatch {
-                                    expected: expected.clone(),
-                                    actual: ty,
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(ty),
                                     span: e.span(),
                                 });
                             }
@@ -267,8 +268,8 @@ impl Checker {
                 Ok(expected.clone())
             } else {
                 Err(ExprCheckError::Mismatch {
-                    expected: expected.clone(),
-                    actual: got,
+                    expected: Box::new(expected.clone()),
+                    actual: Box::new(got),
                     span: e.span(),
                 })
             };
@@ -327,8 +328,8 @@ impl Checker {
                     Ok(expected.clone())
                 } else {
                     Err(ExprCheckError::Mismatch {
-                        expected: expected.clone(),
-                        actual: got,
+                        expected: Box::new(expected.clone()),
+                        actual: Box::new(got),
                         span: e.span(),
                     })
                 }
@@ -402,8 +403,8 @@ impl Checker {
             Ok(expected.clone())
         } else {
             Err(ExprCheckError::Mismatch {
-                expected: expected.clone(),
-                actual: got,
+                expected: Box::new(expected.clone()),
+                actual: Box::new(got),
                 span: e.span(),
             })
         }

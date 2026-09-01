@@ -5,7 +5,7 @@
 
 use super::{
     ArmBody, BindingId, Body, CallTarget, CheckedProgram, Expr, ExprCategory, Item, MethodTarget,
-    Place, Stmt, StorageRelation, StrPart, ValueCategory,
+    Place, ReturnPass, Stmt, StorageRelation, StrPart, ValueCategory,
 };
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
@@ -129,7 +129,13 @@ fn push_stmt_children<'a>(
         Stmt::Expr { expr } => stack.push(Node::Expr(expr, false)),
         Stmt::Return { value } => {
             if let Some(value) = value {
-                stack.push(Node::Expr(value, false));
+                stack.push(Node::Expr(
+                    value,
+                    matches!(
+                        value.info().return_pass.as_deref(),
+                        Some(ReturnPass::BorrowValue { .. })
+                    ),
+                ));
             }
         }
         Stmt::If {
@@ -229,9 +235,14 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr, allow_borro
                             stack.push(Node::Stmt(stmt));
                         }
                     }
-                    ArmBody::Value(value) | ArmBody::Ret(value) => {
-                        stack.push(Node::Expr(value, false));
-                    }
+                    ArmBody::Value(value) => stack.push(Node::Expr(value, false)),
+                    ArmBody::Ret(value) => stack.push(Node::Expr(
+                        value,
+                        matches!(
+                            value.info().return_pass.as_deref(),
+                            Some(ReturnPass::BorrowValue { .. })
+                        ),
+                    )),
                 }
             }
             stack.push(Node::Expr(subject, false));
@@ -285,7 +296,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     {
                         return Err(error(
                             value.span(),
-                            "borrowed Place 的 return effect 尚未解析，不能逃逸当前函数",
+                            "borrowed alias return 的 generation forwarding 尚未解析",
                         ));
                     }
                     Stmt::For { iterable, .. }
@@ -316,6 +327,13 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         if relations.get(&source.root_binding_id())
                             != Some(&StorageRelation::Owning) =>
                     {
+                        if matches!(
+                            expr.info().return_pass.as_deref(),
+                            Some(ReturnPass::BorrowValue { .. })
+                        ) {
+                            push_expr_children(&mut stack, expr, allow_borrowed);
+                            continue;
+                        }
                         return Err(error(
                             expr.span(),
                             "borrow source 必须根植于 owning local Place",

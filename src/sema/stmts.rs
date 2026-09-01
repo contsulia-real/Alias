@@ -174,6 +174,7 @@ impl Checker {
                 ty: Ty::Func {
                     params: param_tys.clone(),
                     param_effects: None,
+                    return_effect: None,
                     ret: Box::new(ret_ty.clone()),
                 },
                 mutable: false,
@@ -235,6 +236,7 @@ impl Checker {
             Ty::Func {
                 params: param_tys,
                 param_effects: None,
+                return_effect: None,
                 ret: Box::new(inferred_ret),
             },
             param_ids,

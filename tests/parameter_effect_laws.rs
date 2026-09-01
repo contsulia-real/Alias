@@ -81,7 +81,7 @@ func i32 main = () -> return consume('x', 2)
 }
 
 #[test]
-fn borrowed_parameter_cannot_escape_before_return_effects_exist() {
+fn borrowed_return_rejects_a_temporary_argument() {
     let error = fail(
         r#"
 func string expose = (string value) -> return value
@@ -89,7 +89,7 @@ func i32 main = () -> return expose('x').len()
 "#,
     );
     assert!(
-        error.msg.contains("return source") && error.msg.contains("调用 loan"),
+        error.msg.contains("borrowed return") && error.msg.contains("temporary argument"),
         "{}",
         error.msg
     );

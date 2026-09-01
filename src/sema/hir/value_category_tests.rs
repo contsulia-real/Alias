@@ -68,13 +68,13 @@ fn resolved_hir_distinguishes_places_and_proven_owned_temporaries() {
     );
     assert_eq!(
         binding_value(stmts, "from_func").category(),
-        Some(ExprCategory::Value(ValueCategory::General)),
-        "动态函数返回必须等待 return effect，不能只按结果类型猜 owner"
+        Some(ExprCategory::Value(ValueCategory::OwnedTemporary)),
+        "Owned return effect 必须在 final HIR 固化 caller value category"
     );
     assert_eq!(
         binding_value(stmts, "from_func").ownership_capability(),
-        None,
-        "General Value 在 effect 分析前不能伪造 capability"
+        Some(OwnershipCapability::Available),
+        "Owned call result 在 caller 侧提供新的 ownership capability"
     );
     assert_eq!(
         binding_value(stmts, "from_local").category(),

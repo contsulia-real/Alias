@@ -98,6 +98,10 @@ pub(crate) fn display_typed<M: Module>(
         }
         VTy::Str => c.call_rt(bcx, "alias.display.str", &[w]),
         VTy::Unit => Err(native_err(span, "内部: unit 无返回值表达式进入 display")),
+        VTy::Borrowed(_) => Err(native_err(
+            span,
+            "内部: borrowed return ABI lane 不能作为语言值进入 display",
+        )),
         VTy::Func(..) | VTy::FuncPoly => c.call_rt(bcx, "alias.display.func", &[]),
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[]),
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),

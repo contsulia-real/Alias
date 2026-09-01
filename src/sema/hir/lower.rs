@@ -359,6 +359,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         ty: lower_info.ty,
         category: None,
         ownership_capability: None,
+        return_pass: None,
     };
 
     if let Some(callee_ty) = implicit_zero_callee {
@@ -378,6 +379,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             ty: callee_ty,
             category: None,
             ownership_capability: None,
+            return_pass: None,
         };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(
@@ -398,6 +400,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         return finalize_expr(Expr::Call {
             callee: Box::new(callee),
             args: Vec::new(),
+            result: None,
             target: CallTarget::FunctionValue,
             span: expr.span(),
             info,
@@ -515,6 +518,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                         .iter()
                         .map(|arg| lower_call_arg(arg, facts))
                         .collect::<AliasResult<Vec<_>>>()?,
+                    result: None,
                     target: lower_call_target(other, args, facts, *span)?,
                     span: *span,
                     info,
@@ -528,6 +532,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                     value: lower_expr(rhs, facts)?,
                     pass: None,
                 }],
+                result: None,
                 target: CallTarget::FunctionValue,
                 span: *span,
                 info,
@@ -543,6 +548,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                     recv: Box::new(lower_expr(lhs, facts)?),
                     receiver_pass: None,
                     args: Vec::new(),
+                    result: None,
                     target,
                     span: *span,
                     info,
@@ -564,6 +570,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
                 .iter()
                 .map(|arg| lower_call_arg(arg, facts))
                 .collect::<AliasResult<Vec<_>>>()?,
+            result: None,
             target: match call_target.take() {
                 Some(LowerCallTarget::Method(target)) => target,
                 _ => {
@@ -656,6 +663,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             ty,
             category: None,
             ownership_capability: None,
+            return_pass: None,
         },
     })
 }

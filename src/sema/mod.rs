@@ -92,6 +92,7 @@ impl MethodInfo {
                 receiver: receiver.clone(),
                 id: *id,
                 param_effects: None,
+                return_effect: None,
             }),
         }
     }
@@ -409,6 +410,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
                                     ty: Ty::Func {
                                         params: ptys,
                                         param_effects: None,
+                                        return_effect: None,
                                         ret: Box::new(ret),
                                     },
                                     mutable: false,

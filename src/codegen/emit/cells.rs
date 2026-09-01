@@ -123,6 +123,23 @@ pub(crate) fn emit_local_cell<M: Module>(
     Ok(var)
 }
 
+/// Materialize an unnamed owning cell for a temporary passed through a borrow parameter. The
+/// caller owns this storage for the call expression; the callee receives only its address. Keeping
+/// allocation/storage here prevents call emitters from duplicating cell layout rules.
+pub(crate) fn emit_temporary_cell<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    value: Value,
+    vty: &VTy,
+) -> AliasResult<Value> {
+    let (size, _) = size_align(vty);
+    let size = bcx.ins().iconst(types::I64, size as i64);
+    let cell = c.call_rt(bcx, "alias.cell.new", &[size])?;
+    let stored = norm_store(bcx, value, vty);
+    bcx.ins().store(MemFlagsData::new(), stored, cell, 0);
+    Ok(cell)
+}
+
 pub(crate) fn first_result(bcx: &FunctionBuilder, inst: cranelift_codegen::ir::Inst) -> Value {
     match bcx.inst_results(inst) {
         [v] => *v,

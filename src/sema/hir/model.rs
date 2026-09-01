@@ -1,11 +1,9 @@
 //! typed HIR data model. No name resolution or backend inference belongs here.
 
 pub use crate::ast::{BinOp, BindKind, CtorKind, Pattern};
-use crate::sema::types::{ParamEffect, Ty};
+pub(crate) use crate::sema::types::BindingId;
+use crate::sema::types::{ParamEffect, ReturnBorrowSource, ReturnEffect, Ty};
 use crate::Span;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct BindingId(pub(crate) u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MethodId(pub(crate) u32);
@@ -205,6 +203,34 @@ pub(crate) struct CallArg {
     pub(crate) pass: Option<ArgumentPass>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum CallResult {
+    Inline,
+    Owned,
+    Borrowed {
+        loan_id: LoanId,
+        source: Place,
+        source_writable: bool,
+        kind: Option<BorrowKind>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ReturnPass {
+    Inline,
+    OwnedValue,
+    OwnedTransfer {
+        source: Place,
+    },
+    BorrowPlace {
+        source: Place,
+        origin: ReturnBorrowSource,
+    },
+    BorrowValue {
+        origin: ReturnBorrowSource,
+    },
+}
+
 /// Caller-side execution contract resolved from the callee's frozen parameter effect. Borrow
 /// variants carry the canonical source Place and loan generation; codegen only evaluates `value`
 /// because the pass contract is a static ownership fact, not a second runtime calling convention.
@@ -281,6 +307,7 @@ pub(crate) enum MethodTarget {
         receiver: Ty,
         id: MethodId,
         param_effects: Option<Vec<ParamEffect>>,
+        return_effect: Option<ReturnEffect>,
     },
 }
 
@@ -354,6 +381,10 @@ pub(crate) struct ExprInfo {
     /// `Option::None` 表示该 Expr 当前没有可固化的 capability fact（例如 Place/General），
     /// 不是 `OwnershipCapability::None` 的别名，也不得被后端当作 fallback。
     pub(crate) ownership_capability: Option<OwnershipCapability>,
+    /// 只允许直接处于语言 return 位置的表达式携带；function-effect finalization 写回，
+    /// final gate 独立复算。这里和 call result 都必须保持 boxed：两者含完整 Place，若
+    /// 内嵌会膨胀每个 Expr，并让合法深度边界在 HIR 析构/发射时耗尽编译线程栈。
+    pub(crate) return_pass: Option<Box<ReturnPass>>,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +445,7 @@ pub(crate) enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<CallArg>,
+        result: Option<Box<CallResult>>,
         target: CallTarget,
         span: Span,
         info: ExprInfo,
@@ -422,6 +454,7 @@ pub(crate) enum Expr {
         recv: Box<Expr>,
         receiver_pass: Option<ArgumentPass>,
         args: Vec<CallArg>,
+        result: Option<Box<CallResult>>,
         target: MethodTarget,
         span: Span,
         info: ExprInfo,

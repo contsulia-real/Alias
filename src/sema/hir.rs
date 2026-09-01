@@ -33,6 +33,8 @@ mod parameter_effect_tests;
 #[cfg(test)]
 mod place_relation_tests;
 #[cfg(test)]
+mod return_effect_tests;
+#[cfg(test)]
 mod shallow_clone_tests;
 #[cfg(test)]
 mod storage_relation_tests;
@@ -45,10 +47,10 @@ mod value_category_tests;
 
 pub(crate) use model::{
     ArgumentPass, ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind,
-    BuiltinCall, CallArg, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr,
-    ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm, MethodId, MethodTarget,
-    OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, ShallowClonePlan,
-    Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
+    BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan,
+    Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm, MethodId, MethodTarget,
+    OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, ReturnPass,
+    ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -149,10 +151,13 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     // Stable identity must be closed before analyses recompute capture/free-use graphs. Otherwise a
     // duplicate BindingId can masquerade as capture drift and steal the diagnostic from its owner.
     binding_contract::validate(program)?;
+    // Local typed equations must close before function-effect recomputation consumes expression
+    // types. Otherwise corrupted operator/field/index facts can be misdiagnosed as return-source
+    // failures and make the effect owner reason over an invalid semantic graph.
+    typed_contract::validate(program)?;
+    validate::validate_resolved_hir(program)?;
     parameter_effects::validate(program)?;
     borrow_contract::validate(program)?;
     place_relation::validate(program)?;
-    ownership_flow::validate(program)?;
-    typed_contract::validate(program)?;
-    validate::validate_resolved_hir(program)
+    ownership_flow::validate(program)
 }

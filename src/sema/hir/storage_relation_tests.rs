@@ -40,8 +40,14 @@ fn resolved_hir_freezes_only_proven_owning_relations() {
         panic!("fixture main must use block body")
     };
 
-    assert_eq!(binding(stmts, "scalar").relation, Some(StorageRelation::Owning));
-    assert_eq!(binding(stmts, "fresh").relation, Some(StorageRelation::Owning));
+    assert_eq!(
+        binding(stmts, "scalar").relation,
+        Some(StorageRelation::Owning)
+    );
+    assert_eq!(
+        binding(stmts, "fresh").relation,
+        Some(StorageRelation::Owning)
+    );
     assert_eq!(
         binding(stmts, "scalar_copy").relation,
         Some(StorageRelation::Owning),
@@ -49,8 +55,8 @@ fn resolved_hir_freezes_only_proven_owning_relations() {
     );
     assert_eq!(
         binding(stmts, "from_func").relation,
-        None,
-        "动态函数返回必须等待 return effect"
+        Some(StorageRelation::Owning),
+        "Owned return effect 必须把 caller binding 固化为 owning slot"
     );
     assert_eq!(
         binding(stmts, "from_place").relation,

@@ -55,11 +55,28 @@ impl FloatW {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct BindingId(pub(crate) u32);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ParamEffect {
     ReadBorrow,
     WriteBorrow,
     Owned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ReturnBorrowSource {
+    Parameter(usize),
+    SelfValue,
+    Global(BindingId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ReturnEffect {
+    Inline,
+    Owned,
+    Borrowed(ReturnBorrowSource),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -75,6 +92,9 @@ pub(crate) enum Ty {
         /// check 阶段尚未拥有函数体 fixed-point 事实，因此为 None；parameter-effect
         /// finalization 必须在 final HIR 前写回完整、与 params 等长的向量。
         param_effects: Option<Vec<ParamEffect>>,
+        /// 与 parameter effects 同属完整 semantic signature；check 阶段尚未拥有函数体
+        /// return-source facts，final HIR 前必须写回唯一的 resolved effect。
+        return_effect: Option<ReturnEffect>,
         ret: Box<Ty>,
     },
     FuncPoly,

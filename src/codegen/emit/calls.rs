@@ -1,8 +1,9 @@
 use super::arrays::{array_len, array_raw, bump_array_version, make_iterator};
-use super::cells::{binding_storage_addr, first_result};
+use super::cells::{binding_storage_addr, emit_temporary_cell, first_result};
 use super::clone::emit_deep_clone;
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
+use super::places::emit_place_addr;
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
 use crate::codegen::abi::{
@@ -13,7 +14,9 @@ use crate::codegen::layout::{
     RESULT_WORDS,
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
-use crate::sema::hir::{BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget};
+use crate::sema::hir::{
+    ArgumentPass, BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget,
+};
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -78,8 +81,11 @@ fn call_closure<M: Module>(
 ) -> AliasResult<Value> {
     let mut words: Vec<Value> = Vec::with_capacity(args.len() + 2);
     for (a, pt) in args.iter().zip(param_vtys) {
-        let v = emit_expr(c, bcx, frame, &a.value)?;
-        words.push(norm_store(bcx, v, pt));
+        let pass = a
+            .pass
+            .as_ref()
+            .unwrap_or_else(|| invariant_violation("user call argument 缺少 resolved pass"));
+        words.push(emit_user_argument(c, bcx, frame, &a.value, pass, pt)?);
     }
     let code = bcx
         .ins()
@@ -99,6 +105,34 @@ fn call_closure<M: Module>(
     }
     let raw = first_result(bcx, inst);
     Ok(norm_load(bcx, raw, ret_vty))
+}
+
+fn emit_user_argument<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    value: &Expr,
+    pass: &ArgumentPass,
+    vty: &VTy,
+) -> AliasResult<Value> {
+    match pass {
+        ArgumentPass::Inline | ArgumentPass::Owned => {
+            let value = emit_expr(c, bcx, frame, value)?;
+            Ok(norm_store(bcx, value, vty))
+        }
+        ArgumentPass::ReadBorrow { source, .. } | ArgumentPass::WriteBorrow { source, .. } => {
+            let (address, source_vty) = emit_place_addr(c, bcx, frame, source)?;
+            if source_vty != *vty {
+                invariant_violation("borrow argument source ABI 与 parameter ABI 漂移")
+            }
+            Ok(address)
+        }
+        ArgumentPass::BorrowTemporary { kind } => {
+            let _ = kind;
+            let value = emit_expr(c, bcx, frame, value)?;
+            emit_temporary_cell(c, bcx, value, vty)
+        }
+    }
 }
 
 pub(crate) fn emit_construct<M: Module>(
@@ -157,13 +191,23 @@ pub(crate) fn emit_method_call<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    recv: &Expr,
+    receiver: (&Expr, Option<&ArgumentPass>),
     args: &[CallArg],
     target: &MethodTarget,
     span: Span,
 ) -> AliasResult<Value> {
-    let rv = emit_expr(c, bcx, frame, recv)?;
+    let (recv, receiver_pass) = receiver;
     let svt = c.vty(recv.ty());
+    let rv = if matches!(target, MethodTarget::User { .. }) {
+        let pass = receiver_pass
+            .unwrap_or_else(|| invariant_violation("user method receiver 缺少 resolved pass"));
+        emit_user_argument(c, bcx, frame, recv, pass, &svt)?
+    } else {
+        if receiver_pass.is_some() {
+            invariant_violation("builtin method receiver 携带 user pass")
+        }
+        emit_expr(c, bcx, frame, recv)?
+    };
 
     match target {
         MethodTarget::Numeric(op) => {
@@ -249,10 +293,12 @@ pub(crate) fn emit_method_call<M: Module>(
             let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
             words.push(bcx.use_var(frame.globals));
             words.push(bcx.ins().iconst(types::I64, 0));
-            words.push(norm_store(bcx, rv, &param_vtys[0]));
+            words.push(rv);
             for (arg, param) in args.iter().zip(param_vtys.iter().skip(1)) {
-                let value = emit_expr(c, bcx, frame, &arg.value)?;
-                words.push(norm_store(bcx, value, param));
+                let pass = arg.pass.as_ref().unwrap_or_else(|| {
+                    invariant_violation("user method argument 缺少 resolved pass")
+                });
+                words.push(emit_user_argument(c, bcx, frame, &arg.value, pass, param)?);
             }
             let inst = bcx.ins().call(fref, &words);
             if ret_vty == VTy::Unit {

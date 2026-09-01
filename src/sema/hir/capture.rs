@@ -1,6 +1,6 @@
 use super::{
     ArmBody, BindingId, Body, BorrowKind, Capture, CheckedProgram, Expr, Item, LoanId, MatchArm,
-    Place, PlaceInfo, Stmt, StrPart, ValueCategory,
+    Place, PlaceInfo, Stmt, StrPart,
 };
 use crate::sema::types::types_match;
 use crate::{AliasError, AliasResult, Span};
@@ -144,73 +144,6 @@ pub(super) fn infer_loan_kinds(
         }
     }
     Ok(kinds)
-}
-
-fn expr_uses_capture(expr: &Expr, captures: &HashSet<BindingId>) -> bool {
-    let mut stack = vec![Node::Expr(expr)];
-    while let Some(node) = stack.pop() {
-        match node {
-            Node::ExitFunc(_) => {}
-            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
-            Node::Expr(expr) => {
-                match expr {
-                    Expr::Ident(_, Some(id), ..) if captures.contains(id) => return true,
-                    Expr::ReadPlace { source, .. }
-                    | Expr::Borrow { source, .. }
-                    | Expr::Move { source, .. }
-                        if captures.contains(&source.root_binding_id()) =>
-                    {
-                        return true;
-                    }
-                    // A nested closure owns a separate capture contract. Counting its body here
-                    // would turn a deferred use into an immediate call/return effect.
-                    Expr::FuncLit { .. } => continue,
-                    _ => {}
-                }
-                push_expr_children(&mut stack, expr);
-            }
-        }
-    }
-    false
-}
-
-pub(super) fn validate_effect_boundaries(program: &CheckedProgram) -> AliasResult<()> {
-    let functions = function_preorder(program);
-    for function in functions {
-        let Expr::FuncLit { captures, body, .. } = function else {
-            return Err(capture_invariant("effect boundary 入口不是 FuncLit"));
-        };
-        let capture_ids: HashSet<BindingId> =
-            captures.iter().map(|capture| capture.binding_id).collect();
-        if capture_ids.is_empty() {
-            continue;
-        }
-        let mut stack = Vec::new();
-        push_body(&mut stack, body);
-        while let Some(node) = stack.pop() {
-            match node {
-                Node::ExitFunc(_) => {}
-                Node::Stmt(Stmt::Return { value: Some(value) })
-                    if super::value_categories::type_carries_dynamic_owner(value.ty())
-                        && value.value_category() != Some(ValueCategory::OwnedTemporary)
-                        && expr_uses_capture(value, &capture_ids) =>
-                {
-                    return Err(AliasError {
-                        msg: "captured dynamic value 的 return effect 尚未固化".into(),
-                        span: value.span(),
-                    });
-                }
-                Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
-                Node::Expr(expr) => {
-                    if matches!(expr, Expr::FuncLit { .. }) {
-                        continue;
-                    }
-                    push_expr_children(&mut stack, expr);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn function_preorder(program: &CheckedProgram) -> Vec<&Expr> {

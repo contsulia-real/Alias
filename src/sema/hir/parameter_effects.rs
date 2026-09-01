@@ -1,23 +1,35 @@
-//! Function parameter-effect inference and caller-side argument planning.
+//! Function parameter/return-effect inference and caller-side call planning.
 //!
 //! `Ty::Func` is the canonical semantic signature owner. The checker can only construct its
 //! type-only shape, so this pass solves body/call dependencies after complete HIR exists, then
-//! writes the same frozen effects into function types, HIR parameters, user-method targets, and
-//! call argument plans. Ownership flow consumes those plans; codegen never re-infers an effect.
+//! writes the same frozen effects into function types, HIR parameters, user-method targets,
+//! argument/result plans, and return passes. Ownership flow consumes those plans; codegen never
+//! re-infers an effect.
 
 use super::{
-    ArgumentPass, ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallTarget,
-    CheckedProgram, Expr, FunctionId, Item, MethodId, MethodTarget, OwnershipCapability, Place,
-    ResolvedConversion, Stmt, StorageRelation, StrPart, ValueCategory,
+    ArgumentPass, ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallResult,
+    CallTarget, CheckedProgram, Expr, ExprCategory, FunctionId, Item, LoanId, MethodId,
+    MethodTarget, OwnershipCapability, Place, PlaceInfo, ResolvedConversion, ReturnPass, Stmt,
+    StorageRelation, StrPart, ValueCategory,
 };
-use crate::sema::types::{ParamEffect, Ty};
+use crate::sema::types::{ParamEffect, ReturnBorrowSource, ReturnEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct FunctionMeta {
     parameter_ids: Vec<BindingId>,
+    implicit_count: usize,
     parameter_types: Vec<Ty>,
+    self_id: Option<BindingId>,
+    capture_ids: HashSet<BindingId>,
+    span: Span,
+}
+
+#[derive(Clone)]
+struct BindingMeta {
+    ty: Ty,
+    mutable: bool,
     span: Span,
 }
 
@@ -29,6 +41,9 @@ struct ProgramFacts<'a> {
     function_bindings: HashMap<BindingId, FunctionId>,
     method_functions: HashMap<MethodId, FunctionId>,
     borrowed_bindings: HashSet<BindingId>,
+    global_bindings: HashSet<BindingId>,
+    binding_meta: HashMap<BindingId, BindingMeta>,
+    struct_fields: HashMap<String, Vec<bool>>,
 }
 
 enum Node<'a> {
@@ -80,12 +95,22 @@ fn collect_facts(program: &CheckedProgram) -> AliasResult<ProgramFacts<'_>> {
         function_bindings: HashMap::new(),
         method_functions: HashMap::new(),
         borrowed_bindings: HashSet::new(),
+        global_bindings: HashSet::new(),
+        binding_meta: HashMap::new(),
+        struct_fields: HashMap::new(),
     };
     let mut stack = Vec::new();
     for item in program.items.iter().rev() {
         match item {
-            Item::Binding(binding) => stack.push(Node::Binding(binding)),
+            Item::Binding(binding) => {
+                facts.global_bindings.insert(binding.binding_id);
+                stack.push(Node::Binding(binding));
+            }
             Item::StructDef(def) => {
+                facts.struct_fields.insert(
+                    def.name.clone(),
+                    def.fields.iter().map(|field| field.mutable).collect(),
+                );
                 for field in def.fields.iter().rev() {
                     if let Some(default) = &field.default {
                         stack.push(Node::Expr(default));
@@ -108,6 +133,14 @@ fn collect_facts(program: &CheckedProgram) -> AliasResult<ProgramFacts<'_>> {
                         "parameter effect 遇到重复 BindingId",
                     ));
                 }
+                facts.binding_meta.insert(
+                    binding.binding_id,
+                    BindingMeta {
+                        ty: binding.ty.clone(),
+                        mutable: binding.kind == super::BindKind::Var,
+                        span: binding.span,
+                    },
+                );
                 if binding.relation == Some(StorageRelation::Borrowed) {
                     facts.borrowed_bindings.insert(binding.binding_id);
                 }
@@ -127,6 +160,7 @@ fn collect_facts(program: &CheckedProgram) -> AliasResult<ProgramFacts<'_>> {
                     function_id,
                     params,
                     implicit_bindings,
+                    captures,
                     body,
                     ..
                 } = expr
@@ -149,12 +183,28 @@ fn collect_facts(program: &CheckedProgram) -> AliasResult<ProgramFacts<'_>> {
                     if facts.functions.insert(*function_id, expr).is_some() {
                         return Err(invariant(expr.span(), "FunctionId 重复"));
                     }
+                    for (binding_id, ty) in parameter_ids.iter().zip(parameter_types) {
+                        facts
+                            .binding_meta
+                            .entry(*binding_id)
+                            .or_insert(BindingMeta {
+                                ty: ty.clone(),
+                                mutable: false,
+                                span: expr.span(),
+                            });
+                    }
                     facts.function_order.push(*function_id);
                     facts.function_meta.insert(
                         *function_id,
                         FunctionMeta {
                             parameter_ids,
+                            implicit_count: implicit_bindings.len(),
                             parameter_types: parameter_types.clone(),
+                            self_id: implicit_bindings.first().copied(),
+                            capture_ids: captures
+                                .iter()
+                                .map(|capture| capture.binding_id)
+                                .collect(),
                             span: expr.span(),
                         },
                     );
@@ -661,7 +711,8 @@ fn expression_effect_map(
             }
             ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
             ScopedNode::Expr(expr, current) => {
-                if matches!(expr.ty(), Ty::Func { .. }) {
+                if matches!(expr.ty(), Ty::Func { .. }) && !matches!(expr, Expr::Ident(_, None, ..))
+                {
                     let resolved =
                         resolve_expr_effects(expr, current, facts, binding_effects, effects, true)?;
                     if let Some(resolved) = resolved {
@@ -669,6 +720,65 @@ fn expression_effect_map(
                     } else if !matches!(expr, Expr::Ident(_, None, ..)) {
                         return Err(invariant(expr.span(), "函数值表达式 effects 无法唯一解析"));
                     }
+                }
+                push_scoped_expr(&mut stack, expr, current);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn expression_return_effect_map(
+    program: &CheckedProgram,
+    facts: &ProgramFacts<'_>,
+    effects: &HashMap<FunctionId, ReturnEffect>,
+) -> AliasResult<HashMap<usize, ReturnEffect>> {
+    let mut result = HashMap::new();
+    let mut stack = Vec::new();
+    for item in program.items.iter().rev() {
+        match item {
+            Item::Binding(binding) => stack.push(ScopedNode::Binding(binding, None)),
+            Item::StructDef(def) => {
+                for field in def.fields.iter().rev() {
+                    if let Some(default) = &field.default {
+                        stack.push(ScopedNode::Expr(default, None));
+                    }
+                }
+            }
+        }
+    }
+    while let Some(node) = stack.pop() {
+        match node {
+            ScopedNode::Binding(binding, current) => {
+                stack.push(ScopedNode::Expr(&binding.value, current));
+            }
+            ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
+            ScopedNode::Expr(expr, current) => {
+                if matches!(expr.ty(), Ty::Func { .. }) && !matches!(expr, Expr::Ident(_, None, ..))
+                {
+                    let ids = resolve_expr_function_ids(expr, current, facts)?;
+                    let mut resolved = None;
+                    for id in ids {
+                        let candidate = effects.get(&id).copied().ok_or_else(|| {
+                            invariant(expr.span(), "function expression 缺少 return effect")
+                        })?;
+                        if let Some(existing) = resolved {
+                            if existing != candidate {
+                                return Err(AliasError {
+                                    msg: "函数值分支的 return effect / borrow source 不一致".into(),
+                                    span: expr.span(),
+                                });
+                            }
+                        } else {
+                            resolved = Some(candidate);
+                        }
+                    }
+                    result.insert(
+                        expr as *const Expr as usize,
+                        resolved.ok_or_else(|| {
+                            invariant(expr.span(), "function expression return effect 为空")
+                        })?,
+                    );
                 }
                 push_scoped_expr(&mut stack, expr, current);
             }
@@ -693,11 +803,22 @@ fn set_function_effects(ty: &mut Ty, effects: &[ParamEffect], span: Span) -> Ali
     Ok(())
 }
 
+fn set_return_effect(ty: &mut Ty, effect: ReturnEffect, span: Span) -> AliasResult<()> {
+    let Ty::Func { return_effect, .. } = ty else {
+        return Err(invariant(span, "return effect fact 写入非函数类型"));
+    };
+    *return_effect = Some(effect);
+    Ok(())
+}
+
 fn apply_signatures(
     program: &mut CheckedProgram,
     effects: &HashMap<FunctionId, Vec<ParamEffect>>,
+    return_effects: &HashMap<FunctionId, ReturnEffect>,
     binding_effects: &HashMap<BindingId, Vec<ParamEffect>>,
+    binding_return_effects: &HashMap<BindingId, ReturnEffect>,
     expr_effects: &HashMap<usize, Vec<ParamEffect>>,
+    expr_return_effects: &HashMap<usize, ReturnEffect>,
 ) -> AliasResult<()> {
     let mut stack = root_mut_nodes(program);
     while let Some(node) = stack.pop() {
@@ -705,6 +826,9 @@ fn apply_signatures(
             MutNode::Binding(binding) => {
                 if let Some(resolved) = binding_effects.get(&binding.binding_id) {
                     set_function_effects(&mut binding.ty, resolved, binding.span)?;
+                    if let Some(effect) = binding_return_effects.get(&binding.binding_id).copied() {
+                        set_return_effect(&mut binding.ty, effect, binding.span)?;
+                    }
                 }
                 stack.push(MutNode::Expr(&mut binding.value));
             }
@@ -714,6 +838,9 @@ fn apply_signatures(
                 let expr_span = expr.span();
                 if let Some(resolved) = expr_effects.get(&key) {
                     set_function_effects(&mut expr.info_mut().ty, resolved, expr_span)?;
+                }
+                if let Some(effect) = expr_return_effects.get(&key).copied() {
+                    set_return_effect(&mut expr.info_mut().ty, effect, expr_span)?;
                 }
                 if let Expr::FuncLit {
                     function_id,
@@ -733,6 +860,11 @@ fn apply_signatures(
                     {
                         param.effect = Some(*effect);
                     }
+                    let return_effect = return_effects
+                        .get(function_id)
+                        .copied()
+                        .ok_or_else(|| invariant(expr_span, "FuncLit 缺少 final return effect"))?;
+                    set_return_effect(&mut expr.info_mut().ty, return_effect, expr_span)?;
                 }
                 push_mut_expr(&mut stack, expr);
             }
@@ -741,110 +873,542 @@ fn apply_signatures(
     Ok(())
 }
 
-fn expr_uses_any_binding(expr: &Expr, bindings: &HashSet<BindingId>) -> bool {
-    let mut stack = vec![Node::Expr(expr)];
-    while let Some(node) = stack.pop() {
-        match node {
-            Node::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
-            Node::Expr(expr) => match expr {
-                Expr::Ident(_, Some(binding_id), ..) if bindings.contains(binding_id) => {
-                    return true;
-                }
-                Expr::ReadPlace { source, .. }
-                | Expr::Borrow { source, .. }
-                | Expr::Move { source, .. }
-                    if bindings.contains(&source.root_binding_id()) =>
-                {
-                    return true;
-                }
-                _ => push_expr_children(&mut stack, expr),
-            },
-        }
-    }
-    false
+#[derive(Clone)]
+enum ReturnDraft {
+    Inline,
+    OwnedValue,
+    OwnedTransfer(Place),
+    BorrowPlace(Place, ReturnBorrowSource),
+    BorrowValue(ReturnBorrowSource),
 }
 
-fn validate_parameter_return_value(
-    value: &Expr,
-    borrowed_parameters: &HashSet<BindingId>,
-) -> AliasResult<()> {
-    if !dynamic_owner(value.ty())
-        || (value.value_category() == Some(ValueCategory::OwnedTemporary)
-            && value.ownership_capability() == Some(OwnershipCapability::Available))
-        || !expr_uses_any_binding(value, borrowed_parameters)
-    {
-        return Ok(());
+impl ReturnDraft {
+    fn effect(&self) -> ReturnEffect {
+        match self {
+            Self::Inline => ReturnEffect::Inline,
+            Self::OwnedValue | Self::OwnedTransfer(_) => ReturnEffect::Owned,
+            Self::BorrowPlace(_, source) | Self::BorrowValue(source) => {
+                ReturnEffect::Borrowed(*source)
+            }
+        }
     }
-    Err(AliasError {
-        msg: "borrow parameter 的 return source 尚未固化，不能逃逸当前调用 loan".into(),
-        span: value.span(),
+
+    fn into_pass(self) -> ReturnPass {
+        match self {
+            Self::Inline => ReturnPass::Inline,
+            Self::OwnedValue => ReturnPass::OwnedValue,
+            Self::OwnedTransfer(source) => ReturnPass::OwnedTransfer { source },
+            Self::BorrowPlace(source, origin) => ReturnPass::BorrowPlace { source, origin },
+            Self::BorrowValue(origin) => ReturnPass::BorrowValue { origin },
+        }
+    }
+}
+
+fn place_origin(
+    place: &Place,
+    function_id: FunctionId,
+    facts: &ProgramFacts<'_>,
+) -> AliasResult<Option<ReturnBorrowSource>> {
+    let root = place.root_binding_id();
+    let meta = &facts.function_meta[&function_id];
+    if meta.self_id == Some(root) {
+        return Ok(Some(ReturnBorrowSource::SelfValue));
+    }
+    if let Some(index) = meta.parameter_ids[meta.implicit_count..]
+        .iter()
+        .position(|id| *id == root)
+    {
+        return Ok(Some(ReturnBorrowSource::Parameter(index)));
+    }
+    if facts.global_bindings.contains(&root) {
+        return Ok(Some(ReturnBorrowSource::Global(root)));
+    }
+    Ok(None)
+}
+
+fn validate_borrow_return_origin(
+    origin: ReturnBorrowSource,
+    function_id: FunctionId,
+    facts: &ProgramFacts<'_>,
+    span: Span,
+) -> AliasResult<()> {
+    let meta = &facts.function_meta[&function_id];
+    let source_ty = match origin {
+        ReturnBorrowSource::Parameter(index) => meta
+            .parameter_types
+            .get(meta.implicit_count + index)
+            .ok_or_else(|| invariant(span, "borrowed return Parameter index 越界"))?,
+        ReturnBorrowSource::SelfValue => meta
+            .parameter_types
+            .first()
+            .ok_or_else(|| invariant(span, "borrowed return Self 缺少 receiver type"))?,
+        ReturnBorrowSource::Global(_) => return Ok(()),
+    };
+    if !dynamic_owner(source_ty) {
+        return Err(AliasError {
+            msg: "InlineValue parameter/self 按值传递，不能作为 borrowed return source".into(),
+            span,
+        });
+    }
+    Ok(())
+}
+
+fn return_source_from_pass(pass: &ArgumentPass, span: Span) -> AliasResult<Option<Place>> {
+    match pass {
+        ArgumentPass::ReadBorrow { source, .. } | ArgumentPass::WriteBorrow { source, .. } => {
+            Ok(Some(source.clone()))
+        }
+        ArgumentPass::BorrowTemporary { .. } => Err(AliasError {
+            msg: "borrowed return 不能依赖只活到调用结束的 temporary argument".into(),
+            span,
+        }),
+        ArgumentPass::Owned => Err(AliasError {
+            msg: "borrowed return source 不能来自已经 transfer 给 callee 的 Owned argument".into(),
+            span,
+        }),
+        ArgumentPass::Inline => Err(invariant(
+            span,
+            "borrowed return source 指向 inline argument",
+        )),
+    }
+}
+
+fn global_place(binding_id: BindingId, facts: &ProgramFacts<'_>) -> AliasResult<Place> {
+    let meta = facts.binding_meta.get(&binding_id).ok_or_else(|| {
+        invariant(
+            Span::default(),
+            "borrowed global source 缺少 Binding metadata",
+        )
+    })?;
+    Ok(Place::Local {
+        binding_id,
+        info: PlaceInfo {
+            ty: meta.ty.clone(),
+            span: meta.span,
+        },
     })
 }
 
-fn validate_parameter_return_boundaries(
+fn map_call_borrow_source(
+    source: ReturnBorrowSource,
+    receiver: Option<(&Expr, &ArgumentPass)>,
+    args: &[CallArg],
+    function_id: FunctionId,
     facts: &ProgramFacts<'_>,
-    effects: &HashMap<FunctionId, Vec<ParamEffect>>,
-) -> AliasResult<()> {
-    for function_id in &facts.function_order {
-        let function = facts.functions[function_id];
-        let Expr::FuncLit { body, .. } = function else {
-            return Err(invariant(function.span(), "FunctionId 指向非 FuncLit"));
-        };
-        let meta = &facts.function_meta[function_id];
-        let resolved = effects
-            .get(function_id)
-            .ok_or_else(|| invariant(function.span(), "return boundary 缺少 parameter effects"))?;
-        if meta.parameter_ids.len() != resolved.len() {
-            return Err(invariant(
-                function.span(),
-                "return boundary parameter effect 数量漂移",
-            ));
+    span: Span,
+) -> AliasResult<(Place, Option<ReturnBorrowSource>)> {
+    let place = match source {
+        ReturnBorrowSource::SelfValue => {
+            let Some((_, pass)) = receiver else {
+                return Err(invariant(span, "Self borrowed return 出现在非方法调用"));
+            };
+            return_source_from_pass(pass, span)?
+                .ok_or_else(|| invariant(span, "Self borrowed return 缺少 stable receiver Place"))?
         }
-        let borrowed_parameters: HashSet<_> = meta
-            .parameter_ids
-            .iter()
-            .zip(resolved)
-            .filter_map(|(id, effect)| (*effect != ParamEffect::Owned).then_some(*id))
-            .collect();
-        if borrowed_parameters.is_empty() {
-            continue;
+        ReturnBorrowSource::Parameter(index) => {
+            let arg = args.get(index).ok_or_else(|| {
+                invariant(span, "borrowed return Parameter index 超出 caller arity")
+            })?;
+            let pass = arg
+                .pass
+                .as_ref()
+                .ok_or_else(|| invariant(span, "borrowed return argument 缺少 pass fact"))?;
+            return_source_from_pass(pass, arg.value.span())?.ok_or_else(|| {
+                invariant(span, "borrowed return argument 缺少 stable source Place")
+            })?
         }
+        ReturnBorrowSource::Global(binding_id) => global_place(binding_id, facts)?,
+    };
+    let origin = place_origin(&place, function_id, facts)?;
+    Ok((place, origin))
+}
 
-        let mut stack = Vec::new();
-        push_body(&mut stack, body);
-        while let Some(node) = stack.pop() {
-            match node {
-                Node::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-                Node::Stmt(stmt) => {
-                    if let Stmt::Return { value: Some(value) } = stmt {
-                        validate_parameter_return_value(value, &borrowed_parameters)?;
+fn resolve_expr_function_ids(
+    expr: &Expr,
+    current_function: Option<FunctionId>,
+    facts: &ProgramFacts<'_>,
+) -> AliasResult<Vec<FunctionId>> {
+    let mut stack = vec![expr];
+    let mut visited_bindings = HashSet::new();
+    let mut ids = Vec::new();
+    while let Some(expr) = stack.pop() {
+        match expr {
+            Expr::FuncLit { function_id, .. } => ids.push(*function_id),
+            Expr::Ident(_, Some(binding_id), ..) => {
+                if let Some(function_id) = facts.function_bindings.get(binding_id) {
+                    ids.push(*function_id);
+                } else if visited_bindings.insert(*binding_id) {
+                    if let Some(value) = facts.binding_values.get(binding_id) {
+                        stack.push(value);
                     }
-                    push_stmt_children(&mut stack, stmt);
                 }
-                Node::Expr(Expr::FuncLit { .. }) => {
-                    // Nested returns belong to the nested FunctionId and are checked separately.
-                }
-                Node::Expr(Expr::Match { subject, arms, .. }) => {
-                    stack.push(Node::Expr(subject));
-                    for arm in arms.iter().rev() {
-                        match &arm.body {
-                            ArmBody::Block(stmts) => {
-                                for stmt in stmts.iter().rev() {
-                                    stack.push(Node::Stmt(stmt));
-                                }
-                            }
-                            ArmBody::Value(value) => stack.push(Node::Expr(value)),
-                            ArmBody::Ret(value) => {
-                                validate_parameter_return_value(value, &borrowed_parameters)?;
-                                stack.push(Node::Expr(value));
-                            }
+            }
+            Expr::This(..) => ids.push(current_function.ok_or_else(|| {
+                invariant(expr.span(), "top-level function expression 不能解析 this")
+            })?),
+            Expr::Convert {
+                expr,
+                mode: ResolvedConversion::Identity,
+                ..
+            } => stack.push(expr),
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                stack.push(else_expr);
+                stack.push(then_expr);
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    match &arm.body {
+                        ArmBody::Value(value) => stack.push(value),
+                        ArmBody::Block(_) | ArmBody::Ret(_) => {
+                            return Err(invariant(
+                                expr.span(),
+                                "函数值 match branch 无法解析 return effect",
+                            ));
                         }
                     }
                 }
-                Node::Expr(expr) => push_expr_children(&mut stack, expr),
+            }
+            _ => {
+                return Err(invariant(
+                    expr.span(),
+                    "FunctionValue callee 无法恢复 FunctionId",
+                ));
             }
         }
+    }
+    ids.sort_unstable_by_key(|id| id.0);
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(invariant(expr.span(), "函数值表达式没有可解析 FunctionId"));
+    }
+    Ok(ids)
+}
+
+fn resolved_callee_return_effect(
+    callee: &Expr,
+    current_function: Option<FunctionId>,
+    facts: &ProgramFacts<'_>,
+    effects: &HashMap<FunctionId, ReturnEffect>,
+) -> AliasResult<Option<ReturnEffect>> {
+    let ids = resolve_expr_function_ids(callee, current_function, facts)?;
+    let mut merged = None;
+    for id in ids {
+        let Some(candidate) = effects.get(&id).copied() else {
+            return Ok(None);
+        };
+        if let Some(existing) = merged {
+            if existing != candidate {
+                return Err(AliasError {
+                    msg: "函数值分支的 return effect / borrow source 不一致".into(),
+                    span: callee.span(),
+                });
+            }
+        } else {
+            merged = Some(candidate);
+        }
+    }
+    Ok(merged)
+}
+
+fn classify_return_expr(
+    value: &Expr,
+    function_id: FunctionId,
+    parameter_effects: &HashMap<FunctionId, Vec<ParamEffect>>,
+    return_effects: &HashMap<FunctionId, ReturnEffect>,
+    facts: &ProgramFacts<'_>,
+) -> AliasResult<Option<ReturnDraft>> {
+    match value {
+        Expr::Move { .. } if !dynamic_owner(value.ty()) => Ok(Some(ReturnDraft::Inline)),
+        Expr::Move { .. } => Ok(Some(ReturnDraft::OwnedValue)),
+        Expr::Borrow { source, .. } => {
+            let origin = place_origin(source, function_id, facts)?.ok_or_else(|| AliasError {
+                msg: "borrowed return 只能依赖当前函数 parameter、self 或 global source".into(),
+                span: value.span(),
+            })?;
+            validate_borrow_return_origin(origin, function_id, facts, value.span())?;
+            Ok(Some(ReturnDraft::BorrowValue(origin)))
+        }
+        Expr::Call {
+            callee,
+            args,
+            target: CallTarget::FunctionValue,
+            ..
+        } => {
+            let Some(effect) =
+                resolved_callee_return_effect(callee, Some(function_id), facts, return_effects)?
+            else {
+                return Ok(None);
+            };
+            match effect {
+                ReturnEffect::Inline => Ok(Some(ReturnDraft::Inline)),
+                ReturnEffect::Owned => Ok(Some(ReturnDraft::OwnedValue)),
+                ReturnEffect::Borrowed(source) => {
+                    let (_, origin) = map_call_borrow_source(
+                        source,
+                        None,
+                        args,
+                        function_id,
+                        facts,
+                        value.span(),
+                    )?;
+                    let origin = origin.ok_or_else(|| AliasError {
+                        msg: "borrowed return 只能依赖当前函数 parameter、self 或 global source"
+                            .into(),
+                        span: value.span(),
+                    })?;
+                    Ok(Some(ReturnDraft::BorrowValue(origin)))
+                }
+            }
+        }
+        Expr::MethodCall {
+            recv,
+            receiver_pass,
+            args,
+            target: MethodTarget::User { id, .. },
+            ..
+        } => {
+            let callee_id = *facts.method_functions.get(id).ok_or_else(|| {
+                invariant(value.span(), "user method return effect 缺少 FunctionId")
+            })?;
+            let Some(effect) = return_effects.get(&callee_id).copied() else {
+                return Ok(None);
+            };
+            match effect {
+                ReturnEffect::Inline => Ok(Some(ReturnDraft::Inline)),
+                ReturnEffect::Owned => Ok(Some(ReturnDraft::OwnedValue)),
+                ReturnEffect::Borrowed(source) => {
+                    let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
+                        invariant(value.span(), "user method receiver 缺少 pass fact")
+                    })?;
+                    let (_, origin) = map_call_borrow_source(
+                        source,
+                        Some((recv, receiver_pass)),
+                        args,
+                        function_id,
+                        facts,
+                        value.span(),
+                    )?;
+                    let origin = origin.ok_or_else(|| AliasError {
+                        msg: "borrowed return 只能依赖当前函数 parameter、self 或 global source"
+                            .into(),
+                        span: value.span(),
+                    })?;
+                    Ok(Some(ReturnDraft::BorrowValue(origin)))
+                }
+            }
+        }
+        Expr::Convert {
+            expr,
+            mode: ResolvedConversion::Identity,
+            ..
+        } => classify_return_expr(expr, function_id, parameter_effects, return_effects, facts),
+        _ if !dynamic_owner(value.ty()) => Ok(Some(ReturnDraft::Inline)),
+        _ if value.value_category() == Some(ValueCategory::OwnedTemporary)
+            && value.ownership_capability() == Some(OwnershipCapability::Available) =>
+        {
+            Ok(Some(ReturnDraft::OwnedValue))
+        }
+        _ => {
+            let Some(place) = super::expr_places::from_expr(value) else {
+                return Err(AliasError {
+                    msg: "dynamic return value 缺少可证明的 ownership / borrow source".into(),
+                    span: value.span(),
+                });
+            };
+            let root = place.root_binding_id();
+            if facts.borrowed_bindings.contains(&root) {
+                return Err(AliasError {
+                    msg: "borrowed alias return 的 generation forwarding 尚不能唯一固化".into(),
+                    span: value.span(),
+                });
+            }
+            if let Some(origin) = place_origin(&place, function_id, facts)? {
+                if let Some(index) = facts.function_meta[&function_id]
+                    .parameter_ids
+                    .iter()
+                    .position(|id| *id == root)
+                {
+                    let effects = &parameter_effects[&function_id];
+                    if effects[index] == ParamEffect::Owned {
+                        if !matches!(place, Place::Local { .. }) {
+                            return Err(AliasError {
+                                msg: "owned return 不能隐式 partial-move parameter projection"
+                                    .into(),
+                                span: value.span(),
+                            });
+                        }
+                        return Ok(Some(ReturnDraft::OwnedTransfer(place)));
+                    }
+                }
+                return Ok(Some(ReturnDraft::BorrowPlace(place, origin)));
+            }
+            if facts.function_meta[&function_id]
+                .capture_ids
+                .contains(&root)
+            {
+                return Err(AliasError {
+                    msg: "captured dynamic value 不能形成可返回的 ownership/borrow source；return effect 无法固化".into(),
+                    span: value.span(),
+                });
+            }
+            if matches!(place, Place::Local { .. }) {
+                Ok(Some(ReturnDraft::OwnedTransfer(place)))
+            } else {
+                Err(AliasError {
+                    msg: "owned return 不能隐式 partial-move local projection".into(),
+                    span: value.span(),
+                })
+            }
+        }
+    }
+}
+
+fn function_return_values(function: &Expr) -> AliasResult<Vec<&Expr>> {
+    let Expr::FuncLit { body, .. } = function else {
+        return Err(invariant(function.span(), "return effect 入口不是 FuncLit"));
+    };
+    let mut values = Vec::new();
+    let mut stack = Vec::new();
+    push_body(&mut stack, body);
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Binding(binding) => stack.push(Node::Expr(&binding.value)),
+            Node::Stmt(Stmt::Return { value: Some(value) }) => {
+                values.push(value);
+            }
+            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
+            Node::Expr(Expr::FuncLit { .. }) => {}
+            Node::Expr(Expr::Match { subject, arms, .. }) => {
+                stack.push(Node::Expr(subject));
+                for arm in arms.iter().rev() {
+                    match &arm.body {
+                        ArmBody::Block(stmts) => {
+                            for stmt in stmts.iter().rev() {
+                                stack.push(Node::Stmt(stmt));
+                            }
+                        }
+                        ArmBody::Value(value) => stack.push(Node::Expr(value)),
+                        ArmBody::Ret(value) => values.push(value),
+                    }
+                }
+            }
+            Node::Expr(expr) => push_expr_children(&mut stack, expr),
+        }
+    }
+    Ok(values)
+}
+
+fn infer_return_effects(
+    facts: &ProgramFacts<'_>,
+    parameter_effects: &HashMap<FunctionId, Vec<ParamEffect>>,
+) -> AliasResult<HashMap<FunctionId, ReturnEffect>> {
+    let mut effects = HashMap::new();
+    for function_id in &facts.function_order {
+        let meta = &facts.function_meta[function_id];
+        let Ty::Func { ret, .. } = facts.functions[function_id].ty() else {
+            return Err(invariant(
+                meta.span,
+                "return effect function 缺少 Func type",
+            ));
+        };
+        if **ret == Ty::Unit {
+            effects.insert(*function_id, ReturnEffect::Inline);
+        }
+    }
+    let max_iterations = facts.function_order.len().saturating_add(1);
+    for _ in 0..max_iterations {
+        let mut changed = false;
+        for function_id in &facts.function_order {
+            let function = facts.functions[function_id];
+            let values = function_return_values(function)?;
+            let mut inferred = None;
+            for value in values {
+                let Some(draft) =
+                    classify_return_expr(value, *function_id, parameter_effects, &effects, facts)?
+                else {
+                    continue;
+                };
+                let candidate = draft.effect();
+                if let Some(existing) = inferred {
+                    if existing != candidate {
+                        return Err(AliasError {
+                            msg: "同一函数的 return effect 或 borrowed source 不一致".into(),
+                            span: value.span(),
+                        });
+                    }
+                } else {
+                    inferred = Some(candidate);
+                }
+            }
+            if let Some(effect) = inferred {
+                if let Some(existing) = effects.get(function_id) {
+                    if *existing != effect {
+                        return Err(AliasError {
+                            msg: "递归 return effect 收敛到不一致结果".into(),
+                            span: function.span(),
+                        });
+                    }
+                } else {
+                    effects.insert(*function_id, effect);
+                    changed = true;
+                }
+            }
+        }
+        if effects.len() == facts.function_order.len() {
+            for function_id in &facts.function_order {
+                for value in function_return_values(facts.functions[function_id])? {
+                    let draft = classify_return_expr(
+                        value,
+                        *function_id,
+                        parameter_effects,
+                        &effects,
+                        facts,
+                    )?
+                    .ok_or_else(|| invariant(value.span(), "收敛后 return dependency 仍未解析"))?;
+                    if draft.effect() != effects[function_id] {
+                        return Err(AliasError {
+                            msg: "同一函数的 return effect 或 borrowed source 不一致".into(),
+                            span: value.span(),
+                        });
+                    }
+                }
+            }
+            return Ok(effects);
+        }
+        if !changed {
+            break;
+        }
+    }
+    let unresolved = facts
+        .function_order
+        .iter()
+        .find(|id| !effects.contains_key(id))
+        .copied()
+        .ok_or_else(|| invariant(Span::default(), "return effect unresolved set 漂移"))?;
+    Err(AliasError {
+        msg: "递归 return effect 无法得到唯一安全解".into(),
+        span: facts.function_meta[&unresolved].span,
+    })
+}
+
+fn validate_main_return_effect(
+    program: &CheckedProgram,
+    facts: &ProgramFacts<'_>,
+    return_effects: &HashMap<FunctionId, ReturnEffect>,
+) -> AliasResult<()> {
+    let function_id = facts
+        .function_bindings
+        .get(&program.main_id)
+        .ok_or_else(|| invariant(Span::default(), "main binding 缺少 FunctionId"))?;
+    if return_effects.get(function_id) != Some(&ReturnEffect::Inline) {
+        return Err(AliasError {
+            msg: "main 必须返回 Inline i32，不能返回 ownership/borrow effect".into(),
+            span: facts.function_meta[function_id].span,
+        });
     }
     Ok(())
 }
@@ -938,6 +1502,281 @@ fn validate_argument_pass(
     Ok(())
 }
 
+#[derive(Default)]
+struct ReturnMaps {
+    call_results: HashMap<usize, CallResult>,
+    method_effects: HashMap<usize, ReturnEffect>,
+    return_passes: HashMap<usize, ReturnPass>,
+}
+
+fn place_terminal_writable(place: &Place, facts: &ProgramFacts<'_>) -> AliasResult<bool> {
+    match place {
+        Place::Local {
+            binding_id, info, ..
+        } => facts
+            .binding_meta
+            .get(binding_id)
+            .map(|binding| binding.mutable)
+            .ok_or_else(|| invariant(info.span, "borrow source root 缺少 binding metadata")),
+        Place::Field {
+            base,
+            field_index,
+            info,
+        } => {
+            let Ty::Struct(name) = base.ty() else {
+                return Err(invariant(info.span, "Field borrow source base 不是 struct"));
+            };
+            facts
+                .struct_fields
+                .get(name)
+                .and_then(|fields| fields.get(*field_index))
+                .copied()
+                .ok_or_else(|| invariant(info.span, "Field borrow source 缺少可写性事实"))
+        }
+        // Direct terminal Index assignment remains closed by the HIR contract, so a borrowed
+        // result must not manufacture write permission for the same unresolved target.
+        Place::Index { .. } => Ok(false),
+    }
+}
+
+fn call_result_for_effect(
+    effect: ReturnEffect,
+    receiver: Option<(&Expr, &ArgumentPass)>,
+    args: &[CallArg],
+    current_function: Option<FunctionId>,
+    facts: &ProgramFacts<'_>,
+    next_loan_id: &mut u32,
+    span: Span,
+) -> AliasResult<CallResult> {
+    match effect {
+        ReturnEffect::Inline => Ok(CallResult::Inline),
+        ReturnEffect::Owned => Ok(CallResult::Owned),
+        ReturnEffect::Borrowed(source) => {
+            let current_function = current_function.ok_or_else(|| AliasError {
+                msg: "borrowed function result 不能存入 top-level/global storage".into(),
+                span,
+            })?;
+            let (source, _) =
+                map_call_borrow_source(source, receiver, args, current_function, facts, span)?;
+            let loan_id = LoanId(*next_loan_id);
+            *next_loan_id = next_loan_id.checked_add(1).ok_or_else(|| AliasError {
+                msg: "borrowed call return loan 数量超过编译器上限".into(),
+                span,
+            })?;
+            let source_writable = place_terminal_writable(&source, facts)?;
+            Ok(CallResult::Borrowed {
+                loan_id,
+                source,
+                source_writable,
+                kind: None,
+            })
+        }
+    }
+}
+
+fn collect_return_maps(
+    program: &CheckedProgram,
+    facts: &ProgramFacts<'_>,
+    parameter_effects: &HashMap<FunctionId, Vec<ParamEffect>>,
+    return_effects: &HashMap<FunctionId, ReturnEffect>,
+    next_loan_id: &mut u32,
+) -> AliasResult<ReturnMaps> {
+    let mut maps = ReturnMaps::default();
+    for function_id in &facts.function_order {
+        for value in function_return_values(facts.functions[function_id])? {
+            let draft = classify_return_expr(
+                value,
+                *function_id,
+                parameter_effects,
+                return_effects,
+                facts,
+            )?
+            .ok_or_else(|| {
+                invariant(value.span(), "final return draft 仍依赖 unresolved effect")
+            })?;
+            let expected = return_effects[function_id];
+            if draft.effect() != expected {
+                return Err(invariant(
+                    value.span(),
+                    "return pass 与 final return effect 漂移",
+                ));
+            }
+            if maps
+                .return_passes
+                .insert(value as *const Expr as usize, draft.into_pass())
+                .is_some()
+            {
+                return Err(invariant(value.span(), "return expression identity 重复"));
+            }
+        }
+    }
+
+    let mut stack = Vec::new();
+    for item in program.items.iter().rev() {
+        match item {
+            Item::Binding(binding) => stack.push(ScopedNode::Binding(binding, None)),
+            Item::StructDef(def) => {
+                for field in def.fields.iter().rev() {
+                    if let Some(default) = &field.default {
+                        stack.push(ScopedNode::Expr(default, None));
+                    }
+                }
+            }
+        }
+    }
+    while let Some(node) = stack.pop() {
+        match node {
+            ScopedNode::Binding(binding, current) => {
+                stack.push(ScopedNode::Expr(&binding.value, current));
+            }
+            ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
+            ScopedNode::Expr(expr, current) => {
+                match expr {
+                    Expr::Call {
+                        callee,
+                        args,
+                        target: CallTarget::FunctionValue,
+                        ..
+                    } => {
+                        let effect =
+                            resolved_callee_return_effect(callee, current, facts, return_effects)?
+                                .ok_or_else(|| {
+                                    invariant(expr.span(), "final call 缺少 resolved return effect")
+                                })?;
+                        let result = call_result_for_effect(
+                            effect,
+                            None,
+                            args,
+                            current,
+                            facts,
+                            next_loan_id,
+                            expr.span(),
+                        )?;
+                        maps.call_results
+                            .insert(expr as *const Expr as usize, result);
+                    }
+                    Expr::MethodCall {
+                        recv,
+                        receiver_pass,
+                        args,
+                        target: MethodTarget::User { id, .. },
+                        ..
+                    } => {
+                        let function_id = facts.method_functions.get(id).ok_or_else(|| {
+                            invariant(expr.span(), "method return effect 缺少 FunctionId")
+                        })?;
+                        let effect = return_effects.get(function_id).copied().ok_or_else(|| {
+                            invariant(expr.span(), "method 缺少 resolved return effect")
+                        })?;
+                        let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
+                            invariant(expr.span(), "method receiver 缺少 parameter pass")
+                        })?;
+                        let result = call_result_for_effect(
+                            effect,
+                            Some((recv, receiver_pass)),
+                            args,
+                            current,
+                            facts,
+                            next_loan_id,
+                            expr.span(),
+                        )?;
+                        let key = expr as *const Expr as usize;
+                        maps.call_results.insert(key, result);
+                        maps.method_effects.insert(key, effect);
+                    }
+                    _ => {}
+                }
+                push_scoped_expr(&mut stack, expr, current);
+            }
+        }
+    }
+    Ok(maps)
+}
+
+fn apply_result_category(expr: &mut Expr, result: &CallResult) -> AliasResult<()> {
+    let (category, capability) = match result {
+        CallResult::Inline => return Ok(()),
+        CallResult::Owned => (
+            ExprCategory::Value(ValueCategory::OwnedTemporary),
+            Some(OwnershipCapability::Available),
+        ),
+        CallResult::Borrowed { .. } => (
+            ExprCategory::Value(ValueCategory::BorrowedValue),
+            Some(OwnershipCapability::None),
+        ),
+    };
+    expr.info_mut().category = Some(category);
+    expr.info_mut().ownership_capability = capability;
+    Ok(())
+}
+
+fn apply_return_maps(program: &mut CheckedProgram, maps: &ReturnMaps) -> AliasResult<()> {
+    let mut stack = root_mut_nodes(program);
+    let mut seen_calls = HashSet::new();
+    let mut seen_returns = HashSet::new();
+    while let Some(node) = stack.pop() {
+        match node {
+            MutNode::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
+            MutNode::Stmt(stmt) => push_mut_stmt(&mut stack, stmt),
+            MutNode::Expr(expr) => {
+                let key = expr as *const Expr as usize;
+                let expr_span = expr.span();
+                if let Some(pass) = maps.return_passes.get(&key).cloned() {
+                    expr.info_mut().return_pass = Some(Box::new(pass));
+                    seen_returns.insert(key);
+                }
+                if let Some(result) = maps.call_results.get(&key).cloned() {
+                    match expr {
+                        Expr::Call {
+                            result: slot,
+                            target: CallTarget::FunctionValue,
+                            ..
+                        } => *slot = Some(Box::new(result.clone())),
+                        Expr::MethodCall {
+                            result: slot,
+                            target: MethodTarget::User { return_effect, .. },
+                            ..
+                        } => {
+                            *slot = Some(Box::new(result.clone()));
+                            *return_effect =
+                                Some(*maps.method_effects.get(&key).ok_or_else(|| {
+                                    invariant(expr_span, "method return target fact 缺失")
+                                })?);
+                        }
+                        _ => return Err(invariant(expr_span, "call result map 指向非 user call")),
+                    }
+                    apply_result_category(expr, &result)?;
+                    seen_calls.insert(key);
+                }
+                push_mut_expr(&mut stack, expr);
+            }
+        }
+    }
+    if seen_calls.len() != maps.call_results.len() || seen_returns.len() != maps.return_passes.len()
+    {
+        return Err(invariant(
+            Span::default(),
+            "存在未写回的 call result / return pass fact",
+        ));
+    }
+    Ok(())
+}
+
+fn refresh_binding_relations(program: &mut CheckedProgram) -> AliasResult<()> {
+    let mut stack = root_mut_nodes(program);
+    while let Some(node) = stack.pop() {
+        match node {
+            MutNode::Binding(binding) => {
+                binding.relation = super::storage_relations::initial_relation(&binding.value)?;
+                stack.push(MutNode::Expr(&mut binding.value));
+            }
+            MutNode::Stmt(stmt) => push_mut_stmt(&mut stack, stmt),
+            MutNode::Expr(expr) => push_mut_expr(&mut stack, expr),
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn finalize(program: &mut CheckedProgram, next_loan_id: &mut u32) -> AliasResult<()> {
     let mut effects = {
         let facts = collect_facts(program)?;
@@ -1023,14 +1862,352 @@ pub(super) fn finalize(program: &mut CheckedProgram, next_loan_id: &mut u32) -> 
         (binding_effects, expr_effects, maps, final_next_loan_id)
     };
     apply_pass_maps(program, &maps)?;
-    apply_signatures(program, &effects, &binding_effects, &expr_effects)?;
-    *next_loan_id = final_next_loan_id;
-    {
+    let (
+        return_effects,
+        binding_return_effects,
+        expr_return_effects,
+        return_maps,
+        final_next_loan_id,
+    ) = {
         let facts = collect_facts(program)?;
-        validate_parameter_return_boundaries(&facts, &effects)?;
-    }
-    super::capture::validate_effect_boundaries(program)?;
+        let return_effects = infer_return_effects(&facts, &effects)?;
+        validate_main_return_effect(program, &facts, &return_effects)?;
+        let binding_return_effects = facts
+            .function_bindings
+            .iter()
+            .map(|(binding_id, function_id)| {
+                Ok((
+                    *binding_id,
+                    return_effects.get(function_id).copied().ok_or_else(|| {
+                        invariant(
+                            facts.function_meta[function_id].span,
+                            "binding 缺少 return effect",
+                        )
+                    })?,
+                ))
+            })
+            .collect::<AliasResult<HashMap<_, _>>>()?;
+        let expr_return_effects = expression_return_effect_map(program, &facts, &return_effects)?;
+        let mut final_next_loan_id = final_next_loan_id;
+        let return_maps = collect_return_maps(
+            program,
+            &facts,
+            &effects,
+            &return_effects,
+            &mut final_next_loan_id,
+        )?;
+        (
+            return_effects,
+            binding_return_effects,
+            expr_return_effects,
+            return_maps,
+            final_next_loan_id,
+        )
+    };
+    apply_signatures(
+        program,
+        &effects,
+        &return_effects,
+        &binding_effects,
+        &binding_return_effects,
+        &expr_effects,
+        &expr_return_effects,
+    )?;
+    apply_return_maps(program, &return_maps)?;
+    refresh_binding_relations(program)?;
+    *next_loan_id = final_next_loan_id;
     Ok(())
+}
+
+fn return_pass_matches(expected: &ReturnDraft, actual: &ReturnPass) -> bool {
+    match (expected, actual) {
+        (ReturnDraft::Inline, ReturnPass::Inline)
+        | (ReturnDraft::OwnedValue, ReturnPass::OwnedValue) => true,
+        (ReturnDraft::OwnedTransfer(expected), ReturnPass::OwnedTransfer { source: actual }) => {
+            super::expr_places::same_source(expected, actual)
+        }
+        (
+            ReturnDraft::BorrowPlace(expected_place, expected_origin),
+            ReturnPass::BorrowPlace {
+                source: actual_place,
+                origin: actual_origin,
+            },
+        ) => {
+            expected_origin == actual_origin
+                && super::expr_places::same_source(expected_place, actual_place)
+        }
+        (
+            ReturnDraft::BorrowValue(expected_origin),
+            ReturnPass::BorrowValue {
+                origin: actual_origin,
+            },
+        ) => expected_origin == actual_origin,
+        _ => false,
+    }
+}
+
+fn validate_call_result(
+    actual: &Option<Box<CallResult>>,
+    expected_effect: ReturnEffect,
+    expected_source: Option<&Place>,
+    expected_source_writable: Option<bool>,
+    span: Span,
+    seen_loans: &mut HashSet<LoanId>,
+) -> AliasResult<()> {
+    match (expected_effect, actual.as_deref()) {
+        (ReturnEffect::Inline, Some(CallResult::Inline))
+        | (ReturnEffect::Owned, Some(CallResult::Owned)) => Ok(()),
+        (
+            ReturnEffect::Borrowed(_),
+            Some(CallResult::Borrowed {
+                loan_id,
+                source,
+                source_writable,
+                kind: Some(_),
+            }),
+        ) if expected_source
+            .is_some_and(|expected| super::expr_places::same_source(expected, source))
+            && expected_source_writable == Some(*source_writable) =>
+        {
+            if !seen_loans.insert(*loan_id) {
+                return Err(invariant(span, "borrowed call return LoanId 重复"));
+            }
+            Ok(())
+        }
+        _ => Err(invariant(
+            span,
+            "call result plan 与 resolved return effect 漂移",
+        )),
+    }
+}
+
+fn validate_return_effects(
+    program: &CheckedProgram,
+    facts: &ProgramFacts<'_>,
+    parameter_effects: &HashMap<FunctionId, Vec<ParamEffect>>,
+) -> AliasResult<HashMap<FunctionId, ReturnEffect>> {
+    let mut frozen = HashMap::new();
+    for function_id in &facts.function_order {
+        let Ty::Func {
+            return_effect: Some(effect),
+            ..
+        } = facts.functions[function_id].ty()
+        else {
+            return Err(invariant(
+                facts.function_meta[function_id].span,
+                "FuncLit 缺少 final return effect",
+            ));
+        };
+        frozen.insert(*function_id, *effect);
+    }
+    let inferred = infer_return_effects(facts, parameter_effects)?;
+    validate_main_return_effect(program, facts, &inferred)?;
+    if inferred != frozen {
+        let function_id = facts
+            .function_order
+            .iter()
+            .find(|id| inferred.get(id) != frozen.get(id))
+            .copied()
+            .ok_or_else(|| invariant(Span::default(), "return effect drift set 为空"))?;
+        return Err(invariant(
+            facts.function_meta[&function_id].span,
+            "final return effects 与函数体/call fixed-point 漂移",
+        ));
+    }
+
+    let expr_effects = expression_return_effect_map(program, facts, &frozen)?;
+    let mut stack = Vec::new();
+    for item in program.items.iter().rev() {
+        match item {
+            Item::Binding(binding) => stack.push(ScopedNode::Binding(binding, None)),
+            Item::StructDef(def) => {
+                for field in def.fields.iter().rev() {
+                    if let Some(default) = &field.default {
+                        stack.push(ScopedNode::Expr(default, None));
+                    }
+                }
+            }
+        }
+    }
+    let mut seen_return_loans = HashSet::new();
+    while let Some(node) = stack.pop() {
+        match node {
+            ScopedNode::Binding(binding, current) => {
+                if let Some(function_id) = facts.function_bindings.get(&binding.binding_id) {
+                    let Ty::Func {
+                        return_effect: Some(actual),
+                        ..
+                    } = &binding.ty
+                    else {
+                        return Err(invariant(
+                            binding.span,
+                            "function binding 缺少 return effect",
+                        ));
+                    };
+                    if frozen.get(function_id) != Some(actual) {
+                        return Err(invariant(
+                            binding.span,
+                            "function binding return effect 漂移",
+                        ));
+                    }
+                }
+                stack.push(ScopedNode::Expr(&binding.value, current));
+            }
+            ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
+            ScopedNode::Expr(expr, current) => {
+                let key = expr as *const Expr as usize;
+                if let Some(expected) = expr_effects.get(&key) {
+                    let Ty::Func {
+                        return_effect: Some(actual),
+                        ..
+                    } = expr.ty()
+                    else {
+                        return Err(invariant(
+                            expr.span(),
+                            "function expression 缺少 return effect",
+                        ));
+                    };
+                    if actual != expected {
+                        return Err(invariant(
+                            expr.span(),
+                            "function expression return effect 漂移",
+                        ));
+                    }
+                }
+                match expr {
+                    Expr::Call {
+                        callee,
+                        args,
+                        result,
+                        target: CallTarget::FunctionValue,
+                        ..
+                    } => {
+                        let effect =
+                            resolved_callee_return_effect(callee, current, facts, &frozen)?
+                                .ok_or_else(|| {
+                                    invariant(expr.span(), "call return effect unresolved")
+                                })?;
+                        let source = match effect {
+                            ReturnEffect::Borrowed(source) => {
+                                let current = current.ok_or_else(|| {
+                                    invariant(
+                                        expr.span(),
+                                        "top-level borrowed user call 缺少 FunctionId",
+                                    )
+                                })?;
+                                Some(
+                                    map_call_borrow_source(
+                                        source,
+                                        None,
+                                        args,
+                                        current,
+                                        facts,
+                                        expr.span(),
+                                    )?
+                                    .0,
+                                )
+                            }
+                            ReturnEffect::Inline | ReturnEffect::Owned => None,
+                        };
+                        let source_writable = source
+                            .as_ref()
+                            .map(|source| place_terminal_writable(source, facts))
+                            .transpose()?;
+                        validate_call_result(
+                            result,
+                            effect,
+                            source.as_ref(),
+                            source_writable,
+                            expr.span(),
+                            &mut seen_return_loans,
+                        )?;
+                    }
+                    Expr::MethodCall {
+                        recv,
+                        receiver_pass,
+                        args,
+                        result,
+                        target:
+                            MethodTarget::User {
+                                id, return_effect, ..
+                            },
+                        ..
+                    } => {
+                        let function_id = facts.method_functions.get(id).ok_or_else(|| {
+                            invariant(expr.span(), "method return effect 缺少 FunctionId")
+                        })?;
+                        let effect = frozen[function_id];
+                        if *return_effect != Some(effect) {
+                            return Err(invariant(expr.span(), "method target return effect 漂移"));
+                        }
+                        let source = match effect {
+                            ReturnEffect::Borrowed(source) => {
+                                let current = current.ok_or_else(|| {
+                                    invariant(
+                                        expr.span(),
+                                        "top-level borrowed user method 缺少 FunctionId",
+                                    )
+                                })?;
+                                Some(
+                                    map_call_borrow_source(
+                                        source,
+                                        Some((
+                                            recv,
+                                            receiver_pass.as_ref().ok_or_else(|| {
+                                                invariant(expr.span(), "method receiver pass 缺失")
+                                            })?,
+                                        )),
+                                        args,
+                                        current,
+                                        facts,
+                                        expr.span(),
+                                    )?
+                                    .0,
+                                )
+                            }
+                            ReturnEffect::Inline | ReturnEffect::Owned => None,
+                        };
+                        let source_writable = source
+                            .as_ref()
+                            .map(|source| place_terminal_writable(source, facts))
+                            .transpose()?;
+                        validate_call_result(
+                            result,
+                            effect,
+                            source.as_ref(),
+                            source_writable,
+                            expr.span(),
+                            &mut seen_return_loans,
+                        )?;
+                    }
+                    Expr::Call { result, .. } | Expr::MethodCall { result, .. }
+                        if result.is_some() =>
+                    {
+                        return Err(invariant(expr.span(), "non-user call 携带 CallResult"));
+                    }
+                    _ => {}
+                }
+                push_scoped_expr(&mut stack, expr, current);
+            }
+        }
+    }
+
+    for function_id in &facts.function_order {
+        for value in function_return_values(facts.functions[function_id])? {
+            let draft =
+                classify_return_expr(value, *function_id, parameter_effects, &frozen, facts)?
+                    .ok_or_else(|| invariant(value.span(), "final return pass 无法重算"))?;
+            let actual = value
+                .info()
+                .return_pass
+                .as_ref()
+                .ok_or_else(|| invariant(value.span(), "return expression 缺少 ReturnPass"))?;
+            if !return_pass_matches(&draft, actual) {
+                return Err(invariant(value.span(), "ReturnPass 与 return source 漂移"));
+            }
+        }
+    }
+    Ok(frozen)
 }
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
@@ -1091,7 +2268,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
             ));
         }
     }
-    validate_parameter_return_boundaries(&facts, &frozen_effects)?;
+    let _frozen_return_effects = validate_return_effects(program, &facts, &frozen_effects)?;
 
     let mut stack = Vec::new();
     for item in program.items.iter().rev() {

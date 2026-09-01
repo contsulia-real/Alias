@@ -5,9 +5,9 @@
 //! unioning every capability that may already have been moved.
 
 use super::{
-    place_relation, ArgumentPass, ArmBody, BindingId, Body, BorrowKind, CallArg, CheckedProgram,
-    Expr, Item, LoanId, Place, PlaceRelation, ResolvedConversion, Stmt, StorageRelation, StrPart,
-    ValueCategory,
+    place_relation, ArgumentPass, ArmBody, BindingId, Body, BorrowKind, CallArg, CallResult,
+    CheckedProgram, Expr, Item, LoanId, Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt,
+    StorageRelation, StrPart, ValueCategory,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -46,7 +46,7 @@ struct BorrowSpec<'a> {
 #[derive(Clone, Copy)]
 enum Action<'a> {
     Nop,
-    Read(BindingId, AccessKind, Span),
+    Read(BindingId, AccessKind, bool, Span),
     CloneRead(&'a Place, Span),
     ProjectedRead(&'a Expr, Span),
     Borrow {
@@ -156,12 +156,14 @@ struct GraphBuilder<'a> {
     eligible: HashSet<BindingId>,
     owning: HashSet<BindingId>,
     borrowed: HashSet<BindingId>,
+    borrowed_source_writable: HashMap<BindingId, bool>,
     capture_permissions: HashMap<BindingId, BorrowKind>,
     parameter_permissions: HashMap<BindingId, ParamEffect>,
     loan_holder_bindings: HashSet<BindingId>,
     nested_functions: Vec<&'a Expr>,
     next_temporary_holder: u32,
     return_sink: usize,
+    return_passes_required: bool,
 }
 
 fn error(span: Span, msg: impl Into<String>) -> AliasError {
@@ -182,6 +184,38 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
             Expr::Borrow {
                 loan_id, source, ..
             } => return Some((*loan_id, source)),
+            Expr::Call { result, .. } | Expr::MethodCall { result, .. } => {
+                let Some(CallResult::Borrowed {
+                    loan_id, source, ..
+                }) = result.as_deref()
+                else {
+                    return None;
+                };
+                return Some((*loan_id, source));
+            }
+            Expr::Convert {
+                expr,
+                mode: ResolvedConversion::Identity,
+                ..
+            } => current = expr,
+            _ => return None,
+        }
+    }
+}
+
+fn returned_source_writable(expr: &Expr) -> Option<bool> {
+    let mut current = expr;
+    loop {
+        match current {
+            Expr::Call { result, .. } | Expr::MethodCall { result, .. } => {
+                let Some(CallResult::Borrowed {
+                    source_writable, ..
+                }) = result.as_deref()
+                else {
+                    return None;
+                };
+                return Some(*source_writable);
+            }
             Expr::Convert {
                 expr,
                 mode: ResolvedConversion::Identity,
@@ -235,12 +269,14 @@ impl<'a> GraphBuilder<'a> {
             eligible: HashSet::new(),
             owning: HashSet::new(),
             borrowed: HashSet::new(),
+            borrowed_source_writable: HashMap::new(),
             capture_permissions: HashMap::new(),
             parameter_permissions: HashMap::new(),
             loan_holder_bindings: HashSet::new(),
             nested_functions: Vec::new(),
             next_temporary_holder: 0,
             return_sink: 0,
+            return_passes_required: false,
         };
         graph.return_sink = graph.node(Action::Nop);
         graph
@@ -392,14 +428,7 @@ impl<'a> GraphBuilder<'a> {
                         capture_holder,
                         loops,
                     }),
-                    ArmBody::Ret(value) => self.tasks.push(Task::Expr {
-                        expr: value,
-                        entry,
-                        exit: self.return_sink,
-                        replacement: None,
-                        capture_holder: None,
-                        loops,
-                    }),
+                    ArmBody::Ret(value) => self.build_return_value(value, entry, loops)?,
                 },
                 Task::PlaceEval {
                     place,
@@ -468,6 +497,10 @@ impl<'a> GraphBuilder<'a> {
                 });
                 if binding.relation == Some(StorageRelation::Borrowed) {
                     self.borrowed.insert(binding.binding_id);
+                    if let Some(source_writable) = returned_source_writable(&binding.value) {
+                        self.borrowed_source_writable
+                            .insert(binding.binding_id, source_writable);
+                    }
                     let Some((loan_id, _)) = resolved_borrow(&binding.value) else {
                         return Err(error(
                             binding.span,
@@ -559,20 +592,10 @@ impl<'a> GraphBuilder<'a> {
                 capture_holder: None,
                 loops,
             }),
-            Stmt::Return { value } => {
-                if let Some(value) = value {
-                    self.tasks.push(Task::Expr {
-                        expr: value,
-                        entry,
-                        exit: self.return_sink,
-                        replacement: None,
-                        capture_holder: None,
-                        loops,
-                    });
-                } else {
-                    self.edge(entry, self.return_sink);
-                }
-            }
+            Stmt::Return { value } => match value {
+                Some(value) => self.build_return_value(value, entry, loops)?,
+                None => self.edge(entry, self.return_sink),
+            },
             Stmt::If {
                 branches,
                 else_body,
@@ -677,6 +700,101 @@ impl<'a> GraphBuilder<'a> {
         Ok(())
     }
 
+    fn build_return_value(
+        &mut self,
+        value: &'a Expr,
+        entry: usize,
+        loops: LoopTargets,
+    ) -> AliasResult<()> {
+        let Some(pass) = value.info().return_pass.as_deref() else {
+            if self.return_passes_required {
+                return Err(error(
+                    value.span(),
+                    "内部 sema 不变式被破坏: return value 缺少 ReturnPass",
+                ));
+            }
+            self.tasks.push(Task::Expr {
+                expr: value,
+                entry,
+                exit: self.return_sink,
+                replacement: None,
+                capture_holder: None,
+                loops,
+            });
+            return Ok(());
+        };
+        match pass {
+            ReturnPass::Inline | ReturnPass::OwnedValue => self.tasks.push(Task::Expr {
+                expr: value,
+                entry,
+                exit: self.return_sink,
+                replacement: None,
+                capture_holder: None,
+                loops,
+            }),
+            ReturnPass::OwnedTransfer { source } => {
+                let before_move = self.node(Action::Nop);
+                self.tasks.push(Task::PlaceEval {
+                    place: source,
+                    entry,
+                    exit: before_move,
+                    loops,
+                    mode: PlaceEvalMode {
+                        read_root: false,
+                        exposes_alias: false,
+                        access: AccessKind::Read,
+                    },
+                });
+                self.action_between(
+                    before_move,
+                    self.return_sink,
+                    Action::Move(source, value.span()),
+                );
+            }
+            ReturnPass::BorrowPlace { source, origin } => {
+                let _ = origin;
+                self.tasks.push(Task::PlaceEval {
+                    place: source,
+                    entry,
+                    exit: self.return_sink,
+                    loops,
+                    mode: PlaceEvalMode {
+                        read_root: true,
+                        exposes_alias: true,
+                        access: AccessKind::Read,
+                    },
+                });
+            }
+            ReturnPass::BorrowValue { origin } => {
+                let _ = origin;
+                let (loan_id, _) = resolved_borrow(value).ok_or_else(|| {
+                    error(
+                        value.span(),
+                        "内部 sema 不变式被破坏: BorrowValue return 缺少 loan source",
+                    )
+                })?;
+                let holder = LoanHolder::Temporary(self.next_temporary_holder);
+                self.next_temporary_holder = self
+                    .next_temporary_holder
+                    .checked_add(1)
+                    .ok_or_else(|| error(value.span(), "return loan holder 数量超限"))?;
+                let after_value = self.node(Action::Nop);
+                let after_bind = self.node(Action::Nop);
+                self.tasks.push(Task::Expr {
+                    expr: value,
+                    entry,
+                    exit: after_value,
+                    replacement: None,
+                    capture_holder: None,
+                    loops,
+                });
+                self.action_between(after_value, after_bind, Action::BindLoan(holder, loan_id));
+                self.action_between(after_bind, self.return_sink, Action::UseLoanHolder(holder));
+            }
+        }
+        Ok(())
+    }
+
     fn build_expr(
         &mut self,
         expr: &'a Expr,
@@ -688,7 +806,11 @@ impl<'a> GraphBuilder<'a> {
     ) -> AliasResult<()> {
         match expr {
             Expr::Ident(_, Some(id), span, _) => {
-                self.action_between(entry, exit, Action::Read(*id, AccessKind::Read, *span));
+                self.action_between(
+                    entry,
+                    exit,
+                    Action::Read(*id, AccessKind::Read, false, *span),
+                );
             }
             Expr::Move { source, span, .. } => {
                 if let Some(target) = replacement {
@@ -809,6 +931,7 @@ impl<'a> GraphBuilder<'a> {
             Expr::Call {
                 callee,
                 args,
+                result,
                 target,
                 ..
             } => {
@@ -830,7 +953,11 @@ impl<'a> GraphBuilder<'a> {
                             "内部 sema 不变式被破坏: increase/decrease target 未解析为 binding",
                         ));
                     };
-                    self.action_between(entry, exit, Action::Read(*id, AccessKind::Write, *span));
+                    self.action_between(
+                        entry,
+                        exit,
+                        Action::Read(*id, AccessKind::Write, false, *span),
+                    );
                     return Ok(());
                 }
                 if matches!(target, super::CallTarget::FunctionValue) {
@@ -841,6 +968,7 @@ impl<'a> GraphBuilder<'a> {
                         .ok_or_else(|| error(expr.span(), "临时 closure loan holder 数量超限"))?;
                     let after_callee = self.node(Action::Nop);
                     let before_call = self.node(Action::Nop);
+                    let after_call = self.node(Action::Nop);
                     self.tasks.push(Task::Expr {
                         expr: callee,
                         entry,
@@ -851,7 +979,28 @@ impl<'a> GraphBuilder<'a> {
                     });
                     let arguments = resolved_arguments(args, expr.span())?;
                     self.argument_sequence(arguments, holder, after_callee, before_call, loops);
-                    self.action_between(before_call, exit, Action::UseLoanHolder(holder));
+                    self.action_between(before_call, after_call, Action::UseLoanHolder(holder));
+                    if let Some(CallResult::Borrowed {
+                        loan_id,
+                        source,
+                        kind,
+                        ..
+                    }) = result.as_deref()
+                    {
+                        self.build_borrow(
+                            BorrowSpec {
+                                loan_id: *loan_id,
+                                source,
+                                declared_kind: *kind,
+                                span: expr.span(),
+                            },
+                            after_call,
+                            exit,
+                            loops,
+                        );
+                    } else {
+                        self.edge(after_call, exit);
+                    }
                     return Ok(());
                 }
                 let mut expressions = Vec::with_capacity(args.len() + 1);
@@ -862,6 +1011,7 @@ impl<'a> GraphBuilder<'a> {
                 recv,
                 receiver_pass,
                 args,
+                result,
                 target,
                 ..
             } => {
@@ -879,6 +1029,7 @@ impl<'a> GraphBuilder<'a> {
                     })?;
                     let after_receiver = self.node(Action::Nop);
                     let before_call = self.node(Action::Nop);
+                    let after_call = self.node(Action::Nop);
                     self.tasks.push(Task::Argument {
                         value: recv,
                         pass: receiver_pass,
@@ -889,7 +1040,28 @@ impl<'a> GraphBuilder<'a> {
                     });
                     let arguments = resolved_arguments(args, expr.span())?;
                     self.argument_sequence(arguments, holder, after_receiver, before_call, loops);
-                    self.action_between(before_call, exit, Action::UseLoanHolder(holder));
+                    self.action_between(before_call, after_call, Action::UseLoanHolder(holder));
+                    if let Some(CallResult::Borrowed {
+                        loan_id,
+                        source,
+                        kind,
+                        ..
+                    }) = result.as_deref()
+                    {
+                        self.build_borrow(
+                            BorrowSpec {
+                                loan_id: *loan_id,
+                                source,
+                                declared_kind: *kind,
+                                span: expr.span(),
+                            },
+                            after_call,
+                            exit,
+                            loops,
+                        );
+                    } else {
+                        self.edge(after_call, exit);
+                    }
                     return Ok(());
                 }
                 if matches!(
@@ -903,7 +1075,12 @@ impl<'a> GraphBuilder<'a> {
                         self.action_between(
                             after_indices,
                             after_receiver,
-                            Action::Read(id, AccessKind::Write, span),
+                            Action::Read(
+                                id,
+                                AccessKind::Write,
+                                !matches!(recv.as_ref(), Expr::Ident(..)),
+                                span,
+                            ),
                         );
                         self.expression_sequence(
                             args.iter().map(|arg| &arg.value).collect(),
@@ -921,8 +1098,32 @@ impl<'a> GraphBuilder<'a> {
                 self.expression_sequence(expressions, entry, exit, replacement, loops);
             }
             Expr::Field { recv, .. } => {
-                if !dynamic_owner(expr.ty()) && super::expr_places::from_expr(expr).is_some() {
-                    self.action_between(entry, exit, Action::ProjectedRead(expr, expr.span()));
+                if !dynamic_owner(expr.ty()) {
+                    if let Some(place) = super::expr_places::from_expr(expr) {
+                        let root = place.root_binding_id();
+                        if self.borrowed.contains(&root) {
+                            self.action_between(
+                                entry,
+                                exit,
+                                Action::Read(root, AccessKind::Read, true, expr.span()),
+                            );
+                        } else {
+                            self.action_between(
+                                entry,
+                                exit,
+                                Action::ProjectedRead(expr, expr.span()),
+                            );
+                        }
+                    } else {
+                        self.tasks.push(Task::Expr {
+                            expr: recv,
+                            entry,
+                            exit,
+                            replacement,
+                            capture_holder: None,
+                            loops,
+                        });
+                    }
                 } else {
                     self.tasks.push(Task::Expr {
                         expr: recv,
@@ -945,11 +1146,27 @@ impl<'a> GraphBuilder<'a> {
                         capture_holder: None,
                         loops,
                     });
-                    self.action_between(
-                        after_index,
-                        exit,
-                        Action::ProjectedRead(expr, expr.span()),
-                    );
+                    let root = super::expr_places::from_expr(expr)
+                        .ok_or_else(|| {
+                            error(
+                                expr.span(),
+                                "内部 sema 不变式被破坏: Index Place 二次恢复失败",
+                            )
+                        })?
+                        .root_binding_id();
+                    if self.borrowed.contains(&root) {
+                        self.action_between(
+                            after_index,
+                            exit,
+                            Action::Read(root, AccessKind::Read, true, expr.span()),
+                        );
+                    } else {
+                        self.action_between(
+                            after_index,
+                            exit,
+                            Action::ProjectedRead(expr, expr.span()),
+                        );
+                    }
                 } else {
                     self.expression_sequence(vec![recv, idx], entry, exit, replacement, loops);
                 }
@@ -1053,7 +1270,7 @@ impl<'a> GraphBuilder<'a> {
         {
             if read_root {
                 let action = if exposes_alias || self.borrowed.contains(binding_id) {
-                    Action::Read(*binding_id, access, info.span)
+                    Action::Read(*binding_id, access, false, info.span)
                 } else {
                     Action::CloneRead(place, info.span)
                 };
@@ -1077,7 +1294,7 @@ impl<'a> GraphBuilder<'a> {
         // its alias to reach the target is the write-through use that determines WriteLoan.
         if read_root || self.borrowed.contains(binding_id) {
             let action = if exposes_alias || self.borrowed.contains(binding_id) {
-                Action::Read(*binding_id, access, info.span)
+                Action::Read(*binding_id, access, true, info.span)
             } else {
                 Action::CloneRead(place, info.span)
             };
@@ -1262,7 +1479,7 @@ fn compute_liveness(
         if let Action::BindLoan(binding, _) = graph.nodes[node_id].action {
             next_in.remove(&binding);
         }
-        if let Action::Read(binding, _, _) = graph.nodes[node_id].action {
+        if let Action::Read(binding, _, _, _) = graph.nodes[node_id].action {
             if graph.borrowed.contains(&binding) || graph.loan_holder_bindings.contains(&binding) {
                 next_in.insert(LoanHolder::Binding(binding));
             }
@@ -1344,7 +1561,9 @@ fn derive_loan_facts<'a>(
     let mut live = HashSet::new();
     for (node_id, node) in graph.nodes.iter().enumerate() {
         match node.action {
-            Action::Read(binding, AccessKind::Write, span) if graph.borrowed.contains(&binding) => {
+            Action::Read(binding, AccessKind::Write, _, span)
+                if graph.borrowed.contains(&binding) =>
+            {
                 let loans = reaching[node_id]
                     .as_ref()
                     .and_then(|state| state.get(&LoanHolder::Binding(binding)))
@@ -1423,7 +1642,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
         let active = active_loans(graph, facts, node_id);
         match graph.nodes[node_id].action {
             Action::Nop => {}
-            Action::Read(id, access, span) => {
+            Action::Read(id, access, projected, span) => {
                 if graph.borrowed.contains(&id) {
                     if facts.reaching[node_id]
                         .as_ref()
@@ -1431,6 +1650,12 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                         .is_none()
                     {
                         return Err(error(span, "borrowed binding 使用点没有 live loan"));
+                    }
+                    if access == AccessKind::Write
+                        && !projected
+                        && graph.borrowed_source_writable.get(&id) == Some(&false)
+                    {
+                        return Err(error(span, "borrowed return referent 未证明可写"));
                     }
                     // The loan itself authorizes this access. Conflicting loans were rejected when
                     // either loan was created, using their complete NLL regions.
@@ -1790,7 +2015,7 @@ pub(super) fn infer_parameter_effects_for_function(
     let facts = derive_loan_facts(&builder, entry, inferred_nested)?;
     for node in &builder.nodes {
         let (root, required) = match node.action {
-            Action::Read(id, access, _) => (
+            Action::Read(id, access, _, _) => (
                 id,
                 if access == AccessKind::Write {
                     ParamEffect::WriteBorrow
@@ -1853,6 +2078,7 @@ fn analyze_function<'a>(
     function: &'a Expr,
     queue: &mut Vec<&'a Expr>,
     kinds: &mut HashMap<LoanId, BorrowKind>,
+    global_owning: &HashSet<BindingId>,
     verify_declared: bool,
 ) -> AliasResult<()> {
     let Expr::FuncLit { captures, body, .. } = function else {
@@ -1862,6 +2088,8 @@ fn analyze_function<'a>(
         ));
     };
     let mut builder = GraphBuilder::new();
+    builder.return_passes_required = true;
+    builder.owning.extend(global_owning.iter().copied());
     configure_function_parameters(&mut builder, function)?;
     builder.capture_permissions = captures
         .iter()
@@ -1921,6 +2149,16 @@ fn analyze_program(
 ) -> AliasResult<HashMap<LoanId, BorrowKind>> {
     let mut functions = Vec::new();
     let mut kinds = HashMap::new();
+    let global_owning: HashSet<_> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Binding(binding) if binding.relation == Some(StorageRelation::Owning) => {
+                Some(binding.binding_id)
+            }
+            Item::Binding(_) | Item::StructDef(_) => None,
+        })
+        .collect();
     for item in &program.items {
         match item {
             Item::Binding(binding) => {
@@ -1936,7 +2174,13 @@ fn analyze_program(
         }
     }
     while let Some(function) = functions.pop() {
-        analyze_function(function, &mut functions, &mut kinds, verify_declared)?;
+        analyze_function(
+            function,
+            &mut functions,
+            &mut kinds,
+            &global_owning,
+            verify_declared,
+        )?;
     }
     Ok(kinds)
 }
@@ -1979,7 +2223,7 @@ pub(super) fn infer_capture_kinds_for_function(
 
     for node in &builder.nodes {
         let (binding, required) = match node.action {
-            Action::Read(binding, access, _) => (
+            Action::Read(binding, access, _, _) => (
                 binding,
                 if access == AccessKind::Write {
                     BorrowKind::Write
@@ -2227,6 +2471,36 @@ fn apply_kinds(
         Ok(())
     }
 
+    fn record_return_loan(
+        result: &mut Option<Box<CallResult>>,
+        span: Span,
+        kinds: &HashMap<LoanId, BorrowKind>,
+        seen: &mut HashSet<LoanId>,
+    ) -> AliasResult<()> {
+        let Some(CallResult::Borrowed { loan_id, kind, .. }) = result.as_deref_mut() else {
+            return Ok(());
+        };
+        let inferred = kinds.get(loan_id).copied().ok_or_else(|| {
+            error(
+                span,
+                "内部 sema 不变式被破坏: borrowed call result 缺少 NLL kind fact",
+            )
+        })?;
+        if let Some(declared) = kind {
+            if *declared != inferred {
+                return Err(error(
+                    span,
+                    "内部 sema 不变式被破坏: borrowed call result kind 漂移",
+                ));
+            }
+        }
+        *kind = Some(inferred);
+        if !seen.insert(*loan_id) {
+            return Err(error(span, "内部 sema 不变式被破坏: LoanId 在 HIR 中重复"));
+        }
+        Ok(())
+    }
+
     let mut stack = Vec::new();
     for item in program.items.iter_mut().rev() {
         match item {
@@ -2245,9 +2519,11 @@ fn apply_kinds(
         match node {
             MutNode::Stmt(stmt) => push_stmt_mut(&mut stack, stmt),
             MutNode::Expr(expr) => {
+                let expr_span = expr.span();
                 match expr {
                     Expr::Call {
                         args,
+                        result,
                         target: super::CallTarget::FunctionValue,
                         ..
                     } => {
@@ -2260,11 +2536,13 @@ fn apply_kinds(
                             })?;
                             record_argument_loan(pass, arg.value.span(), kinds, &mut seen)?;
                         }
+                        record_return_loan(result, expr_span, kinds, &mut seen)?;
                     }
                     Expr::MethodCall {
                         receiver_pass,
                         recv,
                         args,
+                        result,
                         target: super::MethodTarget::User { .. },
                         ..
                     } => {
@@ -2284,6 +2562,7 @@ fn apply_kinds(
                             })?;
                             record_argument_loan(pass, arg.value.span(), kinds, &mut seen)?;
                         }
+                        record_return_loan(result, expr_span, kinds, &mut seen)?;
                     }
                     _ => {}
                 }

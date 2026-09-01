@@ -205,7 +205,7 @@ func i32 main = () -> {
 }
 
 #[test]
-fn captured_dynamic_return_requires_a_resolved_return_effect() {
+fn captured_dynamic_return_is_not_a_supported_borrow_source() {
     let error = fail(
         r#"
 func i32 main = () -> {
@@ -215,7 +215,11 @@ func i32 main = () -> {
 }
 "#,
     );
-    assert!(error.msg.contains("return effect"), "{}", error.msg);
+    assert!(
+        error.msg.contains("ownership/borrow source"),
+        "{}",
+        error.msg
+    );
 }
 
 #[test]

@@ -3,14 +3,16 @@ use super::arrays::{
 };
 use super::cells::{coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
-use super::places::emit_place_write;
+use super::places::{emit_place_addr, emit_place_value, emit_place_write};
 use crate::codegen::abi::{cl_type, norm_load, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
 use crate::codegen::layout::{
     ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET,
 };
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
-use crate::sema::hir::{BindKind, BindingId, Body, Expr, Stmt, StorageRelation, ValueCategory};
+use crate::sema::hir::{
+    BindKind, BindingId, Body, Expr, ReturnPass, Stmt, StorageRelation, ValueCategory,
+};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, BlockArg, InstBuilder, MemFlagsData};
@@ -37,6 +39,31 @@ pub(crate) fn emit_body<M: Module>(
         }
     }
     Ok(())
+}
+
+pub(super) fn emit_return_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    value: &Expr,
+) -> AliasResult<cranelift_codegen::ir::Value> {
+    match value
+        .info()
+        .return_pass
+        .as_deref()
+        .unwrap_or_else(|| invariant_violation("return value 缺少 resolved ReturnPass"))
+    {
+        ReturnPass::Inline | ReturnPass::OwnedValue | ReturnPass::BorrowValue { .. } => {
+            emit_expr(c, bcx, frame, value)
+        }
+        ReturnPass::OwnedTransfer { source } => {
+            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+        }
+        ReturnPass::BorrowPlace { source, origin } => {
+            let _ = origin;
+            emit_place_addr(c, bcx, frame, source).map(|(address, _)| address)
+        }
+    }
 }
 
 pub(crate) fn emit_stmt<M: Module>(
@@ -133,7 +160,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     "内部: 非 unit return 缺少返回值，sema 返回值不变式被破坏",
                 ));
             };
-            let v = emit_expr(c, bcx, frame, value)?;
+            let v = emit_return_value(c, bcx, frame, value)?;
             let v = coerce_ret(bcx, frame, v);
             bcx.ins().jump(ret_block, &[BlockArg::Value(v)]);
             frame.terminated = true;

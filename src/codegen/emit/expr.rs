@@ -176,11 +176,20 @@ pub(crate) fn emit_expr<M: Module>(
         } => emit_call(c, bcx, frame, callee, args, target, *span),
         Expr::MethodCall {
             recv,
+            receiver_pass,
             args,
             target,
             span,
             ..
-        } => emit_method_call(c, bcx, frame, recv, args, target, *span),
+        } => emit_method_call(
+            c,
+            bcx,
+            frame,
+            (recv, receiver_pass.as_ref()),
+            args,
+            target,
+            *span,
+        ),
         Expr::Field {
             recv, field_index, ..
         } => {
@@ -505,7 +514,7 @@ pub(crate) fn emit_match_arm<M: Module>(
             true
         }
         ArmBody::Ret(e) => {
-            let v = emit_expr(c, bcx, frame, e)?;
+            let v = super::control::emit_return_value(c, bcx, frame, e)?;
             let v = coerce_ret(bcx, frame, v);
             let rb = frame
                 .ret_block

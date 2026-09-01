@@ -1,7 +1,7 @@
 //! Alias 值 ABI 与内存布局的唯一真相源。
 
 use crate::sema::hir::{CheckedProgram, Expr, Item};
-use crate::sema::types::{FloatW, IntW, Ty, UIntW};
+use crate::sema::types::{FloatW, IntW, ReturnEffect, Ty, UIntW};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -23,6 +23,9 @@ pub(crate) enum VTy {
     Str,
     Unit,
     Func(Vec<VTy>, Box<VTy>),
+    /// Machine-level return lane for a semantic borrowed result. The pointee type remains
+    /// available for validation, but the caller/callee ABI carries the referent address as I64.
+    Borrowed(Box<VTy>),
     FuncPoly,
     Struct(String),
     Result(Box<VTy>, Box<VTy>),
@@ -84,6 +87,7 @@ impl VTy {
             VTy::Bool
             | VTy::Str
             | VTy::Func(..)
+            | VTy::Borrowed(_)
             | VTy::FuncPoly
             | VTy::Struct(_)
             | VTy::Result(..)
@@ -199,14 +203,25 @@ fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
         Ty::Bool => VTy::Bool,
         Ty::Str => VTy::Str,
         Ty::Unit => VTy::Unit,
-        Ty::Func { params, ret, .. } => {
+        Ty::Func {
+            params,
+            ret,
+            return_effect,
+            ..
+        } => {
             for param in params {
                 insert_projection(param, table);
             }
             insert_projection(ret, table);
+            let return_vty = table[ret.as_ref()].clone();
+            let return_vty = if matches!(return_effect, Some(ReturnEffect::Borrowed(_))) {
+                VTy::Borrowed(Box::new(return_vty))
+            } else {
+                return_vty
+            };
             VTy::Func(
                 params.iter().map(|param| table[param].clone()).collect(),
-                Box::new(table[ret.as_ref()].clone()),
+                Box::new(return_vty),
             )
         }
         Ty::FuncPoly => VTy::FuncPoly,
@@ -363,7 +378,7 @@ mod tests {
         build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
         ProjectionTable, VTy,
     };
-    use crate::sema::types::{FloatW, IntW, Ty, UIntW};
+    use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
 
     #[test]
     fn primitive_abi_matrix_is_complete_and_consistent() {
@@ -415,9 +430,24 @@ mod tests {
                 Ty::Func {
                     params: vec![Ty::Int(IntW::W32), Ty::Str],
                     param_effects: None,
+                    return_effect: None,
                     ret: Box::new(Ty::Bool),
                 },
                 VTy::Func(vec![VTy::I(IntW::W32), VTy::Str], Box::new(VTy::Bool)),
+            ),
+            (
+                Ty::Func {
+                    params: Vec::new(),
+                    param_effects: Some(Vec::new()),
+                    return_effect: Some(ReturnEffect::Borrowed(ReturnBorrowSource::Global(
+                        crate::sema::types::BindingId(7),
+                    ))),
+                    ret: Box::new(Ty::Int(IntW::W32)),
+                },
+                VTy::Func(
+                    Vec::new(),
+                    Box::new(VTy::Borrowed(Box::new(VTy::I(IntW::W32)))),
+                ),
             ),
             (Ty::FuncPoly, VTy::FuncPoly),
             (Ty::Struct("point".into()), VTy::Struct("point".into())),

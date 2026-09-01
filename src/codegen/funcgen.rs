@@ -8,7 +8,7 @@ use crate::codegen::{
 };
 use crate::sema::hir::StorageRelation;
 use crate::sema::hir::{BindKind, BindingId, Body, Capture, Expr, Item, Param};
-use crate::sema::types::{IntW, Ty};
+use crate::sema::types::{IntW, ParamEffect, Ty};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::{
     types, Function, InstBuilder, MemFlagsData, Signature, TrapCode, UserFuncName, Value,
@@ -89,7 +89,15 @@ impl<'m, M: Module> Compiler<'m, M> {
         for (i, p) in params.iter().enumerate() {
             let raw = bcx.block_params(entry)[i + 2];
             let vty = self.vty(&p.ty);
-            let word = norm_load(&mut bcx, raw, &vty);
+            let effect = p
+                .effect
+                .unwrap_or_else(|| invariant_violation("用户函数参数缺少 resolved effect"));
+            let borrowed = matches!(effect, ParamEffect::ReadBorrow | ParamEffect::WriteBorrow);
+            let word = if borrowed {
+                raw
+            } else {
+                norm_load(&mut bcx, raw, &vty)
+            };
             emit_local_cell(
                 self,
                 &mut bcx,
@@ -97,7 +105,11 @@ impl<'m, M: Module> Compiler<'m, M> {
                 word,
                 vty,
                 p.binding_id,
-                Some(StorageRelation::Owning),
+                Some(if borrowed {
+                    StorageRelation::Borrowed
+                } else {
+                    StorageRelation::Owning
+                }),
             )?;
         }
 

@@ -1,6 +1,7 @@
 use super::{
-    ArmBody, Body, BuiltinCall, CallTarget, CheckedProgram, DeepClonePlan, Expr, ExprCategory,
-    Item, MatchArm, MethodTarget, Place, ResolvedConversion, Stmt, StrPart, ValueCategory,
+    ArmBody, Body, BuiltinCall, CallResult, CallTarget, CheckedProgram, DeepClonePlan, Expr,
+    ExprCategory, Item, MatchArm, MethodTarget, Place, ResolvedConversion, Stmt, StrPart,
+    ValueCategory,
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
@@ -54,16 +55,19 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
             mode: ResolvedConversion::Convert,
             ..
         } => carries_dynamic_owner(expr.ty()),
-        Expr::Call { target, .. } => match target {
+        Expr::Call { result, target, .. } => match target {
             CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_) => true,
             CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => deep_clone_creates_owner(plan),
             CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
-            CallTarget::FunctionValue | CallTarget::Builtin(_) => false,
+            CallTarget::FunctionValue => {
+                matches!(result.as_deref(), Some(CallResult::Owned))
+            }
+            CallTarget::Builtin(_) => false,
         },
         Expr::ReadPlace { plan, .. } => !matches!(plan, DeepClonePlan::Inline),
         Expr::Move { .. } => carries_dynamic_owner(expr.ty()),
         Expr::Borrow { .. } => false,
-        Expr::MethodCall { target, .. } => match target {
+        Expr::MethodCall { result, target, .. } => match target {
             MethodTarget::StringUpper
             | MethodTarget::StringLower
             | MethodTarget::StringTrim
@@ -73,8 +77,10 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
             | MethodTarget::BoolNot
             | MethodTarget::StringLen
             | MethodTarget::ArrayLen
-            | MethodTarget::ArrayPush
-            | MethodTarget::User { .. } => false,
+            | MethodTarget::ArrayPush => false,
+            MethodTarget::User { .. } => {
+                matches!(result.as_deref(), Some(CallResult::Owned))
+            }
         },
         Expr::Int(..)
         | Expr::Float(..)
@@ -111,6 +117,18 @@ fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCate
 fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
     Ok(match expr {
         Expr::Borrow { .. } => ExprCategory::Value(ValueCategory::BorrowedValue),
+        Expr::Call {
+            result,
+            target: CallTarget::FunctionValue,
+            ..
+        }
+        | Expr::MethodCall {
+            result,
+            target: MethodTarget::User { .. },
+            ..
+        } if matches!(result.as_deref(), Some(CallResult::Borrowed { .. })) => {
+            ExprCategory::Value(ValueCategory::BorrowedValue)
+        }
         Expr::Ident(_, Some(_), ..) | Expr::Field { .. } | Expr::Index { .. } => {
             ExprCategory::Place
         }
