@@ -136,13 +136,18 @@ impl PtrLayout {
     /// Canonical `ValueAbi` shape for both `ptr<T>` and `ptr<T>?`. Parameter and return shapes
     /// are frozen here even before their caller/callee lowering is opened, so a consumer that
     /// still asks for a direct scalar fails closed instead of collapsing the capability to I64.
-    fn value_abi(self) -> ValueAbi {
+    pub(crate) fn value_abi(self) -> ValueAbi {
         ValueAbi {
             expression: ExpressionAbi {
                 lanes: self.lanes.to_vec(),
             },
             storage: StorageAbi {
-                scalar: None,
+                lanes: self
+                    .lanes
+                    .into_iter()
+                    .zip(self.offsets)
+                    .map(|(ty, offset)| StorageLane { ty, offset })
+                    .collect(),
                 layout: self.value,
             },
             parameter: ParameterAbi {
@@ -164,8 +169,24 @@ pub(crate) struct ExpressionAbi {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StorageLane {
+    ty: Type,
+    offset: i32,
+}
+
+impl StorageLane {
+    pub(crate) fn ty(self) -> Type {
+        self.ty
+    }
+
+    pub(crate) fn offset(self) -> i32 {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StorageAbi {
-    scalar: Option<Type>,
+    lanes: Vec<StorageLane>,
     layout: ValueLayout,
 }
 
@@ -201,7 +222,10 @@ impl ValueAbi {
                 lanes: vec![register],
             },
             storage: StorageAbi {
-                scalar: Some(storage),
+                lanes: vec![StorageLane {
+                    ty: storage,
+                    offset: 0,
+                }],
                 layout: ValueLayout {
                     size,
                     align,
@@ -234,13 +258,18 @@ impl ValueAbi {
         &self.expression.lanes
     }
 
+    pub(crate) fn storage_lanes(&self) -> &[StorageLane] {
+        &self.storage.lanes
+    }
+
     fn scalar_storage(&self) -> Type {
-        self.storage.scalar.unwrap_or_else(|| {
-            panic!(
+        match self.storage.lanes.as_slice() {
+            [lane] if lane.offset == 0 => lane.ty,
+            _ => panic!(
                 "内部 ABI 不变式被破坏: {}-byte aggregate 进入 scalar storage 路径",
                 self.storage.layout.size
-            )
-        })
+            ),
+        }
     }
 
     fn direct_parameter(&self) -> Type {
@@ -280,12 +309,8 @@ impl VTy {
         match self {
             VTy::I(w) => integer_abi(w.bits(), true),
             VTy::U(w) => integer_abi(w.bits(), false),
-            VTy::F(FloatW::F32) => {
-                ValueAbi::scalar(types::F32, types::F32, 4, WordRepr::F32Bits)
-            }
-            VTy::F(FloatW::F64) => {
-                ValueAbi::scalar(types::F64, types::F64, 8, WordRepr::F64Bits)
-            }
+            VTy::F(FloatW::F32) => ValueAbi::scalar(types::F32, types::F32, 4, WordRepr::F32Bits),
+            VTy::F(FloatW::F64) => ValueAbi::scalar(types::F64, types::F64, 8, WordRepr::F64Bits),
             VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
             VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
             VTy::Bool
@@ -296,9 +321,7 @@ impl VTy {
             | VTy::Struct(_)
             | VTy::Result(..)
             | VTy::Array(_)
-            | VTy::Iterator(_) => {
-                ValueAbi::scalar(types::I64, types::I64, 8, WordRepr::Direct)
-            }
+            | VTy::Iterator(_) => ValueAbi::scalar(types::I64, types::I64, 8, WordRepr::Direct),
         }
     }
 
@@ -355,8 +378,11 @@ pub(crate) fn user_signature(
     // 闭包和方法调用都依赖这一固定前缀，任何一侧自行增删都会造成 call ABI 错位。
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
-    sig.params
-        .extend(params.iter().map(|p| AbiParam::new(p.abi().direct_parameter())));
+    sig.params.extend(
+        params
+            .iter()
+            .map(|p| AbiParam::new(p.abi().direct_parameter())),
+    );
     if *ret != VTy::Unit {
         sig.returns.push(AbiParam::new(ret.abi().direct_result()));
     }
@@ -577,7 +603,7 @@ mod tests {
     use super::{
         build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
         value_layout, ExpressionAbi, ParameterAbi, ProjectionTable, PtrLane, PtrLayout, ReturnAbi,
-        StorageAbi, ValueAbi, ValueLayout, VTy,
+        StorageAbi, StorageLane, VTy, ValueAbi, ValueLayout,
     };
     use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
     use cranelift_codegen::ir::types;
@@ -631,7 +657,14 @@ mod tests {
                 lanes: LANES.to_vec(),
             },
             storage: StorageAbi {
-                scalar: None,
+                lanes: LANES
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, ty)| StorageLane {
+                        ty,
+                        offset: (index * 8) as i32,
+                    })
+                    .collect(),
                 layout,
             },
             parameter: ParameterAbi {
@@ -646,7 +679,19 @@ mod tests {
         };
 
         assert_eq!(abi.expression.lanes, LANES);
-        assert_eq!(abi.storage.scalar, None);
+        assert_eq!(
+            abi.storage.lanes,
+            vec![
+                StorageLane {
+                    ty: types::I32,
+                    offset: 0,
+                },
+                StorageLane {
+                    ty: types::I64,
+                    offset: 8,
+                },
+            ]
+        );
         assert_eq!(abi.storage.layout, layout);
         assert!(abi.parameter.indirect_by_value);
         assert!(abi.result.explicit_sret);
@@ -677,7 +722,27 @@ mod tests {
         assert_eq!(layout.machine_pointer_type(), types::I64);
         let abi = layout.value_abi();
         assert_eq!(abi.expression.lanes, [types::I64; 4]);
-        assert_eq!(abi.storage.scalar, None);
+        assert_eq!(
+            abi.storage.lanes,
+            vec![
+                StorageLane {
+                    ty: types::I64,
+                    offset: 0,
+                },
+                StorageLane {
+                    ty: types::I64,
+                    offset: 8,
+                },
+                StorageLane {
+                    ty: types::I64,
+                    offset: 16,
+                },
+                StorageLane {
+                    ty: types::I64,
+                    offset: 24,
+                },
+            ]
+        );
         assert_eq!(abi.storage.layout, layout.value);
         assert_eq!(
             abi.parameter,
@@ -697,7 +762,11 @@ mod tests {
 
         let error = PtrLayout::for_current_target(types::I32)
             .expect_err("32-bit machine pointer must not reuse the Windows x64 layout");
-        assert!(error.msg.contains("64-bit machine pointer"), "{}", error.msg);
+        assert!(
+            error.msg.contains("64-bit machine pointer"),
+            "{}",
+            error.msg
+        );
     }
 
     #[test]

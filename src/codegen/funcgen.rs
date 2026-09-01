@@ -1,7 +1,8 @@
-use crate::codegen::abi::{cl_type, norm_load, norm_store, user_signature, value_word_offset, VTy};
+use crate::codegen::abi::{cl_type, norm_load, user_signature, value_word_offset, VTy};
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
 use crate::codegen::emit::expr::emit_expr;
+use crate::codegen::emit::value::ExprValue;
 use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
 use crate::codegen::{
     bound_vty, invariant_violation, native_err, Compiler, Frame, PendingFn, Slot,
@@ -102,7 +103,7 @@ impl<'m, M: Module> Compiler<'m, M> {
                 self,
                 &mut bcx,
                 &mut frame,
-                word,
+                ExprValue::scalar(word),
                 vty,
                 p.binding_id,
                 Some(if borrowed {
@@ -225,17 +226,18 @@ impl<'m, M: Module> Compiler<'m, M> {
                     captures,
                     ret_vty.clone(),
                 )?;
-                (v, VTy::Func(param_vtys, Box::new(ret_vty)))
+                (
+                    ExprValue::scalar(v),
+                    VTy::Func(param_vtys, Box::new(ret_vty)),
+                )
             } else {
                 let vty = self.vty(&b.ty);
-                let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?
-                    .into_scalar("global binding storage 尚未支持 multi-lane value");
+                let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?;
                 (v, vty)
             };
             let off = self.top_slots[binding_index];
-            let sv = norm_store(&mut bcx, v, &svty);
             let base = bcx.use_var(frame.globals);
-            bcx.ins().store(MemFlagsData::new(), sv, base, off as i32);
+            v.store(&mut bcx, base, off as i32, &svty);
             frame.scopes[0].insert(b.binding_id, Slot::Global(off));
             frame.locals_vty[0].insert(b.binding_id, svty);
             frame.locals_relation[0].insert(b.binding_id, b.relation);

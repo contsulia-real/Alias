@@ -132,7 +132,6 @@ fn emit_user_argument<M: Module>(
         ArgumentPass::BorrowTemporary { kind } => {
             let _ = kind;
             let value = emit_expr(c, bcx, frame, value)?;
-            let value = value.into_scalar("borrow temporary 尚未支持 multi-lane value");
             emit_temporary_cell(c, bcx, value, vty)
         }
     }
@@ -161,9 +160,7 @@ pub(crate) fn emit_construct<M: Module>(
             .or(field.default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
         let v = emit_expr(c, bcx, frame, expr)?;
-        let v = v.into_scalar("struct field initialization 尚未支持 multi-lane value");
-        let sv = norm_store(bcx, v, &field.vty);
-        bcx.ins().store(MemFlagsData::new(), sv, ptr, field.offset);
+        v.store(bcx, ptr, field.offset, &field.vty);
     }
     Ok(ptr)
 }

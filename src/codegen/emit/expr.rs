@@ -55,8 +55,7 @@ pub(crate) fn emit_expr<M: Module>(
             match binding_storage_addr(c, bcx, frame, id) {
                 Some(addr) => {
                     let vty = bound_vty(c, frame, id);
-                    let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
-                    Ok(ExprValue::scalar(norm_load(bcx, raw, &vty)))
+                    Ok(ExprValue::load(bcx, addr, 0, &vty))
                 }
                 None => Err(native_err(
                     *span,
@@ -78,8 +77,7 @@ pub(crate) fn emit_expr<M: Module>(
                 .map(ExprValue::scalar)
         }
         Expr::Move { source, .. } => {
-            emit_place_value(c, bcx, frame, source)
-                .map(|(value, _)| ExprValue::scalar(value))
+            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
         }
         Expr::Borrow { source, .. } => {
             emit_place_addr(c, bcx, frame, source)
@@ -218,10 +216,7 @@ pub(crate) fn emit_expr<M: Module>(
             let p = emit_expr(c, bcx, frame, recv)?
                 .into_scalar("struct field receiver 收到 multi-lane expression value");
             let (fvty, offset) = field_storage(c, recv.ty(), *field_index)?;
-            let raw = bcx
-                .ins()
-                .load(cl_type(&fvty), MemFlagsData::new(), p, offset);
-            Ok(ExprValue::scalar(norm_load(bcx, raw, &fvty)))
+            Ok(ExprValue::load(bcx, p, offset, &fvty))
         }
         Expr::Index {
             recv, idx, span, ..
@@ -510,7 +505,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 c,
                 bcx,
                 frame,
-                value,
+                ExprValue::scalar(value),
                 subject_vty.clone(),
                 binding_id,
                 Some(crate::sema::hir::StorageRelation::Owning),
@@ -541,7 +536,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 c,
                 bcx,
                 frame,
-                payload,
+                ExprValue::scalar(payload),
                 bind_vty,
                 binding_id,
                 Some(crate::sema::hir::StorageRelation::Owning),

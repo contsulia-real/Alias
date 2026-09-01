@@ -60,7 +60,9 @@ pub(super) fn emit_return_value<M: Module>(
             })
         }
         ReturnPass::OwnedTransfer { source } => {
-            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+            emit_place_value(c, bcx, frame, source).map(|(value, _)| {
+                value.into_scalar("function return 尚未支持 multi-lane expression value")
+            })
         }
         ReturnPass::BorrowPlace { source, origin } => {
             let _ = origin;
@@ -105,7 +107,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     c,
                     bcx,
                     frame,
-                    v,
+                    super::value::ExprValue::scalar(v),
                     VTy::Func(param_vtys, Box::new(ret_vty)),
                     b.binding_id,
                     b.relation,
@@ -113,7 +115,6 @@ pub(crate) fn emit_stmt<M: Module>(
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr(c, bcx, frame, &b.value)?;
-                let v = v.into_scalar("local binding storage 尚未支持 multi-lane value");
                 emit_local_cell(c, bcx, frame, v, vty, b.binding_id, b.relation)?;
             }
             Ok(())
@@ -130,7 +131,6 @@ pub(crate) fn emit_stmt<M: Module>(
                 invariant_violation("assignment 缺少 resolved ownership operation")
             });
             let value = emit_expr(c, bcx, frame, value)?;
-            let value = value.into_scalar("assignment storage 尚未支持 multi-lane value");
             if operation == AssignmentOperation::RebindBorrowedAlias {
                 let crate::sema::hir::Place::Local { binding_id, .. } = target else {
                     invariant_violation("borrowed alias rebind target 必须是 local Place")
@@ -139,7 +139,9 @@ pub(crate) fn emit_stmt<M: Module>(
                     invariant_violation("borrowed rebind target 必须有 alias cell")
                 });
                 let cell = super::cells::materialize_cell_addr(bcx, frame, &cell);
-                bcx.ins().store(MemFlagsData::new(), value, cell, 0);
+                let referent =
+                    value.into_scalar("borrowed alias rebind 必须保存单个 referent address");
+                bcx.ins().store(MemFlagsData::new(), referent, cell, 0);
                 return Ok(());
             }
             emit_place_write(c, bcx, frame, target, value)
@@ -434,7 +436,7 @@ fn emit_for<M: Module>(
         c,
         bcx,
         frame,
-        elem,
+        super::value::ExprValue::scalar(elem),
         elem_vty.clone(),
         binding_id,
         Some(StorageRelation::Owning),

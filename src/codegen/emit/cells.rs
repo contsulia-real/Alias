@@ -1,3 +1,4 @@
+use super::value::ExprValue;
 use crate::codegen::abi::{norm_store, value_layout, value_word_offset, VTy};
 use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::{BindingId, StorageRelation};
@@ -85,7 +86,7 @@ pub(crate) fn emit_local_cell<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    word: Value,
+    value: ExprValue,
     vty: VTy,
     id: BindingId,
     relation: Option<StorageRelation>,
@@ -97,12 +98,12 @@ pub(crate) fn emit_local_cell<M: Module>(
     };
     let szw = bcx.ins().iconst(types::I64, size as i64);
     let cell = c.call_rt(bcx, "alias.cell.new", &[szw])?;
-    let sv = if relation == Some(StorageRelation::Borrowed) {
-        word
+    if relation == Some(StorageRelation::Borrowed) {
+        let referent = value.into_scalar("borrowed alias cell 必须保存单个 referent address");
+        bcx.ins().store(MemFlagsData::new(), referent, cell, 0);
     } else {
-        norm_store(bcx, word, &vty)
-    };
-    bcx.ins().store(MemFlagsData::new(), sv, cell, 0);
+        value.store(bcx, cell, 0, &vty);
+    }
     let var = bcx.declare_var(types::I64);
     bcx.def_var(var, cell);
     frame
@@ -129,13 +130,12 @@ pub(crate) fn emit_local_cell<M: Module>(
 pub(crate) fn emit_temporary_cell<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    value: Value,
+    value: ExprValue,
     vty: &VTy,
 ) -> AliasResult<Value> {
     let size = bcx.ins().iconst(types::I64, value_layout(vty).size as i64);
     let cell = c.call_rt(bcx, "alias.cell.new", &[size])?;
-    let stored = norm_store(bcx, value, vty);
-    bcx.ins().store(MemFlagsData::new(), stored, cell, 0);
+    value.store(bcx, cell, 0, vty);
     Ok(cell)
 }
 

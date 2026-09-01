@@ -1,12 +1,13 @@
 use super::arrays::checked_array_element_addr;
 use super::cells::binding_storage_addr;
 use super::expr::emit_expr;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, VTy};
+use super::value::ExprValue;
+use crate::codegen::abi::VTy;
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::Place;
 use crate::sema::types::Ty;
 use crate::AliasResult;
-use cranelift_codegen::ir::{InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -33,10 +34,9 @@ pub(super) fn emit_place_value<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     place: &Place,
-) -> AliasResult<(Value, VTy)> {
+) -> AliasResult<(ExprValue, VTy)> {
     let (addr, vty) = emit_place_addr(c, bcx, frame, place)?;
-    let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
-    Ok((norm_load(bcx, raw, &vty), vty))
+    Ok((ExprValue::load(bcx, addr, 0, &vty), vty))
 }
 
 /// resolved Place → 当前真实 storage address 的唯一物理 lowering 入口。
@@ -62,12 +62,14 @@ pub(super) fn emit_place_addr<M: Module>(
             base, field_index, ..
         } => {
             let (base_value, _) = emit_place_value(c, bcx, frame, base)?;
+            let base_value = base_value.into_scalar("struct Place base 必须是 scalar reference");
             let (field_vty, offset) = field_storage(c, base.ty(), *field_index)?;
             let addr = bcx.ins().iadd_imm_s(base_value, offset as i64);
             Ok((addr, field_vty))
         }
         Place::Index { base, index, .. } => {
             let (array, base_vty) = emit_place_value(c, bcx, frame, base)?;
+            let array = array.into_scalar("array Place base 必须是 scalar reference");
             let VTy::Array(elem_vty) = base_vty else {
                 invariant_violation("Place::Index base 必须保留 array VTy")
             };
@@ -86,10 +88,9 @@ pub(super) fn emit_place_write<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     target: &Place,
-    value: Value,
+    value: ExprValue,
 ) -> AliasResult<()> {
     let (addr, vty) = emit_place_addr(c, bcx, frame, target)?;
-    let stored = norm_store(bcx, value, &vty);
-    bcx.ins().store(MemFlagsData::new(), stored, addr, 0);
+    value.store(bcx, addr, 0, &vty);
     Ok(())
 }
