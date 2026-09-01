@@ -22,6 +22,7 @@ pub(crate) fn emit_deep_clone<M: Module>(
     plan: &DeepClonePlan,
 ) -> AliasResult<Value> {
     let value = emit_expr(c, bcx, frame, source)?;
+    let value = value.into_scalar("deep clone 尚未支持 multi-lane source");
     let vty = c.vty(source.ty());
     clone_value(c, bcx, value, &vty, plan)
 }

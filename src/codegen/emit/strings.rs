@@ -26,6 +26,7 @@ pub(crate) fn emit_str<M: Module>(
                 // sema 已在 hole HIR 中固化 contextual conversion；插值后端这里只显示
                 // 最终值。若再次按目标 string 推断，会在 codegen 制造第二套转换语义。
                 let value = emit_expr(c, bcx, frame, h)?;
+                let value = value.into_scalar("string interpolation 尚未支持 multi-lane hole");
                 display_word(c, bcx, h, value)?
             }
         };

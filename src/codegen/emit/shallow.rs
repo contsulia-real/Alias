@@ -19,6 +19,7 @@ pub(crate) fn emit_shallow_clone<M: Module>(
     plan: &ShallowClonePlan,
 ) -> AliasResult<Value> {
     let value = emit_expr(c, bcx, frame, source)?;
+    let value = value.into_scalar("shallow clone 尚未支持 multi-lane source");
     let vty = c.vty(source.ty());
     shallow_value(c, bcx, value, &vty, plan)
 }

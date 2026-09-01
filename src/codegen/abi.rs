@@ -130,7 +130,31 @@ impl PtrLayout {
     }
 
     pub(crate) fn machine_pointer_type(self) -> Type {
-        self.lanes[PtrLane::Address as usize]
+        self.value_abi().expression.lanes[PtrLane::Address as usize]
+    }
+
+    /// Canonical `ValueAbi` shape for both `ptr<T>` and `ptr<T>?`. Parameter and return shapes
+    /// are frozen here even before their caller/callee lowering is opened, so a consumer that
+    /// still asks for a direct scalar fails closed instead of collapsing the capability to I64.
+    fn value_abi(self) -> ValueAbi {
+        ValueAbi {
+            expression: ExpressionAbi {
+                lanes: self.lanes.to_vec(),
+            },
+            storage: StorageAbi {
+                scalar: None,
+                layout: self.value,
+            },
+            parameter: ParameterAbi {
+                direct: None,
+                indirect_by_value: true,
+            },
+            result: ReturnAbi {
+                direct: None,
+                explicit_sret: true,
+            },
+            word: None,
+        }
     }
 }
 
@@ -204,6 +228,10 @@ impl ValueAbi {
                 lanes.len()
             ),
         }
+    }
+
+    pub(crate) fn expression_types(&self) -> &[Type] {
+        &self.expression.lanes
     }
 
     fn scalar_storage(&self) -> Type {
@@ -647,6 +675,25 @@ mod tests {
             }
         );
         assert_eq!(layout.machine_pointer_type(), types::I64);
+        let abi = layout.value_abi();
+        assert_eq!(abi.expression.lanes, [types::I64; 4]);
+        assert_eq!(abi.storage.scalar, None);
+        assert_eq!(abi.storage.layout, layout.value);
+        assert_eq!(
+            abi.parameter,
+            ParameterAbi {
+                direct: None,
+                indirect_by_value: true,
+            }
+        );
+        assert_eq!(
+            abi.result,
+            ReturnAbi {
+                direct: None,
+                explicit_sret: true,
+            }
+        );
+        assert_eq!(abi.word, None);
 
         let error = PtrLayout::for_current_target(types::I32)
             .expect_err("32-bit machine pointer must not reuse the Windows x64 layout");

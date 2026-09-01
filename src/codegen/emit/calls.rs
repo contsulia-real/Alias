@@ -64,7 +64,8 @@ pub(crate) fn emit_call<M: Module>(
             let VTy::Func(param_vtys, ret_vty) = callee_vty else {
                 invariant_violation("函数值调用必须携带完整函数签名")
             };
-            let clo = emit_expr(c, bcx, frame, callee)?;
+            let clo = emit_expr(c, bcx, frame, callee)?
+                .into_scalar("closure call target 收到 multi-lane expression value");
             call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
         }
     }
@@ -118,6 +119,7 @@ fn emit_user_argument<M: Module>(
     match pass {
         ArgumentPass::Inline | ArgumentPass::Owned => {
             let value = emit_expr(c, bcx, frame, value)?;
+            let value = value.into_scalar("direct user argument 尚未支持 multi-lane value");
             Ok(norm_store(bcx, value, vty))
         }
         ArgumentPass::ReadBorrow { source, .. } | ArgumentPass::WriteBorrow { source, .. } => {
@@ -130,6 +132,7 @@ fn emit_user_argument<M: Module>(
         ArgumentPass::BorrowTemporary { kind } => {
             let _ = kind;
             let value = emit_expr(c, bcx, frame, value)?;
+            let value = value.into_scalar("borrow temporary 尚未支持 multi-lane value");
             emit_temporary_cell(c, bcx, value, vty)
         }
     }
@@ -158,6 +161,7 @@ pub(crate) fn emit_construct<M: Module>(
             .or(field.default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
         let v = emit_expr(c, bcx, frame, expr)?;
+        let v = v.into_scalar("struct field initialization 尚未支持 multi-lane value");
         let sv = norm_store(bcx, v, &field.vty);
         bcx.ins().store(MemFlagsData::new(), sv, ptr, field.offset);
     }
@@ -176,6 +180,7 @@ pub(crate) fn emit_result_ctor<M: Module>(
     };
     let pvty = c.vty(arg.value.ty());
     let payload = emit_expr(c, bcx, frame, &arg.value)?;
+    let payload = payload.into_scalar("result payload storage 尚未支持 multi-lane value");
     let pw = storage_word(bcx, payload, &pvty);
     let words = bcx.ins().iconst(types::I32, RESULT_WORDS);
     let blk = c.call_rt(bcx, "alias.env.new", &[words])?;
@@ -207,6 +212,7 @@ pub(crate) fn emit_method_call<M: Module>(
             invariant_violation("builtin method receiver 携带 user pass")
         }
         emit_expr(c, bcx, frame, recv)?
+            .into_scalar("builtin method receiver 收到 multi-lane expression value")
     };
 
     match target {
@@ -215,6 +221,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
             };
             let r = emit_expr(c, bcx, frame, &arg.value)?;
+            let r = r.into_scalar("numeric method argument 收到 multi-lane expression value");
             emit_binary_values(c, bcx, (*op, &svt, rv, r, span))
         }
         MethodTarget::BoolNot => {
@@ -247,6 +254,7 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("push 元数 (sema 已校验)")
             };
             let value = emit_expr(c, bcx, frame, &arg.value)?;
+            let value = value.into_scalar("array push 尚未支持 multi-lane element");
             let word = storage_word(bcx, value, elem);
             let raw = array_raw(bcx, rv);
             c.call_rt_void(bcx, "alias.arr.push", &[raw, word])?;
@@ -354,6 +362,7 @@ fn emit_print<M: Module>(
         invariant_violation("print/println 元数 (sema 已校验)")
     };
     let v = emit_expr(c, bcx, frame, &arg.value)?;
+    let v = v.into_scalar("display 尚未支持 multi-lane expression value");
     match c.vty(arg.value.ty()) {
         VTy::I(IntW::W32) | VTy::U(UIntW::U8) | VTy::U(UIntW::U16) => {
             let t = bcx.ins().ireduce(types::I32, v);

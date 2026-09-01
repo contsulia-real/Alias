@@ -72,6 +72,7 @@ src/
 │   ├── abi.rs              # Ty→VTy、ValueAbi、PtrLayout、结构体布局、word 编码的 canonical ABI owner
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift；clone.rs / shallow.rs 只执行各自 resolved plan
+│   │   ├── value.rs        # resolved expression ABI 对应的 Cranelift SSA lane carrier
 │   │   └── places.rs       # resolved Place storage address、物理写入与字段 storage 查询 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
@@ -162,6 +163,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
 - `ValueAbi` 已显式区分 scalar 与 multi-lane expression、scalar 与 aggregate storage、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；当前已接入的语言类型仍全部投影为 scalar 形态，aggregate caller/callee lowering 尚未开放并 fail-closed；
 - `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer expression/type projection 仍未开放；
+- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；scalar-only operator/storage/call 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge 已按 resolved `ValueAbi::expression_types()` 传递全部 lane，不再借 universal I64 word 合并表达式；pointer VTy 与具体 pointer expression 尚未接入；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
 - `storage_word` / `restore_word` 当前承担一-word 容器与具体值表示之间的边界；

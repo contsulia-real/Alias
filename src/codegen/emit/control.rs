@@ -55,7 +55,9 @@ pub(super) fn emit_return_value<M: Module>(
         .unwrap_or_else(|| invariant_violation("return value 缺少 resolved ReturnPass"))
     {
         ReturnPass::Inline | ReturnPass::OwnedValue | ReturnPass::BorrowValue { .. } => {
-            emit_expr(c, bcx, frame, value)
+            emit_expr(c, bcx, frame, value).map(|value| {
+                value.into_scalar("function return 尚未支持 multi-lane expression value")
+            })
         }
         ReturnPass::OwnedTransfer { source } => {
             emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
@@ -111,6 +113,7 @@ pub(crate) fn emit_stmt<M: Module>(
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr(c, bcx, frame, &b.value)?;
+                let v = v.into_scalar("local binding storage 尚未支持 multi-lane value");
                 emit_local_cell(c, bcx, frame, v, vty, b.binding_id, b.relation)?;
             }
             Ok(())
@@ -127,6 +130,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 invariant_violation("assignment 缺少 resolved ownership operation")
             });
             let value = emit_expr(c, bcx, frame, value)?;
+            let value = value.into_scalar("assignment storage 尚未支持 multi-lane value");
             if operation == AssignmentOperation::RebindBorrowedAlias {
                 let crate::sema::hir::Place::Local { binding_id, .. } = target else {
                     invariant_violation("borrowed alias rebind target 必须是 local Place")
@@ -256,7 +260,8 @@ fn emit_if<M: Module>(
         } else {
             bcx.create_block()
         };
-        let cv = emit_expr(c, bcx, frame, cond)?;
+        let cv = emit_expr(c, bcx, frame, cond)?
+            .into_scalar("if condition 必须是 scalar bool expression");
         bcx.ins().brif(cv, then_b, &[], false_b, &[]);
         frame.terminated = true;
         bcx.seal_block(then_b);
@@ -319,7 +324,8 @@ fn emit_while<M: Module>(
 
     bcx.switch_to_block(header);
     frame.terminated = false;
-    let cv = emit_expr(c, bcx, frame, cond)?;
+    let cv = emit_expr(c, bcx, frame, cond)?
+        .into_scalar("while condition 必须是 scalar bool expression");
     bcx.ins().brif(cv, body_b, &[], end_b, &[]);
     frame.terminated = true;
     bcx.seal_block(body_b);
@@ -358,7 +364,8 @@ fn emit_for<M: Module>(
     let (iterable, binding_id, body, elem_vty, element_plan, span, ret_block) = input;
     ensure_current(bcx, frame);
     let source_vty = c.vty(iterable.ty());
-    let source = emit_expr(c, bcx, frame, iterable)?;
+    let source = emit_expr(c, bcx, frame, iterable)?
+        .into_scalar("for iterable 尚未支持 multi-lane source");
     let iter = match source_vty {
         VTy::Array(_) => make_iterator(c, bcx, source)?,
         VTy::Iterator(_) => source,

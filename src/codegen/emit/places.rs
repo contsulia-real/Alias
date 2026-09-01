@@ -72,6 +72,7 @@ pub(super) fn emit_place_addr<M: Module>(
                 invariant_violation("Place::Index base 必须保留 array VTy")
             };
             let index_word = emit_expr(c, bcx, frame, index)?;
+            let index_word = index_word.into_scalar("Place index 必须是 scalar i32 expression");
             let addr = checked_array_element_addr(c, bcx, array, index_word, place.span())?;
             Ok((addr, *elem_vty))
         }

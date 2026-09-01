@@ -228,7 +228,8 @@ impl<'m, M: Module> Compiler<'m, M> {
                 (v, VTy::Func(param_vtys, Box::new(ret_vty)))
             } else {
                 let vty = self.vty(&b.ty);
-                let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?;
+                let v = emit_expr(self, &mut bcx, &mut frame, &b.value)?
+                    .into_scalar("global binding storage 尚未支持 multi-lane value");
                 (v, vty)
             };
             let off = self.top_slots[binding_index];

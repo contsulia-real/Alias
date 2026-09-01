@@ -143,6 +143,7 @@ pub(crate) fn emit_array_lit<M: Module>(
     let raw = c.call_rt(bcx, "alias.arr.new", &[cap])?;
     for (i, el) in elems.iter().enumerate() {
         let v = emit_expr(c, bcx, frame, el)?;
+        let v = v.into_scalar("array literal element storage 尚未支持 multi-lane value");
         let index = bcx.ins().iconst(types::I64, i as i64);
         let addr = array_element_addr(bcx, raw, index);
         let sv = storage_word(bcx, v, elem_vty);

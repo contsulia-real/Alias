@@ -10,7 +10,8 @@ use super::ops::{
 };
 use super::places::{emit_place_addr, emit_place_value, field_storage};
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
-use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
+use super::value::ExprValue;
+use crate::codegen::abi::{cl_type, norm_load, restore_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
 use crate::codegen::layout::{
     result_tag, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
@@ -33,16 +34,20 @@ pub(crate) fn emit_expr<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     e: &Expr,
-) -> AliasResult<Value> {
+) -> AliasResult<ExprValue> {
     match e {
-        Expr::Int(n, ..) => Ok(bcx.ins().iconst(types::I64, *n as i64)),
+        Expr::Int(n, ..) => Ok(ExprValue::scalar(
+            bcx.ins().iconst(types::I64, *n as i64),
+        )),
         Expr::Float(v, ..) => match c.vty(e.ty()) {
-            VTy::F(FloatW::F32) => Ok(bcx.ins().f32const(*v as f32)),
-            VTy::F(FloatW::F64) => Ok(bcx.ins().f64const(*v)),
+            VTy::F(FloatW::F32) => Ok(ExprValue::scalar(bcx.ins().f32const(*v as f32))),
+            VTy::F(FloatW::F64) => Ok(ExprValue::scalar(bcx.ins().f64const(*v))),
             _ => invariant_violation("浮点字面量携带浮点静态类型"),
         },
-        Expr::Bool(b, ..) => Ok(bcx.ins().iconst(types::I64, *b as i64)),
-        Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts),
+        Expr::Bool(b, ..) => Ok(ExprValue::scalar(
+            bcx.ins().iconst(types::I64, *b as i64),
+        )),
+        Expr::Str(parts, ..) => emit_str(c, bcx, frame, parts).map(ExprValue::scalar),
         Expr::Ident(name, id, span, _) => {
             let id = id.unwrap_or_else(|| {
                 panic!("内部代码生成不变式被破坏: 可求值标识符 '{name}' 缺少 BindingId")
@@ -51,7 +56,7 @@ pub(crate) fn emit_expr<M: Module>(
                 Some(addr) => {
                     let vty = bound_vty(c, frame, id);
                     let raw = bcx.ins().load(cl_type(&vty), MemFlagsData::new(), addr, 0);
-                    Ok(norm_load(bcx, raw, &vty))
+                    Ok(ExprValue::scalar(norm_load(bcx, raw, &vty)))
                 }
                 None => Err(native_err(
                     *span,
@@ -70,19 +75,25 @@ pub(crate) fn emit_expr<M: Module>(
                 .map(|var| bcx.use_var(var))
                 .unwrap_or_else(|| bcx.ins().iconst(types::I64, 0));
             c.call_rt(bcx, "alias.closure.new", &[code, env])
+                .map(ExprValue::scalar)
         }
         Expr::Move { source, .. } => {
-            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+            emit_place_value(c, bcx, frame, source)
+                .map(|(value, _)| ExprValue::scalar(value))
         }
         Expr::Borrow { source, .. } => {
-            emit_place_addr(c, bcx, frame, source).map(|(address, _)| address)
+            emit_place_addr(c, bcx, frame, source)
+                .map(|(address, _)| ExprValue::scalar(address))
         }
-        Expr::ReadPlace { source, plan, .. } => emit_deep_clone_place(c, bcx, frame, source, plan),
+        Expr::ReadPlace { source, plan, .. } => {
+            emit_deep_clone_place(c, bcx, frame, source, plan).map(ExprValue::scalar)
+        }
         Expr::Cast { expr, span, .. } => {
             let dst = c.vty(e.ty());
             let src = c.vty(expr.ty());
-            let value = emit_expr(c, bcx, frame, expr)?;
-            emit_convert(c, bcx, *span, value, &src, &dst)
+            let value = emit_expr(c, bcx, frame, expr)?
+                .into_scalar("scalar cast 收到 multi-lane expression value");
+            emit_convert(c, bcx, *span, value, &src, &dst).map(ExprValue::scalar)
         }
         Expr::Convert {
             expr, mode, span, ..
@@ -91,23 +102,28 @@ pub(crate) fn emit_expr<M: Module>(
             ResolvedConversion::Convert => {
                 let src = c.vty(expr.ty());
                 let dst = c.vty(e.ty());
-                let value = emit_expr(c, bcx, frame, expr)?;
-                emit_convert(c, bcx, *span, value, &src, &dst)
+                let value = emit_expr(c, bcx, frame, expr)?
+                    .into_scalar("scalar conversion 收到 multi-lane expression value");
+                emit_convert(c, bcx, *span, value, &src, &dst).map(ExprValue::scalar)
             }
         },
-        Expr::Typeof { type_name, .. } => str_literal_handle(c, bcx, type_name),
+        Expr::Typeof { type_name, .. } => {
+            str_literal_handle(c, bcx, type_name).map(ExprValue::scalar)
+        }
         Expr::Neg { expr, span, .. } => {
             // 负整数字面量已按最终 HIR 类型完成范围检查；必须直接发射其有符号位模式。
             // 若复用运行期 unary-neg overflow 检查，每种整数宽度的 INT_MIN 字面量都会
             // 因“对正 magnitude 取负”而被错误拒绝。
             if let Expr::Int(magnitude, ..) = expr.as_ref() {
                 if matches!(c.vty(e.ty()), VTy::I(_)) {
-                    return Ok(bcx
-                        .ins()
-                        .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64));
+                    return Ok(ExprValue::scalar(
+                        bcx.ins()
+                            .iconst(types::I64, 0u64.wrapping_sub(*magnitude) as i64),
+                    ));
                 }
             }
-            let v = emit_expr(c, bcx, frame, expr)?;
+            let v = emit_expr(c, bcx, frame, expr)?
+                .into_scalar("numeric negation 收到 multi-lane expression value");
             let t = c.vty(expr.ty());
             match t {
                 VTy::I(w) => {
@@ -125,20 +141,22 @@ pub(crate) fn emit_expr<M: Module>(
                     let overflow = bcx.ins().icmp(IntCC::Equal, red, min);
                     emit_abort_branch(c, bcx, overflow, "alias.abort_overflow", *span)?;
                     let n = bcx.ins().ineg(red);
-                    Ok(widen_signed(bcx, n, wt))
+                    Ok(ExprValue::scalar(widen_signed(bcx, n, wt)))
                 }
-                VTy::F(_) => Ok(bcx.ins().fneg(v)),
+                VTy::F(_) => Ok(ExprValue::scalar(bcx.ins().fneg(v))),
                 _ => invariant_violation("取负操作数为有符号整数或浮点 (sema 已校验)"),
             }
         }
         Expr::Not { expr, .. } => {
-            let v = emit_expr(c, bcx, frame, expr)?;
-            Ok(emit_bool_not(bcx, v))
+            let v = emit_expr(c, bcx, frame, expr)?
+                .into_scalar("boolean not 收到 multi-lane expression value");
+            Ok(ExprValue::scalar(emit_bool_not(bcx, v)))
         }
         Expr::BitNot { expr, .. } => {
             let vty = c.vty(e.ty());
-            let v = emit_expr(c, bcx, frame, expr)?;
-            emit_bit_not_typed(bcx, v, &vty)
+            let v = emit_expr(c, bcx, frame, expr)?
+                .into_scalar("bitwise not 收到 multi-lane expression value");
+            emit_bit_not_typed(bcx, v, &vty).map(ExprValue::scalar)
         }
         Expr::Binary {
             op: BinOp::And,
@@ -155,9 +173,11 @@ pub(crate) fn emit_expr<M: Module>(
         Expr::Binary {
             op, lhs, rhs, span, ..
         } => {
-            let l = emit_expr(c, bcx, frame, lhs)?;
-            let r = emit_expr(c, bcx, frame, rhs)?;
-            emit_binary(c, bcx, (*op, lhs, l, r, *span))
+            let l = emit_expr(c, bcx, frame, lhs)?
+                .into_scalar("scalar binary lhs 收到 multi-lane expression value");
+            let r = emit_expr(c, bcx, frame, rhs)?
+                .into_scalar("scalar binary rhs 收到 multi-lane expression value");
+            emit_binary(c, bcx, (*op, lhs, l, r, *span)).map(ExprValue::scalar)
         }
         Expr::Ternary {
             cond,
@@ -174,7 +194,7 @@ pub(crate) fn emit_expr<M: Module>(
             target,
             span,
             ..
-        } => emit_call(c, bcx, frame, callee, args, target, *span),
+        } => emit_call(c, bcx, frame, callee, args, target, *span).map(ExprValue::scalar),
         Expr::MethodCall {
             recv,
             receiver_pass,
@@ -190,22 +210,26 @@ pub(crate) fn emit_expr<M: Module>(
             args,
             target,
             *span,
-        ),
+        )
+        .map(ExprValue::scalar),
         Expr::Field {
             recv, field_index, ..
         } => {
-            let p = emit_expr(c, bcx, frame, recv)?;
+            let p = emit_expr(c, bcx, frame, recv)?
+                .into_scalar("struct field receiver 收到 multi-lane expression value");
             let (fvty, offset) = field_storage(c, recv.ty(), *field_index)?;
             let raw = bcx
                 .ins()
                 .load(cl_type(&fvty), MemFlagsData::new(), p, offset);
-            Ok(norm_load(bcx, raw, &fvty))
+            Ok(ExprValue::scalar(norm_load(bcx, raw, &fvty)))
         }
         Expr::Index {
             recv, idx, span, ..
         } => {
-            let array = emit_expr(c, bcx, frame, recv)?;
-            let idxw = emit_expr(c, bcx, frame, idx)?;
+            let array = emit_expr(c, bcx, frame, recv)?
+                .into_scalar("array index receiver 收到 multi-lane expression value");
+            let idxw = emit_expr(c, bcx, frame, idx)?
+                .into_scalar("array index 收到 multi-lane expression value");
             let elem_vty = match c.vty(recv.ty()) {
                 VTy::Array(inner) => (*inner).clone(),
                 _ => invariant_violation("下标主语为 array (sema 已校验)"),
@@ -214,26 +238,28 @@ pub(crate) fn emit_expr<M: Module>(
             let raw = bcx
                 .ins()
                 .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
-            Ok(norm_load(bcx, raw, &elem_vty))
+            Ok(ExprValue::scalar(norm_load(bcx, raw, &elem_vty)))
         }
         Expr::ArrayLit { elems, .. } => {
             let VTy::Array(elem_vty) = c.vty(e.ty()) else {
                 invariant_violation("数组字面量携带 array 类型")
             };
-            emit_array_lit(c, bcx, frame, elems, &elem_vty)
+            emit_array_lit(c, bcx, frame, elems, &elem_vty).map(ExprValue::scalar)
         }
         Expr::FuncLit {
             params,
             body,
             captures,
             ..
-        } => emit_funclit_value(c, bcx, frame, params, body, captures, e.ty()),
+        } => emit_funclit_value(c, bcx, frame, params, body, captures, e.ty())
+            .map(ExprValue::scalar),
         Expr::Match { subject, arms, .. } => {
             let result_vty = c.vty(e.ty());
             emit_match(c, bcx, frame, subject, arms, &result_vty)
         }
         Expr::Propagate { expr, .. } => {
-            let subj = emit_expr(c, bcx, frame, expr)?;
+            let subj = emit_expr(c, bcx, frame, expr)?
+                .into_scalar("result propagation 收到 multi-lane expression value");
             let tag = bcx
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_TAG_OFFSET);
@@ -260,7 +286,7 @@ pub(crate) fn emit_expr<M: Module>(
             let raw = bcx
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
-            Ok(restore_word(bcx, raw, &pvty))
+            Ok(ExprValue::scalar(restore_word(bcx, raw, &pvty)))
         }
     }
 }
@@ -295,8 +321,9 @@ fn emit_short_circuit<M: Module>(
     is_or: bool,
     lhs: &Expr,
     rhs: &Expr,
-) -> AliasResult<Value> {
-    let l = emit_expr(c, bcx, frame, lhs)?;
+) -> AliasResult<ExprValue> {
+    let l = emit_expr(c, bcx, frame, lhs)?
+        .into_scalar("short-circuit lhs 收到 multi-lane expression value");
     let rhs_b = bcx.create_block();
     let join_b = bcx.create_block();
     let out = bcx.append_block_param(join_b, types::I64);
@@ -310,12 +337,13 @@ fn emit_short_circuit<M: Module>(
     }
     bcx.seal_block(rhs_b);
     bcx.switch_to_block(rhs_b);
-    let r = emit_expr(c, bcx, frame, rhs)?;
+    let r = emit_expr(c, bcx, frame, rhs)?
+        .into_scalar("short-circuit rhs 收到 multi-lane expression value");
     bcx.ins().jump(join_b, &[BlockArg::Value(r)]);
     bcx.seal_block(join_b);
     bcx.switch_to_block(join_b);
     frame.terminated = false;
-    Ok(out)
+    Ok(ExprValue::scalar(out))
 }
 
 fn emit_ternary<M: Module>(
@@ -326,12 +354,18 @@ fn emit_ternary<M: Module>(
     then_expr: &Expr,
     else_expr: &Expr,
     result_vty: &VTy,
-) -> AliasResult<Value> {
-    let cv = emit_expr(c, bcx, frame, cond)?;
+) -> AliasResult<ExprValue> {
+    let cv = emit_expr(c, bcx, frame, cond)?
+        .into_scalar("ternary condition 收到 multi-lane expression value");
     let then_b = bcx.create_block();
     let else_b = bcx.create_block();
     let join_b = bcx.create_block();
-    let out = bcx.append_block_param(join_b, cl_type(result_vty));
+    let result_abi = result_vty.abi();
+    let result_types = result_abi.expression_types();
+    let out = result_types
+        .iter()
+        .map(|ty| bcx.append_block_param(join_b, *ty))
+        .collect::<Vec<_>>();
     bcx.ins().brif(cv, then_b, &[], else_b, &[]);
     bcx.seal_block(then_b);
     bcx.seal_block(else_b);
@@ -340,22 +374,30 @@ fn emit_ternary<M: Module>(
     frame.terminated = false;
     let a = emit_expr(c, bcx, frame, then_expr)?;
     if !frame.terminated {
-        let a = norm_store(bcx, a, result_vty);
-        bcx.ins().jump(join_b, &[BlockArg::Value(a)]);
+        a.assert_types(
+            bcx,
+            result_types,
+            "ternary then value 与 resolved expression ABI 不一致",
+        );
+        bcx.ins().jump(join_b, &a.block_args());
     }
 
     bcx.switch_to_block(else_b);
     frame.terminated = false;
     let b = emit_expr(c, bcx, frame, else_expr)?;
     if !frame.terminated {
-        let b = norm_store(bcx, b, result_vty);
-        bcx.ins().jump(join_b, &[BlockArg::Value(b)]);
+        b.assert_types(
+            bcx,
+            result_types,
+            "ternary else value 与 resolved expression ABI 不一致",
+        );
+        bcx.ins().jump(join_b, &b.block_args());
     }
 
     bcx.seal_block(join_b);
     bcx.switch_to_block(join_b);
     frame.terminated = false;
-    Ok(norm_load(bcx, out, result_vty))
+    Ok(ExprValue::from_lanes(out))
 }
 
 fn emit_match<M: Module>(
@@ -365,15 +407,20 @@ fn emit_match<M: Module>(
     subject: &Expr,
     arms: &[MatchArm],
     result_vty: &VTy,
-) -> AliasResult<Value> {
+) -> AliasResult<ExprValue> {
     let subject_vty = c.vty(subject.ty());
-    let subj = emit_expr(c, bcx, frame, subject)?;
+    let subj = emit_expr(c, bcx, frame, subject)?
+        .into_scalar("match subject 尚未支持 multi-lane expression value");
     let join_b = bcx.create_block();
-    let jv = if *result_vty == VTy::Unit {
-        None
+    let result_types = if *result_vty == VTy::Unit {
+        Vec::new()
     } else {
-        Some(bcx.append_block_param(join_b, types::I64))
+        result_vty.abi().expression_types().to_vec()
     };
+    let jv = result_types
+        .iter()
+        .map(|ty| bcx.append_block_param(join_b, *ty))
+        .collect::<Vec<_>>();
     let mut any_join = false;
 
     for (idx, arm) in arms.iter().enumerate() {
@@ -407,12 +454,13 @@ fn emit_match<M: Module>(
         bcx.seal_block(join_b);
         bcx.switch_to_block(join_b);
         frame.terminated = false;
-        Ok(match jv {
-            Some(value) => restore_word(bcx, value, result_vty),
-            None => subj,
-        })
+        if jv.is_empty() {
+            Ok(ExprValue::scalar(subj))
+        } else {
+            Ok(ExprValue::from_lanes(jv))
+        }
     } else {
-        Ok(subj)
+        Ok(ExprValue::scalar(subj))
     }
 }
 
@@ -516,8 +564,13 @@ pub(crate) fn emit_match_arm<M: Module>(
             if *result_vty == VTy::Unit {
                 bcx.ins().jump(join_b, &[]);
             } else {
-                let word = storage_word(bcx, v, result_vty);
-                bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                let result_abi = result_vty.abi();
+                v.assert_types(
+                    bcx,
+                    result_abi.expression_types(),
+                    "match arm value 与 resolved expression ABI 不一致",
+                );
+                bcx.ins().jump(join_b, &v.block_args());
             }
             frame.terminated = true;
             true
@@ -537,7 +590,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 invariant_violation("臂内 return 仅在函数体内可达 (sema 已校验)")
             });
             let n = stmts.len();
-            let mut tail: Option<Value> = None;
+            let mut tail: Option<ExprValue> = None;
             for (i, s) in stmts.iter().enumerate() {
                 ensure_current(bcx, frame);
                 if i + 1 == n {
@@ -557,8 +610,13 @@ pub(crate) fn emit_match_arm<M: Module>(
                     let v = tail.unwrap_or_else(|| {
                         invariant_violation("产值 match 块必须具有尾表达式 (sema 已校验)")
                     });
-                    let word = storage_word(bcx, v, result_vty);
-                    bcx.ins().jump(join_b, &[BlockArg::Value(word)]);
+                    let result_abi = result_vty.abi();
+                    v.assert_types(
+                        bcx,
+                        result_abi.expression_types(),
+                        "match block tail 与 resolved expression ABI 不一致",
+                    );
+                    bcx.ins().jump(join_b, &v.block_args());
                 }
                 frame.terminated = true;
                 true
