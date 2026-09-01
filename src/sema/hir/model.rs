@@ -66,6 +66,7 @@ impl Binding {
     pub(crate) fn is_method(&self) -> bool {
         matches!(self.owner, BindingOwner::Method { .. })
     }
+
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +152,7 @@ pub(crate) enum Stmt {
     Assign {
         target: Place,
         value: Expr,
+        operation: Option<AssignmentOperation>,
     },
     Expr {
         expr: Expr,
@@ -352,6 +354,22 @@ pub(crate) enum OwnershipCapability {
 pub(crate) enum StorageRelation {
     Owning,
     Borrowed,
+}
+
+/// An owning write either copies an inline value or consumes an already prepared owner. Keeping
+/// this semantic distinction in HIR is required even though both currently become a machine store:
+/// replacement destruction and raw initialization must never reconstruct transfer responsibility
+/// from the physical value representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwningWrite {
+    InlineCopy,
+    OwnershipTransfer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignmentOperation {
+    Replace(OwningWrite),
+    RebindBorrowedAlias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

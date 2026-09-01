@@ -26,6 +26,7 @@ pub(super) fn lower(
     // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked, &mut facts.next_loan_id)?;
     super::parameter_effects::finalize(&mut checked, &mut facts.next_loan_id)?;
+    super::ownership_operations::finalize(&mut checked)?;
     super::borrow_contract::validate(&checked)?;
     // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
     // only after captures are known; otherwise a closure use could be omitted from the loan region.
@@ -232,6 +233,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
             Stmt::Assign {
                 target,
                 value: lower_expr(value, facts)?,
+                operation: None,
             }
         }
         crate::ast::Stmt::FieldAssign {
@@ -259,6 +261,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                     info: PlaceInfo { ty, span: *span },
                 },
                 value: lower_expr(value, facts)?,
+                operation: None,
             }
         }
         crate::ast::Stmt::Expr { expr } => Stmt::Expr {

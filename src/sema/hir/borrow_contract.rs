@@ -120,7 +120,7 @@ fn push_stmt_children<'a>(
             &binding.value,
             binding.relation == Some(StorageRelation::Borrowed),
         )),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             let borrowed_rebind = matches!(target, Place::Local { binding_id, .. }
                 if relations.get(binding_id) == Some(&StorageRelation::Borrowed));
             stack.push(Node::Expr(value, borrowed_rebind));

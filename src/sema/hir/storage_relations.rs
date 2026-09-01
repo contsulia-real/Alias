@@ -115,7 +115,7 @@ fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(Node::Expr(value));
             push_place_expr_children(stack, target);
         }

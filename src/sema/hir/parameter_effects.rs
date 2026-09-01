@@ -2421,7 +2421,7 @@ fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Binding(binding)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             push_place_indices(stack, target);
             stack.push(Node::Expr(value));
         }
@@ -2576,7 +2576,7 @@ fn push_scoped_stmt<'a>(
 ) {
     match stmt {
         Stmt::Binding(binding) => stack.push(ScopedNode::Binding(binding, current)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             let mut place = target;
             loop {
                 match place {
@@ -2756,7 +2756,7 @@ fn push_mut_body<'a>(stack: &mut Vec<MutNode<'a>>, body: &'a mut Body) {
 fn push_mut_stmt<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(MutNode::Binding(binding)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             let mut place = target;
             loop {
                 match place {

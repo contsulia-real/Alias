@@ -184,6 +184,8 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
+在 function effect 完成后，sema 还会为每个 local/field assignment 固化 destination-side ownership operation：owning Place replacement 明确区分 `InlineCopy` 与 `OwnershipTransfer`，直接赋值给 `var` borrowed alias 固化为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这份结构化事实；后端不再通过 RHS category、target 形状或机器位模式重新猜 replacement / rebind。Binding 初始化、Pattern/match value 与容器写入仍需各自完整 effect/operation 合同，不能从这条 assignment 纵切反推为已经完成。
+
 普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。match/Pattern binding 与 for iterable 尚未完成各自 effect 合同；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move

@@ -127,7 +127,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(Node::Expr(value));
             push_place_expr_children(stack, target);
         }
@@ -379,7 +379,7 @@ fn validate_place(place: &Place) -> AliasResult<()> {
 
 fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
     match stmt {
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             validate_place(target)?;
             if !types_match(target.ty(), value.ty()) {
                 return Err(invariant(

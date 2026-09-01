@@ -5,9 +5,9 @@
 //! unioning every capability that may already have been moved.
 
 use super::{
-    place_relation, ArgumentPass, ArmBody, BindingId, Body, BorrowKind, CallArg, CallResult,
-    CheckedProgram, Expr, Item, LoanId, Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt,
-    StorageRelation, StrPart, ValueCategory,
+    place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, Body, BorrowKind,
+    CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwningWrite, Place, PlaceRelation,
+    ResolvedConversion, ReturnPass, Stmt, StorageRelation, StrPart,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -524,7 +524,22 @@ impl<'a> GraphBuilder<'a> {
                     self.edge(after_value, exit);
                 }
             }
-            Stmt::Assign { target, value } => {
+            Stmt::Assign {
+                target,
+                value,
+                operation,
+            } => {
+                let provisional_rebind = matches!(
+                    target,
+                    Place::Local { binding_id, .. } if self.borrowed.contains(binding_id)
+                );
+                let operation = match operation {
+                    Some(operation) => Some(*operation),
+                    None => super::ownership_operations::provisional_assignment_operation_for(
+                        value,
+                        provisional_rebind,
+                    )?,
+                };
                 let after_value = self.node(Action::Nop);
                 let after_place = self.node(Action::Nop);
                 self.tasks.push(Task::Expr {
@@ -547,7 +562,7 @@ impl<'a> GraphBuilder<'a> {
                     },
                 });
                 if let Place::Local { binding_id, .. } = target {
-                    if self.borrowed.contains(binding_id) {
+                    if operation == Some(AssignmentOperation::RebindBorrowedAlias) {
                         let Some((loan_id, _)) = resolved_borrow(value) else {
                             return Err(error(
                                 value.span(),
@@ -561,7 +576,8 @@ impl<'a> GraphBuilder<'a> {
                         );
                         return Ok(());
                     }
-                    if matches!(value.value_category(), Some(ValueCategory::OwnedTemporary))
+                    if operation
+                        == Some(AssignmentOperation::Replace(OwningWrite::OwnershipTransfer))
                         && self.eligible.contains(binding_id)
                     {
                         self.action_between(
@@ -2315,7 +2331,7 @@ fn push_body_mut<'a>(stack: &mut Vec<MutNode<'a>>, body: &'a mut Body) {
 fn push_stmt_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(MutNode::Expr(value));
             push_place_expr_children_mut(stack, target);
         }

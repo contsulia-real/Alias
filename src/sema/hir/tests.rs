@@ -419,7 +419,7 @@ fn push_place_exprs<'a>(stack: &mut Vec<TestNode<'a>>, place: &'a Place) {
 fn push_stmt<'a>(stack: &mut Vec<TestNode<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(TestNode::Expr(&binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(TestNode::Expr(value));
             push_place_exprs(stack, target);
         }

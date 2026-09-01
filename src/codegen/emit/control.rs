@@ -11,7 +11,7 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
-    BindKind, BindingId, Body, Expr, ReturnPass, Stmt, StorageRelation, ValueCategory,
+    AssignmentOperation, BindKind, BindingId, Body, Expr, ReturnPass, Stmt, StorageRelation,
 };
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -114,22 +114,21 @@ pub(crate) fn emit_stmt<M: Module>(
             }
             Ok(())
         }
-        Stmt::Assign { target, value } => {
-            // Replacement 的 ownership 语义由 resolved HIR 决定；运行时顺序必须保持 RHS
-            // （包括 ReadPlace clone）先完整求值，再求值 target 的 Field/Index projection。
-            // 反转顺序会让重叠 Place 的 replacement 观察到错误 source 状态。
-            let borrowed_rebind = matches!(
-                (target, value.value_category()),
-                (
-                    crate::sema::hir::Place::Local { binding_id, .. },
-                    Some(ValueCategory::BorrowedValue)
-                ) if crate::codegen::bound_relation(c, frame, *binding_id)
-                    == Some(StorageRelation::Borrowed)
-            );
+        Stmt::Assign {
+            target,
+            value,
+            operation,
+        } => {
+            // The frozen operation owns replacement-vs-rebind semantics. Runtime order still has
+            // to evaluate the complete RHS before the target projection; reversing it would make
+            // overlapping Place replacement observe the wrong source state.
+            let operation = operation.unwrap_or_else(|| {
+                invariant_violation("assignment 缺少 resolved ownership operation")
+            });
             let value = emit_expr(c, bcx, frame, value)?;
-            if borrowed_rebind {
+            if operation == AssignmentOperation::RebindBorrowedAlias {
                 let crate::sema::hir::Place::Local { binding_id, .. } = target else {
-                    unreachable!()
+                    invariant_violation("borrowed alias rebind target 必须是 local Place")
                 };
                 let cell = super::cells::cell_addr(c, frame, *binding_id).unwrap_or_else(|| {
                     invariant_violation("borrowed rebind target 必须有 alias cell")

@@ -166,6 +166,7 @@ fn final_hir_gate_rejects_field_place_type_drift() {
             Stmt::Assign {
                 target: Place::Field { info, .. },
                 value: Expr::Int(_, _, rhs_info),
+                ..
             } => Some((&mut info.ty, &mut rhs_info.ty)),
             _ => None,
         })
@@ -235,6 +236,7 @@ fn final_hir_gate_rejects_assign_rhs_type_drift_from_place() {
             Stmt::Assign {
                 target: Place::Local { .. },
                 value: Expr::Int(_, _, info),
+                ..
             } => Some(info),
             _ => None,
         })

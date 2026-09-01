@@ -111,20 +111,21 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - `hir/capture.rs` 以 child-before-parent 的有限遍历分配并固化 capture loan；捕获 dynamic Place 进入用户调用时由 parameter argument pass 建立 call loan；capture 不是当前 `Borrowed(source)` 支持的 return source，非 fresh-owner capture return 继续 fail-closed；
 - `hir/expr_places.rs` 是已解析 HIR expression 恢复 stable `Place` projection 的唯一 owner；parameter argument planning 与 ownership flow 必须共同消费它，不能分别按 expression 形状拼第二套 Field/Index source；
 - `hir/parameter_effects.rs` 在完整 HIR 上以有限格 fixed-point 统一固化 parameter `ReadBorrow / WriteBorrow / Owned` 与 return `Inline / Owned / Borrowed(source)` effects；完整 `Ty::Func`、显式 `Param`、用户方法 target、每个 caller `ArgumentPass` / `CallResult` 与 return `ReturnPass` 必须一致。稳定 dynamic owning Place 只可进入 borrow parameter effect，`Owned` 参数必须接收 `OwnedTemporary + Available`；borrowed return source 当前精确到 `Parameter(index) / Self / Global(binding)`，caller 建立 returned loan。call/returned loan 与 local/capture loan 共用 ownership CFG/NLL，final gate 独立复算并拒绝签名、source、source writability、loan kind 或 pass 漂移；
+- `hir/ownership_operations.rs` 在 function effect 写回后统一固化 assignment destination-side write：owning Place 使用 `Replace(InlineCopy|OwnershipTransfer)`，直接 borrowed-alias 赋值使用 `RebindBorrowedAlias`。ownership CFG、final gate 与 codegen 必须消费该 operation；effect fixed-point 尚未完成时的 provisional CFG 也只能调用这一 owner 计算草案，不能复制分类矩阵。Binding 初始化、Pattern/match value 与容器写入仍等待各自完整合同；
 - 显式 `clone` 固化为 `CallTarget::Builtin(BuiltinCall::DeepClone(DeepClonePlan))`；dynamic ownership-bearing clone 是 `OwnedTemporary + Available`，标量 clone 保持 `InlineValue + None`；
 - 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；用户函数实参和方法 receiver/实参走 resolved parameter pass，函数返回走 resolved return pass，Pattern/for 仍等待各自 effect；capture 不走 owning read，而由结构化 capture loan 管理；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
 - 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；普通 borrow binding 当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；return 语境额外允许直接 parameter/self/global source，并由 `ReturnPass` / caller `CallResult` 保持 provenance。`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow binding、borrowed alias capture/generation return、显式 BorrowedValue call forwarding 与 reborrow；
 - 显式 `move(place)` 固化为专用 `Expr::Move { source: Place }`；当前 dynamic source 接受同一函数内已证明 owning 的完整 local，包含 `Owned` parameter；field/array partial move-out 以及缺少 capture/global transfer source 的 move 均 fail-closed；scalar move 保持 InlineValue 值语义；
 - Binding/Method/字段/构造器索引均已结构化解析；
-- 当前赋值统一固化为递归 resolved `Place`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId 与字段索引/可写合同都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
+- 当前赋值统一固化为递归 resolved `Place` 与 resolved `AssignmentOperation`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId、字段索引/可写合同和 replacement/rebind ownership operation 都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
 - 调用使用 `CallTarget` / `MethodTarget`；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
 - value category、当前可证明的 initial capability / storage relation，以及每项 capture 的 BindingId/LoanId/root Place/final ReadLoan|WriteLoan 都在最终 HIR validation 前写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作一旦进入当前 HIR，就必须在进入 codegen 前固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Place relation / Move/loan flow / Borrow kind / capture/parameter/return effect、caller argument/result/return pass、borrow source writability、`ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Assignment operation / Place relation / Move/loan flow / Borrow kind / capture/parameter/return effect、caller argument/result/return pass、borrow source writability、`ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
 
 ### codegen
 
@@ -142,6 +143,8 @@ codegen 只消费已解析 HIR，不得根据：
 重新决定静态语义、ownership 或 borrow relation。
 
 `codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
+
+Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径；当前尚未落地的 destruction 只意味着 replacement 暂未释放旧资源，不授权丢失已经固化的 transfer responsibility。
 
 `codegen/emit/clone.rs` 同时执行显式 clone 与 owning-slot `ReadPlace` 的 resolved plan；`shallow.rs` 执行 resolved shallow plan。两者可以验证 plan 与既有物理布局的内部不变量，但不能自行判断静态类型是否允许对应操作。尤其 shallow-safe aggregate 当前即使以 heap pointer 表示，也必须建立新的独立 aggregate root；禁止简单 bit-copy pointer 后让两个语义 owner 指向同一 root。
 

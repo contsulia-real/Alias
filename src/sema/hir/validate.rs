@@ -160,7 +160,7 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
 fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(HirValidationNode::Expr(&binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(HirValidationNode::Expr(value));
             push_place_expr_children(stack, target);
         }
@@ -1152,7 +1152,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     validate_binding_contract(binding)?;
                     stack.push(HirValidationNode::Expr(&binding.value));
                 }
-                Stmt::Assign { target, value } => {
+                Stmt::Assign { target, value, .. } => {
                     validate_place_contract(target, &known_ids, &structs, true)?;
                     stack.push(HirValidationNode::Expr(value));
                     push_place_expr_children(&mut stack, target);

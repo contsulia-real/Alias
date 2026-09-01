@@ -537,7 +537,7 @@ fn push_place_expr_children<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
 fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(Node::Expr(&binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             // 三遍 capture traversal 必须保持同一 preorder；Place 内只有 Index expression
             // 仍属于可求值 child，Local/Field identity 本身由 record_place_uses 处理。
             stack.push(Node::Expr(value));
@@ -689,7 +689,7 @@ fn push_place_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, place: &'a mut
 fn push_stmt_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
     match stmt {
         Stmt::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
-        Stmt::Assign { target, value } => {
+        Stmt::Assign { target, value, .. } => {
             stack.push(MutNode::Expr(value));
             push_place_expr_children_mut(stack, target);
         }

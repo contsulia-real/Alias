@@ -56,7 +56,7 @@ impl CheckedProgram {
                 }
                 TypeNode::Stmt(stmt) => match stmt {
                     Stmt::Binding(binding) => stack.push(TypeNode::Binding(binding)),
-                    Stmt::Assign { target, value } => {
+                    Stmt::Assign { target, value, .. } => {
                         visit_place(target, visit, &mut stack);
                         stack.push(TypeNode::Expr(value));
                     }

@@ -8,6 +8,7 @@ mod lower;
 mod model;
 mod ownership_capabilities;
 mod ownership_flow;
+mod ownership_operations;
 mod parameter_effects;
 mod place_relation;
 mod storage_relations;
@@ -29,6 +30,8 @@ mod move_tests;
 #[cfg(test)]
 mod ordinary_read_tests;
 #[cfg(test)]
+mod ownership_operation_tests;
+#[cfg(test)]
 mod parameter_effect_tests;
 #[cfg(test)]
 mod place_relation_tests;
@@ -46,11 +49,12 @@ mod typed_contract_tests;
 mod value_category_tests;
 
 pub(crate) use model::{
-    ArgumentPass, ArmBody, BinOp, BindKind, Binding, BindingId, BindingOwner, Body, BorrowKind,
-    BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram, CtorKind, DeepClonePlan,
-    Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm, MethodId, MethodTarget,
-    OwnershipCapability, Param, Pattern, Place, PlaceInfo, ResolvedConversion, ReturnPass,
-    ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
+    ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOwner,
+    Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
+    CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
+    MethodId, MethodTarget, OwnershipCapability, OwningWrite, Param, Pattern, Place, PlaceInfo,
+    ResolvedConversion, ReturnPass, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef,
+    StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -156,6 +160,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     // failures and make the effect owner reason over an invalid semantic graph.
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)?;
+    ownership_operations::validate(program)?;
     parameter_effects::validate(program)?;
     borrow_contract::validate(program)?;
     place_relation::validate(program)?;
