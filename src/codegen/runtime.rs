@@ -100,13 +100,13 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.str.upper", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
     contract!("alias.str.lower", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
     contract!("alias.str.trim", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
-    contract!("alias.arr.new", [val(RuntimeTy::I32)] -> val(RuntimeTy::I64)),
+    contract!("alias.arr.new", [val(RuntimeTy::I32), val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
     contract!("alias.arr.len", [val(RuntimeTy::I64)] -> val(RuntimeTy::I32)),
     contract!(
         "alias.arr.push",
-        [val(RuntimeTy::I64), nullable(RuntimeTy::I64)]
+        [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)
     ),
-    contract!("alias.arr.pop", [val(RuntimeTy::I64)] -> nullable(RuntimeTy::I64)),
+    contract!("alias.arr.pop", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
     contract!("alias.display.int", [val(RuntimeTy::I32)] -> val(RuntimeTy::I64)),
     contract!("alias.display.i64", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),
     contract!("alias.display.u64", [val(RuntimeTy::I64)] -> val(RuntimeTy::I64)),

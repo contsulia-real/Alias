@@ -1,10 +1,10 @@
 use super::expr::emit_expr;
 use super::ops::{emit_index_guard, emit_runtime_abort};
-use crate::codegen::abi::{storage_word, store_elem, VTy, VALUE_WORD_BYTES};
+use crate::codegen::abi::{value_layout, VTy};
 use crate::codegen::layout::{
     ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_WRAPPER_RAW_OFFSET, ARRAY_WRAPPER_VERSION_OFFSET,
-    ARRAY_WRAPPER_WORDS, ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET,
-    ITERATOR_WORDS,
+    ARRAY_STRIDE_OFFSET, ARRAY_WRAPPER_WORDS, ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET,
+    ITERATOR_VERSION_OFFSET, ITERATOR_WORDS,
 };
 use crate::codegen::{Compiler, Frame};
 use crate::sema::hir::Expr;
@@ -27,9 +27,9 @@ pub(super) fn array_len(bcx: &mut FunctionBuilder, raw: Value) -> Value {
         .load(types::I64, MemFlagsData::new(), raw, ARRAY_LEN_OFFSET)
 }
 
-/// 当前 raw array backing 仍以固定 VALUE_WORD_BYTES 存放元素。所有 emitter 对 backing
-/// element 的寻址必须经过这里；未来 typed stride 替换 universal-word layout 时，若各调用点
-/// 各自保留 `index * VALUE_WORD_BYTES`，会再次形成多个物理布局 owner 并产生读写错位。
+/// raw array header 保存创建时由 canonical ValueLayout 固化的 element stride。所有 emitter
+/// 对 backing element 的寻址必须经过这里；调用点自行重算或写死 8-byte 步长会让扩容复制、
+/// index 与 iterator 对同一 backing 产生不同解释。
 pub(super) fn array_element_addr(
     bcx: &mut FunctionBuilder,
     raw: Value,
@@ -38,7 +38,10 @@ pub(super) fn array_element_addr(
     let data = bcx
         .ins()
         .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
-    let offset = bcx.ins().imul_imm_s(index, VALUE_WORD_BYTES);
+    let stride = bcx
+        .ins()
+        .load(types::I64, MemFlagsData::new(), raw, ARRAY_STRIDE_OFFSET);
+    let offset = bcx.ins().imul(index, stride);
     bcx.ins().iadd(data, offset)
 }
 
@@ -140,14 +143,15 @@ pub(crate) fn emit_array_lit<M: Module>(
 ) -> AliasResult<Value> {
     let n = elems.len() as i64;
     let cap = bcx.ins().iconst(types::I32, n);
-    let raw = c.call_rt(bcx, "alias.arr.new", &[cap])?;
+    let stride = bcx
+        .ins()
+        .iconst(types::I64, value_layout(elem_vty).stride as i64);
+    let raw = c.call_rt(bcx, "alias.arr.new", &[cap, stride])?;
     for (i, el) in elems.iter().enumerate() {
         let v = emit_expr(c, bcx, frame, el)?;
-        let v = v.into_scalar("array literal element storage 尚未支持 multi-lane value");
         let index = bcx.ins().iconst(types::I64, i as i64);
         let addr = array_element_addr(bcx, raw, index);
-        let sv = storage_word(bcx, v, elem_vty);
-        store_elem(bcx, sv, addr, elem_vty);
+        v.store(bcx, addr, 0, elem_vty);
     }
     let lenw = bcx.ins().iconst(types::I64, n);
     bcx.ins()

@@ -7,7 +7,7 @@ use super::places::emit_place_addr;
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
 use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, restore_word, storage_word, user_signature, VTy,
+    cl_type, norm_load, norm_store, storage_word, user_signature, VTy,
 };
 use crate::codegen::layout::{
     result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
@@ -251,10 +251,9 @@ pub(crate) fn emit_method_call<M: Module>(
                 invariant_violation("push 元数 (sema 已校验)")
             };
             let value = emit_expr(c, bcx, frame, &arg.value)?;
-            let value = value.into_scalar("array push 尚未支持 multi-lane element");
-            let word = storage_word(bcx, value, elem);
             let raw = array_raw(bcx, rv);
-            c.call_rt_void(bcx, "alias.arr.push", &[raw, word])?;
+            let slot = c.call_rt(bcx, "alias.arr.push", &[raw])?;
+            value.store(bcx, slot, 0, elem);
             bump_array_version(bcx, rv);
             Ok(bcx.ins().iconst(types::I64, 0))
         }
@@ -266,9 +265,11 @@ pub(crate) fn emit_method_call<M: Module>(
             let len = array_len(bcx, raw);
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
             emit_abort_branch(c, bcx, empty, "alias.abort_pop", span)?;
-            let raw_value = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
+            let slot = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
+            let value = super::value::ExprValue::load(bcx, slot, 0, elem)
+                .into_scalar("array.pop result 尚未支持 multi-lane method result");
             bump_array_version(bcx, rv);
-            Ok(restore_word(bcx, raw_value, elem))
+            Ok(value)
         }
         MethodTarget::ArrayIterator => {
             let VTy::Array(_) = &svt else {

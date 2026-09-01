@@ -11,7 +11,7 @@ use super::ops::{
 use super::places::{emit_place_addr, emit_place_value, field_storage};
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use super::value::ExprValue;
-use crate::codegen::abi::{cl_type, norm_load, restore_word, VTy};
+use crate::codegen::abi::{cl_type, restore_word, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
 use crate::codegen::layout::{
     result_tag, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
@@ -230,10 +230,7 @@ pub(crate) fn emit_expr<M: Module>(
                 _ => invariant_violation("下标主语为 array (sema 已校验)"),
             };
             let addr = checked_array_element_addr(c, bcx, array, idxw, *span)?;
-            let raw = bcx
-                .ins()
-                .load(cl_type(&elem_vty), MemFlagsData::new(), addr, 0);
-            Ok(ExprValue::scalar(norm_load(bcx, raw, &elem_vty)))
+            Ok(ExprValue::load(bcx, addr, 0, &elem_vty))
         }
         Expr::ArrayLit { elems, .. } => {
             let VTy::Array(elem_vty) = c.vty(e.ty()) else {

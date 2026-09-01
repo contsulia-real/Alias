@@ -1,7 +1,9 @@
 use super::arrays::{array_element_addr, array_len, array_raw, wrap_array};
 use super::expr::emit_expr;
 use super::places::emit_place_value;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, restore_word, storage_word, VTy};
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, restore_word, storage_word, value_layout, VTy,
+};
 use crate::codegen::layout::{
     RESULT_OK_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET, RESULT_WORDS, STRING_BYTES,
     STRING_DATA_OFFSET, STRING_LEN_OFFSET,
@@ -198,10 +200,13 @@ fn clone_array<M: Module>(
 ) -> AliasResult<Value> {
     let source_raw = array_raw(bcx, source);
     let len = array_len(bcx, source_raw);
-    // 不把 I64 len 缩成 arr.new 的 I32 cap；从空 backing 开始逐元素 push，避免对旧
-    // universal-word runtime 的 capacity ABI 制造新的截断前提。
+    // 不把 I64 len 缩成 arr.new 的 I32 cap；从空 backing 开始逐元素 push，避免为
+    // capacity ABI 制造新的截断前提。stride 仍由 element ValueLayout 唯一决定。
     let zero_cap = bcx.ins().iconst(types::I32, 0);
-    let out_raw = c.call_rt(bcx, "alias.arr.new", &[zero_cap])?;
+    let stride = bcx
+        .ins()
+        .iconst(types::I64, value_layout(elem_vty).stride as i64);
+    let out_raw = c.call_rt(bcx, "alias.arr.new", &[zero_cap, stride])?;
 
     let index = bcx.declare_var(types::I64);
     let zero = bcx.ins().iconst(types::I64, 0);
@@ -217,13 +222,11 @@ fn clone_array<M: Module>(
     bcx.seal_block(body_b);
     bcx.switch_to_block(body_b);
     let addr = array_element_addr(bcx, source_raw, current);
-    let raw = bcx
-        .ins()
-        .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
-    let value = norm_load(bcx, raw, elem_vty);
+    let value = super::value::ExprValue::load(bcx, addr, 0, elem_vty)
+        .into_scalar("array deep clone 尚未支持 multi-lane element source");
     let cloned = clone_value(c, bcx, value, elem_vty, elem_plan)?;
-    let word = storage_word(bcx, cloned, elem_vty);
-    c.call_rt_void(bcx, "alias.arr.push", &[out_raw, word])?;
+    let slot = c.call_rt(bcx, "alias.arr.push", &[out_raw])?;
+    super::value::ExprValue::scalar(cloned).store(bcx, slot, 0, elem_vty);
     let next = bcx.ins().iadd_imm_s(current, 1);
     bcx.def_var(index, next);
     bcx.ins().jump(loop_b, &[]);

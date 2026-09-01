@@ -5,7 +5,7 @@ use super::clone::emit_deep_clone_value;
 use super::cells::{coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::places::{emit_place_addr, emit_place_value, emit_place_write};
-use crate::codegen::abi::{cl_type, norm_load, VTy};
+use crate::codegen::abi::VTy;
 use crate::codegen::funcgen::emit_funclit_value_typed;
 use crate::codegen::layout::{
     ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET,
@@ -420,10 +420,8 @@ fn emit_for<M: Module>(
     frame.terminated = false;
     let raw = array_raw(bcx, array);
     let addr = array_element_addr(bcx, raw, cursor);
-    let raw_elem = bcx
-        .ins()
-        .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
-    let elem = norm_load(bcx, raw_elem, elem_vty);
+    let elem = super::value::ExprValue::load(bcx, addr, 0, elem_vty)
+        .into_scalar("for element deep clone 尚未支持 multi-lane source");
     let elem = emit_deep_clone_value(c, bcx, elem, elem_vty, element_plan)?;
     let next = bcx.ins().iadd_imm_s(cursor, 1);
     // cursor 在进入用户 body 前推进；因此 continue 跳回 header 时不会重复当前元素。

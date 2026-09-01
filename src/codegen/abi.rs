@@ -579,25 +579,6 @@ pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> 
     }
 }
 
-pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, elem_vty: &VTy) {
-    let abi = elem_vty.abi();
-    let storage = abi.scalar_storage();
-    // array backing store 按元素真实 storage 宽度写入，而 array runtime 的槽步长仍由
-    // VALUE_WORD_BYTES 管理；因此写入前必须把通用 word 恢复成元素 storage 表示。
-    let value = match abi.word() {
-        WordRepr::F32Bits => {
-            let bits = bcx.ins().ireduce(types::I32, word);
-            bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits)
-        }
-        WordRepr::F64Bits => bcx.ins().bitcast(types::F64, MemFlagsData::new(), word),
-        WordRepr::Signed | WordRepr::Unsigned if storage != types::I64 => {
-            bcx.ins().ireduce(storage, word)
-        }
-        _ => word,
-    };
-    bcx.ins().store(MemFlagsData::new(), value, addr, 0);
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

@@ -7,11 +7,12 @@
 use super::abi::{value_word_offset, VALUE_WORD_BYTES};
 use crate::sema::hir::CtorKind;
 
-pub(crate) const ARRAY_RAW_WORDS: i64 = 3;
+pub(crate) const ARRAY_RAW_WORDS: i64 = 4;
 pub(crate) const ARRAY_RAW_BYTES: i64 = ARRAY_RAW_WORDS * VALUE_WORD_BYTES;
 pub(crate) const ARRAY_DATA_OFFSET: i32 = value_word_offset(0);
 pub(crate) const ARRAY_LEN_OFFSET: i32 = value_word_offset(1);
 pub(crate) const ARRAY_CAP_OFFSET: i32 = value_word_offset(2);
+pub(crate) const ARRAY_STRIDE_OFFSET: i32 = value_word_offset(3);
 
 pub(crate) const ARRAY_WRAPPER_WORDS: i64 = 2;
 pub(crate) const ARRAY_WRAPPER_RAW_OFFSET: i32 = value_word_offset(0);

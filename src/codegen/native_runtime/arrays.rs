@@ -1,6 +1,5 @@
-use crate::codegen::abi::VALUE_WORD_BYTES;
 use crate::codegen::layout::{
-    ARRAY_CAP_OFFSET, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_RAW_BYTES,
+    ARRAY_CAP_OFFSET, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_RAW_BYTES, ARRAY_STRIDE_OFFSET,
 };
 use crate::codegen::Compiler;
 use crate::AliasResult;
@@ -8,9 +7,9 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData};
 use cranelift_module::{FuncId, Module};
 
-// raw array 始终保持 0 <= len <= cap；cap = 0 时 data 才允许为 null。push 必须先
-// 扩容再按 len 写槽，pop 则只接受 emitter 已证明非空的输入。破坏该顺序或前置条件会
-// 把 null/越界地址交给生成代码中的裸 load/store。
+// raw array 始终保持 0 <= len <= cap；cap = 0 时 data 才允许为 null。header 保存创建时
+// 由 canonical ValueLayout 提供的 stride，所有扩容、复制和 slot 寻址都消费该字段。
+// push/pop 只返回 slot address，typed lane load/store 由 emitter 的 ExprValue owner 完成。
 pub(super) fn emit_array_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
     rtl_move_memory: FuncId,
@@ -38,7 +37,7 @@ pub(super) fn emit_array_runtime<M: Module>(
         bcx.seal_block(else_b);
         bcx.switch_to_block(then_b);
         {
-            let bytes = bcx.ins().imul_imm_s(cap64, VALUE_WORD_BYTES);
+            let bytes = bcx.ins().imul(cap64, a[1]);
             let buf = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
             bcx.ins()
                 .store(MemFlagsData::new(), buf, hdr, ARRAY_DATA_OFFSET);
@@ -58,6 +57,8 @@ pub(super) fn emit_array_runtime<M: Module>(
             .store(MemFlagsData::new(), zero, hdr, ARRAY_LEN_OFFSET);
         bcx.ins()
             .store(MemFlagsData::new(), cap64, hdr, ARRAY_CAP_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), a[1], hdr, ARRAY_STRIDE_OFFSET);
         bcx.ins().return_(&[hdr]);
         true
     });
@@ -82,6 +83,9 @@ pub(super) fn emit_array_runtime<M: Module>(
         let cap = bcx
             .ins()
             .load(types::I64, MemFlagsData::new(), hdr, ARRAY_CAP_OFFSET);
+        let stride = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_STRIDE_OFFSET);
         // data/cap 只有在新缓冲区分配并复制完成后才一起发布；提前覆盖 data 会丢失
         // RtlMoveMemory 的旧来源，提前覆盖 cap 则会制造暂时不一致的 raw header。
         let full = bcx.ins().icmp(IntCC::Equal, len, cap);
@@ -99,10 +103,10 @@ pub(super) fn emit_array_runtime<M: Module>(
             let is_empty = bcx.ins().icmp_imm_s(IntCC::Equal, cap, 0);
             let doubled = bcx.ins().imul_imm_s(cap, 2);
             let new_cap = bcx.ins().select(is_empty, one, doubled);
-            let bytes = bcx.ins().imul_imm_s(new_cap, VALUE_WORD_BYTES);
+            let bytes = bcx.ins().imul(new_cap, stride);
             let grown = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
             let mv = c.module.declare_func_in_func(rtl_move_memory, bcx.func);
-            let copy_bytes = bcx.ins().imul_imm_s(len, VALUE_WORD_BYTES);
+            let copy_bytes = bcx.ins().imul(len, stride);
             let copy_b = bcx.create_block();
             let after_copy_b = bcx.create_block();
             let has_old = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len, 0);
@@ -124,14 +128,14 @@ pub(super) fn emit_array_runtime<M: Module>(
 
         bcx.switch_to_block(join_b);
         bcx.seal_block(join_b);
-        let slot = bcx.ins().imul_imm_s(len, VALUE_WORD_BYTES);
+        let slot = bcx.ins().imul(len, stride);
         let addr = bcx.ins().iadd(jdp, slot);
-        bcx.ins().store(MemFlagsData::new(), a[1], addr, 0);
         let one = bcx.ins().iconst(types::I64, 1);
         let len1 = bcx.ins().iadd(len, one);
         bcx.ins()
             .store(MemFlagsData::new(), len1, hdr, ARRAY_LEN_OFFSET);
-        false
+        bcx.ins().return_(&[addr]);
+        true
     });
 
     shim!(c, "alias.arr.pop", |bcx, a| {
@@ -147,10 +151,12 @@ pub(super) fn emit_array_runtime<M: Module>(
         let dp = bcx
             .ins()
             .load(types::I64, MemFlagsData::new(), hdr, ARRAY_DATA_OFFSET);
-        let slot = bcx.ins().imul_imm_s(new_len, VALUE_WORD_BYTES);
+        let stride = bcx
+            .ins()
+            .load(types::I64, MemFlagsData::new(), hdr, ARRAY_STRIDE_OFFSET);
+        let slot = bcx.ins().imul(new_len, stride);
         let addr = bcx.ins().iadd(dp, slot);
-        let v = bcx.ins().load(types::I64, MemFlagsData::new(), addr, 0);
-        bcx.ins().return_(&[v]);
+        bcx.ins().return_(&[addr]);
         true
     });
     Ok(())
