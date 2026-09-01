@@ -1188,12 +1188,28 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                 Stmt::For {
                     binding_id,
                     ty,
+                    element_plan,
                     iterable,
                     body,
                     span,
                 } => {
                     if !known_ids.contains(binding_id) || ty.contains_unknown() {
                         return Err(invariant(*span, "for BindingId/类型未解析"));
+                    }
+                    let expected = deep_clone_plan_with(ty, *span, &|name| {
+                        structs.get(name).map(|def| {
+                            def.fields
+                                .iter()
+                                .map(|field| field.ty.clone())
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .map_err(|_| invariant(*span, "for 元素类型不可 DeepClone"))?;
+                    if *element_plan != expected {
+                        return Err(invariant(
+                            *span,
+                            "for 元素 DeepClone plan 与循环变量类型不一致",
+                        ));
                     }
                     for stmt in body.iter().rev() {
                         stack.push(HirValidationNode::Stmt(stmt));

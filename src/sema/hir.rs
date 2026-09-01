@@ -132,6 +132,7 @@ pub(super) struct LowerFacts {
     pub(super) params: HashMap<usize, Ty>,
     pub(super) param_ids: HashMap<usize, BindingId>,
     pub(super) fors: HashMap<usize, Ty>,
+    pub(super) for_element_plans: HashMap<usize, DeepClonePlan>,
     pub(super) for_ids: HashMap<usize, BindingId>,
     pub(super) match_binding_ids: HashMap<usize, BindingId>,
     pub(super) expr_binding_ids: HashMap<usize, BindingId>,

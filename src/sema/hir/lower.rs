@@ -53,6 +53,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("函数参数类型", facts.params.len()),
         ("函数参数 BindingId", facts.param_ids.len()),
         ("for 循环变量类型", facts.fors.len()),
+        ("for 元素 DeepClone plan", facts.for_element_plans.len()),
         ("for 循环变量 BindingId", facts.for_ids.len()),
         ("Pattern BindingId", facts.match_binding_ids.len()),
         ("标识符 BindingId", facts.expr_binding_ids.len()),
@@ -315,6 +316,12 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 msg: "内部 sema 不变式被破坏: for 循环变量缺少静态类型".into(),
                 span: *span,
             })?,
+            element_plan: take_required(
+                &mut facts.for_element_plans,
+                key,
+                *span,
+                "for 元素 DeepClone plan",
+            )?,
             iterable: lower_expr(iterable, facts)?,
             body: body
                 .iter()

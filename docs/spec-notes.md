@@ -186,7 +186,7 @@ source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 
 
 在 function effect 完成后，sema 还会为每个 local/field assignment 固化 destination-side ownership operation：owning Place replacement 明确区分 `InlineCopy` 与 `OwnershipTransfer`，直接赋值给 `var` borrowed alias 固化为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这份结构化事实；后端不再通过 RHS category、target 形状或机器位模式重新猜 replacement / rebind。Binding 初始化、Pattern/match value 与容器写入仍需各自完整 effect/operation 合同，不能从这条 assignment 纵切反推为已经完成。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。match/Pattern binding 与 for iterable 尚未完成各自 effect 合同；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 与 for iterable source 尚未完成各自 effect 合同；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -446,7 +446,7 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素或 `push` 实参从稳定 Place 读取时，按 3.4 节创建独立 wrapper/backing 并递归 clone 元素；closure capture 按 4.4 节借用现有 wrapper；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 仍等待自身 effect。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
+数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素、`push` 实参或 `for` 循环变量从稳定 owning element 读取时，按 3.4 节递归 clone；`for` 的 element `DeepClonePlan` 固化在 HIR，不能由后端按机器表示猜测。closure capture 按 4.4 节借用现有 wrapper；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 仍等待自身 effect。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
 
 ### 8.1 数组
 

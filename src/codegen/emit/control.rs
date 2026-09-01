@@ -1,6 +1,7 @@
 use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
+use super::clone::emit_deep_clone_value;
 use super::cells::{coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::places::{emit_place_addr, emit_place_value, emit_place_write};
@@ -174,6 +175,7 @@ pub(crate) fn emit_stmt<M: Module>(
         Stmt::For {
             binding_id,
             ty,
+            element_plan,
             iterable,
             body,
             span,
@@ -184,7 +186,15 @@ pub(crate) fn emit_stmt<M: Module>(
                 c,
                 bcx,
                 frame,
-                (iterable, *binding_id, body, &elem_vty, *span, ret_block),
+                (
+                    iterable,
+                    *binding_id,
+                    body,
+                    &elem_vty,
+                    element_plan,
+                    *span,
+                    ret_block,
+                ),
             )
         }
         Stmt::Break => {
@@ -335,9 +345,17 @@ fn emit_for<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
-    input: (&Expr, BindingId, &[Stmt], &VTy, Span, Block),
+    input: (
+        &Expr,
+        BindingId,
+        &[Stmt],
+        &VTy,
+        &crate::sema::hir::DeepClonePlan,
+        Span,
+        Block,
+    ),
 ) -> AliasResult<()> {
-    let (iterable, binding_id, body, elem_vty, span, ret_block) = input;
+    let (iterable, binding_id, body, elem_vty, element_plan, span, ret_block) = input;
     ensure_current(bcx, frame);
     let source_vty = c.vty(iterable.ty());
     let source = emit_expr(c, bcx, frame, iterable)?;
@@ -397,6 +415,7 @@ fn emit_for<M: Module>(
         .ins()
         .load(cl_type(elem_vty), MemFlagsData::new(), addr, 0);
     let elem = norm_load(bcx, raw_elem, elem_vty);
+    let elem = emit_deep_clone_value(c, bcx, elem, elem_vty, element_plan)?;
     let next = bcx.ins().iadd_imm_s(cursor, 1);
     // cursor 在进入用户 body 前推进；因此 continue 跳回 header 时不会重复当前元素。
     // 若把该 store 移到 body 之后，任何 continue 都会形成同一元素的无限循环。

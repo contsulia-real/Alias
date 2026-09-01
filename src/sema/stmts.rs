@@ -406,6 +406,20 @@ impl Checker {
                         span: *span,
                     });
                 }
+                let element_plan = super::exprs::deep_clone_plan_with(
+                    &declared,
+                    *span,
+                    &|struct_name| {
+                        self.structs.get(struct_name).map(|info| {
+                            info.fields
+                                .iter()
+                                .map(|field| field.ty.clone())
+                                .collect::<Vec<_>>()
+                        })
+                    },
+                )?;
+                self.for_element_plans
+                    .insert(s as *const Stmt as usize, element_plan);
                 let id = self.fresh_binding_id()?;
                 self.for_ids.insert(s as *const Stmt as usize, id);
                 let child = Scope::child(env);

@@ -171,6 +171,7 @@ pub(crate) enum Stmt {
     For {
         binding_id: BindingId,
         ty: Ty,
+        element_plan: DeepClonePlan,
         iterable: Expr,
         body: Vec<Stmt>,
         span: Span,

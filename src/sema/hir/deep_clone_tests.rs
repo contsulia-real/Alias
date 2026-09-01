@@ -190,3 +190,62 @@ fn final_hir_gate_rejects_deep_clone_plan_drift() {
         error.msg
     );
 }
+
+#[test]
+fn for_binding_freezes_element_deep_clone_plan() {
+    let mut program = checked(
+        "struct cell { var i32 value = 0 }\n\
+func i32 main = () -> {\n\
+    val array<cell> cells = [cell(value = 7)]\n\
+    for cell item in cells { item.value = 99 }\n\
+    return cells[0].value\n\
+}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let plan = stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::For { element_plan, .. } => Some(element_plan),
+            _ => None,
+        })
+        .expect("for statement");
+    assert_eq!(
+        plan,
+        &DeepClonePlan::Struct {
+            name: "cell".into(),
+            fields: vec![DeepClonePlan::Inline],
+        }
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_for_element_plan_drift() {
+    let mut program = checked(
+        "func i32 main = () -> {\n\
+    val array<string> values = ['a']\n\
+    for string value in values { println value }\n\
+    return 0\n\
+}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let plan = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::For { element_plan, .. } => Some(element_plan),
+            _ => None,
+        })
+        .expect("for statement");
+    *plan = DeepClonePlan::Inline;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("mutated for element plan must fail final HIR gate");
+    assert!(
+        error.msg.contains("for 元素 DeepClone plan 与循环变量类型不一致"),
+        "实际: {}",
+        error.msg
+    );
+}

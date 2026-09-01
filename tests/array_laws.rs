@@ -3,6 +3,7 @@
 //! 当前语义锚点见 `docs/spec-notes.md`：
 //! - 字面量 [e1, e2, ...] 元素类型一致；类型槽 array<T> 恰一参；
 //! - owning binding 的稳定 Place 读取创建独立 array wrapper/backing；
+//! - for 循环变量按元素静态类型递归 clone，不与容器元素共享 owning root；
 //! - 下标读带越界守卫 (i<0 或 i>=len → span-ID 中止存根, exit 1)；
 //!   下标赋值当前未支持并显式拒绝；
 //! - 内建 len/push/pop/iterator 由编译器提供；push/pop 推进所属 wrapper 的结构版本，
@@ -76,6 +77,26 @@ fn nested_arrays() {
 fn array_of_struct_field_access() {
     let src = "struct cell {\n    var i32 v = 0\n}\nfunc i32 main = () -> {\n    val array<cell> cs = [cell(), cell(v = 5)]\n    cs[1].v = 50\n    val cell alias = cs[1]\n    alias.v = alias.v + 1\n    return cs[1].v + cs[0].v\n}\n";
     assert_eq!(run(src).unwrap(), 50);
+}
+
+/// for 循环变量是新的 owning binding；读取容器元素必须递归 clone，不能让循环变量
+/// 与 array 中仍 live 的 owning element 共享同一个 aggregate root。
+#[test]
+fn for_binding_deep_clones_dynamic_elements() {
+    let src = r#"
+struct cell {
+    var i32 value = 0
+}
+
+func i32 main = () -> {
+    val array<cell> cells = [cell(value = 7)]
+    for cell item in cells {
+        item.value = 99
+    }
+    return cells[0].value
+}
+"#;
+    assert_eq!(run(src).unwrap(), 7);
 }
 
 /// array 的 owning binding 读取创建独立 wrapper/backing。

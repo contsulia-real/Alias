@@ -37,6 +37,16 @@ pub(crate) fn emit_deep_clone_place<M: Module>(
     clone_value(c, bcx, value, &vty, plan)
 }
 
+pub(crate) fn emit_deep_clone_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    source: Value,
+    vty: &VTy,
+    plan: &DeepClonePlan,
+) -> AliasResult<Value> {
+    clone_value(c, bcx, source, vty, plan)
+}
+
 fn clone_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
