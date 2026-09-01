@@ -6,12 +6,9 @@ use super::ops::{emit_abort_branch, emit_binary_values};
 use super::places::emit_place_addr;
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
-use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, storage_word, user_signature, VTy,
-};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, user_signature, VTy};
 use crate::codegen::layout::{
-    result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
-    RESULT_WORDS,
+    result_layout, result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_TAG_OFFSET,
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{
@@ -30,9 +27,9 @@ pub(crate) fn emit_call<M: Module>(
     frame: &mut Frame,
     callee: &Expr,
     args: &[CallArg],
-    target: &CallTarget,
-    span: Span,
+    resolved: (&CallTarget, &VTy, Span),
 ) -> AliasResult<Value> {
+    let (target, result_vty, span) = resolved;
     match target {
         CallTarget::Builtin(BuiltinCall::Increase) => {
             emit_incdec(c, bcx, frame, BinOp::Add, args, span)
@@ -58,7 +55,9 @@ pub(crate) fn emit_call<M: Module>(
             name,
             arg_field_indices,
         } => emit_construct(c, bcx, frame, name, args, arg_field_indices),
-        CallTarget::ResultConstructor(kind) => emit_result_ctor(c, bcx, frame, *kind, args),
+        CallTarget::ResultConstructor(kind) => {
+            emit_result_ctor(c, bcx, frame, *kind, args, result_vty)
+        }
         CallTarget::FunctionValue => {
             let callee_vty = c.vty(callee.ty());
             let VTy::Func(param_vtys, ret_vty) = callee_vty else {
@@ -171,21 +170,29 @@ pub(crate) fn emit_result_ctor<M: Module>(
     frame: &mut Frame,
     kind: CtorKind,
     args: &[CallArg],
+    result_vty: &VTy,
 ) -> AliasResult<Value> {
     let [arg] = args else {
         invariant_violation("result 构造元数 (sema 已校验)")
     };
-    let pvty = c.vty(arg.value.ty());
+    let VTy::Result(ok_vty, err_vty) = result_vty else {
+        invariant_violation("result constructor 必须携带完整 result VTy")
+    };
+    let pvty = match kind {
+        CtorKind::Ok => ok_vty.as_ref(),
+        CtorKind::Err => err_vty.as_ref(),
+    };
+    if c.vty(arg.value.ty()) != *pvty {
+        invariant_violation("result constructor payload VTy 与 resolved variant 漂移")
+    }
     let payload = emit_expr(c, bcx, frame, &arg.value)?;
-    let payload = payload.into_scalar("result payload storage 尚未支持 multi-lane value");
-    let pw = storage_word(bcx, payload, &pvty);
-    let words = bcx.ins().iconst(types::I32, RESULT_WORDS);
-    let blk = c.call_rt(bcx, "alias.env.new", &[words])?;
+    let layout = result_layout(ok_vty, err_vty);
+    let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
+    let blk = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
     let tagw = bcx.ins().iconst(types::I64, result_tag(kind));
     bcx.ins()
         .store(MemFlagsData::new(), tagw, blk, RESULT_TAG_OFFSET);
-    bcx.ins()
-        .store(MemFlagsData::new(), pw, blk, RESULT_PAYLOAD_OFFSET);
+    payload.store(bcx, blk, layout.payload_offset, pvty);
     Ok(blk)
 }
 

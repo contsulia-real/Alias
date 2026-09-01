@@ -163,26 +163,26 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
 - `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；当前已接入的语言类型仍全部投影为 scalar 形态，aggregate caller/callee lowering 尚未开放并 fail-closed；
 - `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer expression/type projection 仍未开放；
-- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field 与 array element 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator/call/result 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge 已按 resolved `ValueAbi::expression_types()` 传递全部 lane，不再借 universal I64 word 合并表达式；pointer VTy 与具体 pointer expression、typed result payload 以及 aggregate caller/callee lowering 尚未接入；
+- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator/call 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge 已按 resolved `ValueAbi::expression_types()` 传递全部 lane，不再借 universal I64 word 合并表达式；pointer VTy 与具体 pointer expression、aggregate caller/callee lowering 尚未接入；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
-- `storage_word` / `restore_word` 当前只承担尚未 typed-layout 化的 result payload 与具体值表示之间的边界；array backing 已不再经过 universal word；
-- `ValueLayout { size, align, stride }` 是当前所有 value storage layout 查询的唯一入口；local/global/temporary cell、resolved Place、struct field 与 array backing 共同消费它及同一 `StorageLane` offset 合同。raw array header 固化创建时的 `stride(T)`；index、iterator、growth copy、literal、push 与 pop 消费该字段并由 `ExprValue` 读写 typed slot；result payload 仍待 typed-layout 重构；
-- f32 在当前 word 容器中保存 I32 bit pattern 后扩展到 I64，不能按数值转换处理；
+- 历史 `WordRepr` / `storage_word` / `restore_word` 已随 typed array/result storage 删除；任何值都不得为了进入 container 被重新压成 universal I64 word；
+- `ValueLayout { size, align, stride }` 是当前所有 value storage layout 查询的唯一入口；local/global/temporary cell、resolved Place、struct field、array backing 与 result payload 共同消费它及同一 `StorageLane` offset 合同。raw array header 固化创建时的 `stride(T)`；`ResultLayout` 以 ok/err 的最大 size/align 统一决定 payload offset、root size 与 tail padding；
+- f32 在真实 storage 中直接使用 F32 machine type；跨 expression/storage 边界只做声明类型要求的规范化，不能数值转换成整数 bit container；
 - `unit` 与 `Unknown` 没有值 ABI，到达需要值 ABI 的位置属于内部不变式失败；
 - 结构体布局必须统一处理字段对齐与最终尾部 padding。
 
-以上当前已投影语言类型仍使用 scalar 表达式形态、result 仍使用 universal one-word payload 是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI 与 typed aggregate/container layout；实施时必须沿现有 aggregate-capable `ValueAbi` 继续接入 pointer 与剩余 container，不能把 `ptr<T>` 压成 I64 handle、把 result 继续强制塞回 universal 8-byte payload，或建立第二套临时 ABI。
+当前已投影语言类型仍使用 scalar expression ABI 是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI；实施时必须沿现有 aggregate-capable `ValueAbi` 继续接入 pointer，不能把 `ptr<T>` 压成 I64 handle 或建立第二套临时 ABI。
 
 当前已实现用户函数机器前缀是 `[globals, closure_env, ...]`。`docs/plan.md` 已冻结需要 sret 时的目标内部 ABI 前缀 `[sret?, globals, closure_env, ...]`。迁移必须由统一 signature/ABI owner 一次性决定 caller/callee 两侧，不能在调用点和函数生成器各复制一套隐藏参数规则，也不能为了兼容开发期旧 ABI 保留双路径。
 
 ### heap object layout
 
-`src/codegen/layout.rs` 是跨 emitter/runtime 的 heap object 物理布局 owner。目前 closure、raw array、array wrapper、iterator、result 与 string block 的 offset/size 都必须引用这里的命名常量。raw array header 的 data/len/cap/stride offset 只由该 owner 定义；runtime capacity growth 与 emitter element address 必须读取同一 stride 字段。
+`src/codegen/layout.rs` 是跨 emitter/runtime 的 heap object 物理布局 owner。目前 closure、raw array、array wrapper、iterator、result 与 string block 的 offset/size 都必须引用这里的命名常量。raw array header 的 data/len/cap/stride offset 只由该 owner 定义；runtime capacity growth 与 emitter element address 必须读取同一 stride 字段。result tag offset 与基于两个 payload `ValueLayout` 计算的 typed payload/root layout 同样只由 `ResultLayout` 定义。
 
 禁止在 emitter、native runtime、display、IO 等文件重新写裸 `0/8/16/...` 来表达同一对象字段。历史上曾出现因 8-byte 分配与 16-byte 写入不一致导致的真实内存破坏；因此布局重复不是样式问题，而是正确性风险。
 
-执行 `docs/plan.md` 时，现有固定-word array/result 等布局若与 typed `size/align/stride` 合同冲突，应重构其 canonical layout owner；不得通过在新 pointer 路径里复制裸 offset 来绕过旧布局限制。`StorageDescriptor`、pointer capability layout、raw initialization metadata 等新增物理合同也必须各有明确窄 owner，不能散落 magic offsets。
+执行 `docs/plan.md` 时，任何残留固定-word container 布局若与 typed `size/align/stride` 合同冲突，应重构其 canonical layout owner；不得通过在新 pointer 路径里复制裸 offset 来绕过布局限制。`StorageDescriptor`、pointer capability layout、raw initialization metadata 等新增物理合同也必须各有明确窄 owner，不能散落 magic offsets。
 
 ### runtime machine contracts
 

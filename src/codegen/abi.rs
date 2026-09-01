@@ -4,15 +4,16 @@ use crate::sema::hir::{CheckedProgram, Expr, Item};
 use crate::sema::types::{FloatW, IntW, ReturnEffect, Ty, UIntW};
 use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, Signature, Type, Value};
 use cranelift_frontend::FunctionBuilder;
 use std::collections::HashMap;
 
-/// array/result/env 载荷统一使用一个 64-bit word；所有元素步长必须引用此 owner。
-pub(crate) const VALUE_WORD_BYTES: i64 = 8;
+/// 当前目标 heap object header 与 env/capture slot 的固定 machine-word 宽度。
+/// 它不描述任意 Alias value；array/result payload 必须消费各自 typed ValueLayout。
+pub(crate) const OBJECT_WORD_BYTES: i64 = 8;
 
-pub(crate) const fn value_word_offset(index: usize) -> i32 {
-    (index as i64 * VALUE_WORD_BYTES) as i32
+pub(crate) const fn object_word_offset(index: usize) -> i32 {
+    (index as i64 * OBJECT_WORD_BYTES) as i32
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,15 +34,6 @@ pub(crate) enum VTy {
     Array(Box<VTy>),
     Iterator(Box<VTy>),
     Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WordRepr {
-    Signed,
-    Unsigned,
-    F32Bits,
-    F64Bits,
-    Direct,
 }
 
 /// Canonical physical storage layout for one language value. `stride` is kept distinct from
@@ -158,7 +150,6 @@ impl PtrLayout {
                 direct: None,
                 explicit_sret: true,
             },
-            word: None,
         }
     }
 }
@@ -210,12 +201,10 @@ pub(crate) struct ValueAbi {
     storage: StorageAbi,
     parameter: ParameterAbi,
     result: ReturnAbi,
-    /// `None` 表示该值不能进入历史 universal-word container；这不是可选 fallback。
-    word: Option<WordRepr>,
 }
 
 impl ValueAbi {
-    fn scalar(register: Type, storage: Type, align: usize, word: WordRepr) -> Self {
+    fn scalar(register: Type, storage: Type, align: usize) -> Self {
         let size = storage.bytes() as usize;
         Self {
             expression: ExpressionAbi {
@@ -240,7 +229,6 @@ impl ValueAbi {
                 direct: Some(storage),
                 explicit_sret: false,
             },
-            word: Some(word),
         }
     }
 
@@ -294,23 +282,15 @@ impl ValueAbi {
         }
     }
 
-    fn word(&self) -> WordRepr {
-        self.word.unwrap_or_else(|| {
-            panic!(
-                "内部 ABI 不变式被破坏: {}-byte aggregate 不能进入 universal word",
-                self.storage.layout.size
-            )
-        })
-    }
 }
 
 impl VTy {
     pub(crate) fn abi(&self) -> ValueAbi {
         match self {
-            VTy::I(w) => integer_abi(w.bits(), true),
-            VTy::U(w) => integer_abi(w.bits(), false),
-            VTy::F(FloatW::F32) => ValueAbi::scalar(types::F32, types::F32, 4, WordRepr::F32Bits),
-            VTy::F(FloatW::F64) => ValueAbi::scalar(types::F64, types::F64, 8, WordRepr::F64Bits),
+            VTy::I(w) => integer_abi(w.bits()),
+            VTy::U(w) => integer_abi(w.bits()),
+            VTy::F(FloatW::F32) => ValueAbi::scalar(types::F32, types::F32, 4),
+            VTy::F(FloatW::F64) => ValueAbi::scalar(types::F64, types::F64, 8),
             VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
             VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
             VTy::Bool
@@ -321,7 +301,7 @@ impl VTy {
             | VTy::Struct(_)
             | VTy::Result(..)
             | VTy::Array(_)
-            | VTy::Iterator(_) => ValueAbi::scalar(types::I64, types::I64, 8, WordRepr::Direct),
+            | VTy::Iterator(_) => ValueAbi::scalar(types::I64, types::I64, 8),
         }
     }
 
@@ -330,20 +310,11 @@ impl VTy {
     }
 }
 
-fn integer_abi(bits: u32, signed: bool) -> ValueAbi {
+fn integer_abi(bits: u32) -> ValueAbi {
     let storage = ir_type_bits(bits);
     // 算术/比较发射统一处理 I64 形式，但 memory 与函数边界必须保持源码声明宽度；
     // 否则 i8/i16/i32 的布局和 Windows 调用签名会被内部规范化意外扩大。
-    ValueAbi::scalar(
-        types::I64,
-        storage,
-        (bits / 8) as usize,
-        if signed {
-            WordRepr::Signed
-        } else {
-            WordRepr::Unsigned
-        },
-    )
+    ValueAbi::scalar(types::I64, storage, (bits / 8) as usize)
 }
 
 pub(crate) fn ir_type_bits(bits: u32) -> Type {
@@ -542,43 +513,6 @@ pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> 
     }
 }
 
-pub(crate) fn storage_word(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> Value {
-    let abi = vty.abi();
-    let storage = abi.scalar_storage();
-    let word = abi.word();
-    // 通用容器永远只有一个 I64 word。整数按符号规范扩展；float 必须保存 IEEE bit
-    // pattern，而不是执行数值转换，否则 result/array/env 往返后值会改变。
-    match word {
-        WordRepr::F32Bits => {
-            let bits = bcx.ins().bitcast(types::I32, MemFlagsData::new(), value);
-            bcx.ins().uextend(types::I64, bits)
-        }
-        WordRepr::F64Bits => bcx.ins().bitcast(types::I64, MemFlagsData::new(), value),
-        WordRepr::Signed | WordRepr::Unsigned if storage != types::I64 => {
-            let reduced = bcx.ins().ireduce(storage, value);
-            if word == WordRepr::Signed {
-                bcx.ins().sextend(types::I64, reduced)
-            } else {
-                bcx.ins().uextend(types::I64, reduced)
-            }
-        }
-        _ => value,
-    }
-}
-
-pub(crate) fn restore_word(bcx: &mut FunctionBuilder, raw: Value, vty: &VTy) -> Value {
-    // 整数 word 在 storage_word 时已经规范扩展，可直接作为表达式 I64；只有 float
-    // 需要把保存的 bit pattern 重解释回真实浮点寄存器类型。
-    match vty.abi().word() {
-        WordRepr::F32Bits => {
-            let bits = bcx.ins().ireduce(types::I32, raw);
-            bcx.ins().bitcast(types::F32, MemFlagsData::new(), bits)
-        }
-        WordRepr::F64Bits => bcx.ins().bitcast(types::F64, MemFlagsData::new(), raw),
-        _ => raw,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -656,7 +590,6 @@ mod tests {
                 direct: None,
                 explicit_sret: true,
             },
-            word: None,
         };
 
         assert_eq!(abi.expression.lanes, LANES);
@@ -676,12 +609,10 @@ mod tests {
         assert_eq!(abi.storage.layout, layout);
         assert!(abi.parameter.indirect_by_value);
         assert!(abi.result.explicit_sret);
-        assert_eq!(abi.word, None);
         assert!(std::panic::catch_unwind(|| abi.scalar_register()).is_err());
         assert!(std::panic::catch_unwind(|| abi.scalar_storage()).is_err());
         assert!(std::panic::catch_unwind(|| abi.direct_parameter()).is_err());
         assert!(std::panic::catch_unwind(|| abi.direct_result()).is_err());
-        assert!(std::panic::catch_unwind(|| abi.word()).is_err());
     }
 
     #[test]
@@ -739,7 +670,6 @@ mod tests {
                 explicit_sret: true,
             }
         );
-        assert_eq!(abi.word, None);
 
         let error = PtrLayout::for_current_target(types::I32)
             .expect_err("32-bit machine pointer must not reuse the Windows x64 layout");

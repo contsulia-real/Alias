@@ -11,11 +11,9 @@ use super::ops::{
 use super::places::{emit_place_addr, emit_place_value, field_storage};
 use super::strings::{call_str_cmp, emit_str, str_literal_handle};
 use super::value::ExprValue;
-use crate::codegen::abi::{cl_type, restore_word, VTy};
+use crate::codegen::abi::{cl_type, VTy};
 use crate::codegen::funcgen::emit_funclit_value;
-use crate::codegen::layout::{
-    result_tag, RESULT_ERR_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET,
-};
+use crate::codegen::layout::{result_layout, result_tag, RESULT_ERR_TAG, RESULT_TAG_OFFSET};
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
     ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, PatternBindingOperation, ResolvedConversion,
@@ -192,7 +190,11 @@ pub(crate) fn emit_expr<M: Module>(
             target,
             span,
             ..
-        } => emit_call(c, bcx, frame, callee, args, target, *span).map(ExprValue::scalar),
+        } => {
+            let result_vty = c.vty(e.ty());
+            emit_call(c, bcx, frame, callee, args, (target, &result_vty, *span))
+                .map(ExprValue::scalar)
+        }
         Expr::MethodCall {
             recv,
             receiver_pass,
@@ -271,14 +273,14 @@ pub(crate) fn emit_expr<M: Module>(
 
             bcx.switch_to_block(ok_b);
             frame.terminated = false;
-            let pvty = match c.vty(expr.ty()) {
-                VTy::Result(t, _) => *t,
+            let (pvty, payload_offset) = match c.vty(expr.ty()) {
+                VTy::Result(ok, err) => {
+                    let layout = result_layout(&ok, &err);
+                    (*ok, layout.payload_offset)
+                }
                 _ => invariant_violation("? 操作数携带 result 类型"),
             };
-            let raw = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
-            Ok(ExprValue::scalar(restore_word(bcx, raw, &pvty)))
+            Ok(ExprValue::load(bcx, subj, payload_offset, &pvty))
         }
     }
 }
@@ -517,14 +519,13 @@ pub(crate) fn emit_match_arm<M: Module>(
             VTy::Result(ok, err),
             Some(binding_id),
         ) => {
+            let layout = result_layout(ok, err);
             let bind_vty = match ctor {
                 CtorKind::Ok => (**ok).clone(),
                 CtorKind::Err => (**err).clone(),
             };
-            let raw = bcx
-                .ins()
-                .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
-            let payload = restore_word(bcx, raw, &bind_vty);
+            let payload = ExprValue::load(bcx, subj, layout.payload_offset, &bind_vty)
+                .into_scalar("result Pattern binding deep clone 尚未支持 multi-lane payload");
             let operation = arm.binding_operation.as_ref().unwrap_or_else(|| {
                 invariant_violation("result Pattern binding 缺少 resolved ownership operation")
             });

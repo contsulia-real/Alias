@@ -1,5 +1,5 @@
 use super::NativeExterns;
-use crate::codegen::abi::VALUE_WORD_BYTES;
+use crate::codegen::abi::OBJECT_WORD_BYTES;
 use crate::codegen::emit::cells::first_result;
 use crate::codegen::layout::{CLOSURE_BYTES, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
 use crate::codegen::Compiler;
@@ -62,7 +62,7 @@ pub(super) fn emit_alloc_runtime<M: Module>(
     });
     shim!(c, "alias.env.new", |bcx, a| {
         let n64 = bcx.ins().sextend(types::I64, a[0]);
-        let bytes = bcx.ins().imul_imm_s(n64, VALUE_WORD_BYTES);
+        let bytes = bcx.ins().imul_imm_s(n64, OBJECT_WORD_BYTES);
         let p = call_rt_m!(bcx, "rt.heap.alloc", vec![bytes]);
         bcx.ins().return_(&[p]);
         true

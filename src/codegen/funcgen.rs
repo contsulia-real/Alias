@@ -1,4 +1,4 @@
-use crate::codegen::abi::{cl_type, norm_load, user_signature, value_word_offset, VTy};
+use crate::codegen::abi::{cl_type, norm_load, object_word_offset, user_signature, VTy};
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
 use crate::codegen::emit::expr::emit_expr;
@@ -349,7 +349,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
                 types::I64,
                 MemFlagsData::new(),
                 base,
-                value_word_offset(*idx),
+                object_word_offset(*idx),
             )
         } else {
             let mut found: Option<Value> = None;
@@ -362,7 +362,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
             found.unwrap_or_else(|| invariant_violation("HIR 捕获 BindingId 必须解析到外层单元格"))
         };
         bcx.ins()
-            .store(MemFlagsData::new(), cellw, env_word, value_word_offset(i));
+            .store(MemFlagsData::new(), cellw, env_word, object_word_offset(i));
     }
 
     let fref = c.module.declare_func_in_func(fid, bcx.func);

@@ -1,5 +1,5 @@
 use super::value::ExprValue;
-use crate::codegen::abi::{norm_store, value_layout, value_word_offset, VTy};
+use crate::codegen::abi::{norm_store, object_word_offset, value_layout, VTy};
 use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::{BindingId, StorageRelation};
 use crate::AliasResult;
@@ -73,7 +73,7 @@ pub(crate) fn materialize_cell_addr(
         CellAddr::EnvLoad(i) => {
             let base = bcx.use_var(frame.env.unwrap_or_else(|| invariant_violation("env 存在")));
             bcx.ins()
-                .load(types::I64, MemFlagsData::new(), base, value_word_offset(*i))
+                .load(types::I64, MemFlagsData::new(), base, object_word_offset(*i))
         }
         CellAddr::GlobalOff(off) => {
             let base = bcx.use_var(frame.globals);

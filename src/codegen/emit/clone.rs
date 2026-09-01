@@ -1,12 +1,10 @@
 use super::arrays::{array_element_addr, array_len, array_raw, wrap_array};
 use super::expr::emit_expr;
 use super::places::emit_place_value;
-use crate::codegen::abi::{
-    cl_type, norm_load, norm_store, restore_word, storage_word, value_layout, VTy,
-};
+use crate::codegen::abi::{cl_type, norm_load, norm_store, value_layout, VTy};
 use crate::codegen::layout::{
-    RESULT_OK_TAG, RESULT_PAYLOAD_OFFSET, RESULT_TAG_OFFSET, RESULT_WORDS, STRING_BYTES,
-    STRING_DATA_OFFSET, STRING_LEN_OFFSET,
+    result_layout, RESULT_OK_TAG, RESULT_TAG_OFFSET, STRING_BYTES, STRING_DATA_OFFSET,
+    STRING_LEN_OFFSET,
 };
 use crate::codegen::{invariant_violation, Compiler, Frame};
 use crate::sema::hir::{DeepClonePlan, Expr, Place};
@@ -248,11 +246,9 @@ fn clone_result<M: Module>(
     let tag = bcx
         .ins()
         .load(types::I64, MemFlagsData::new(), source, RESULT_TAG_OFFSET);
-    let payload = bcx
-        .ins()
-        .load(types::I64, MemFlagsData::new(), source, RESULT_PAYLOAD_OFFSET);
-    let words = bcx.ins().iconst(types::I32, RESULT_WORDS);
-    let out = c.call_rt(bcx, "alias.env.new", &[words])?;
+    let layout = result_layout(ok_vty, err_vty);
+    let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
+    let out = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
     bcx.ins()
         .store(MemFlagsData::new(), tag, out, RESULT_TAG_OFFSET);
 
@@ -260,30 +256,35 @@ fn clone_result<M: Module>(
     let ok_b = bcx.create_block();
     let err_b = bcx.create_block();
     let end_b = bcx.create_block();
-    let cloned_word = bcx.append_block_param(end_b, types::I64);
     bcx.ins().brif(is_ok, ok_b, &[], err_b, &[]);
     bcx.seal_block(ok_b);
     bcx.seal_block(err_b);
 
     bcx.switch_to_block(ok_b);
-    let ok_value = restore_word(bcx, payload, ok_vty);
+    let ok_value = super::value::ExprValue::load(bcx, source, layout.payload_offset, ok_vty)
+        .into_scalar("result deep clone 尚未支持 multi-lane payload");
     let ok_clone = clone_value(c, bcx, ok_value, ok_vty, ok_plan)?;
-    let ok_word = storage_word(bcx, ok_clone, ok_vty);
-    bcx.ins().jump(end_b, &[BlockArg::Value(ok_word)]);
+    super::value::ExprValue::scalar(ok_clone).store(
+        bcx,
+        out,
+        layout.payload_offset,
+        ok_vty,
+    );
+    bcx.ins().jump(end_b, &[]);
 
     bcx.switch_to_block(err_b);
-    let err_value = restore_word(bcx, payload, err_vty);
+    let err_value = super::value::ExprValue::load(bcx, source, layout.payload_offset, err_vty)
+        .into_scalar("result deep clone 尚未支持 multi-lane payload");
     let err_clone = clone_value(c, bcx, err_value, err_vty, err_plan)?;
-    let err_word = storage_word(bcx, err_clone, err_vty);
-    bcx.ins().jump(end_b, &[BlockArg::Value(err_word)]);
+    super::value::ExprValue::scalar(err_clone).store(
+        bcx,
+        out,
+        layout.payload_offset,
+        err_vty,
+    );
+    bcx.ins().jump(end_b, &[]);
 
     bcx.switch_to_block(end_b);
     bcx.seal_block(end_b);
-    bcx.ins().store(
-        MemFlagsData::new(),
-        cloned_word,
-        out,
-        RESULT_PAYLOAD_OFFSET,
-    );
     Ok(out)
 }
