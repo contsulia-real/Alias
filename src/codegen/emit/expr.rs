@@ -3,7 +3,7 @@ use super::calls::{emit_call, emit_method_call};
 use super::cells::{
     binding_storage_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope,
 };
-use super::clone::emit_deep_clone_place;
+use super::clone::{emit_deep_clone_place, emit_deep_clone_value};
 use super::control::emit_stmt;
 use super::ops::{
     emit_abort_branch, emit_binary, emit_convert, narrow, widen_signed, widen_unsigned,
@@ -17,7 +17,8 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
-    ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, ResolvedConversion, Stmt,
+    ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, PatternBindingOperation, ResolvedConversion,
+    Stmt,
 };
 use crate::sema::types::FloatW;
 use crate::AliasResult;
@@ -453,11 +454,15 @@ pub(crate) fn emit_match_arm<M: Module>(
 
     match (&arm.pattern, subject_vty, arm.binding_id) {
         (Pattern::Binding { .. }, _, Some(binding_id)) => {
+            let operation = arm.binding_operation.as_ref().unwrap_or_else(|| {
+                invariant_violation("Pattern binding 缺少 resolved ownership operation")
+            });
+            let value = emit_pattern_binding_value(c, bcx, subj, subject_vty, operation)?;
             emit_local_cell(
                 c,
                 bcx,
                 frame,
-                subj,
+                value,
                 subject_vty.clone(),
                 binding_id,
                 Some(crate::sema::hir::StorageRelation::Owning),
@@ -480,6 +485,10 @@ pub(crate) fn emit_match_arm<M: Module>(
                 .ins()
                 .load(types::I64, MemFlagsData::new(), subj, RESULT_PAYLOAD_OFFSET);
             let payload = restore_word(bcx, raw, &bind_vty);
+            let operation = arm.binding_operation.as_ref().unwrap_or_else(|| {
+                invariant_violation("result Pattern binding 缺少 resolved ownership operation")
+            });
+            let payload = emit_pattern_binding_value(c, bcx, payload, &bind_vty, operation)?;
             emit_local_cell(
                 c,
                 bcx,
@@ -558,4 +567,21 @@ pub(crate) fn emit_match_arm<M: Module>(
     };
     pop_scope(frame);
     Ok(joined)
+}
+
+fn emit_pattern_binding_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    source: Value,
+    vty: &VTy,
+    operation: &PatternBindingOperation,
+) -> AliasResult<Value> {
+    match operation {
+        PatternBindingOperation::InlineCopy | PatternBindingOperation::OwnershipTransfer => {
+            Ok(source)
+        }
+        PatternBindingOperation::DeepClone(plan) => {
+            emit_deep_clone_value(c, bcx, source, vty, plan)
+        }
+    }
 }

@@ -10,6 +10,7 @@ mod ownership_capabilities;
 mod ownership_flow;
 mod ownership_operations;
 mod parameter_effects;
+mod pattern_bindings;
 mod place_relation;
 mod storage_relations;
 mod typed_contract;
@@ -34,6 +35,8 @@ mod ownership_operation_tests;
 #[cfg(test)]
 mod parameter_effect_tests;
 #[cfg(test)]
+mod pattern_binding_tests;
+#[cfg(test)]
 mod place_relation_tests;
 #[cfg(test)]
 mod return_effect_tests;
@@ -52,9 +55,9 @@ pub(crate) use model::{
     ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOwner,
     Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
     CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
-    MethodId, MethodTarget, OwnershipCapability, OwningWrite, Param, Pattern, Place, PlaceInfo,
-    ResolvedConversion, ReturnPass, ShallowClonePlan, Stmt, StorageRelation, StrPart, StructDef,
-    StructField, ValueCategory,
+    MethodId, MethodTarget, OwnershipCapability, OwningWrite, Param, Pattern,
+    PatternBindingOperation, Place, PlaceInfo, ResolvedConversion, ReturnPass, ShallowClonePlan,
+    Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
@@ -162,6 +165,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> crate::AliasRes
     typed_contract::validate(program)?;
     validate::validate_resolved_hir(program)?;
     ownership_operations::validate(program)?;
+    pattern_bindings::validate(program)?;
     parameter_effects::validate(program)?;
     borrow_contract::validate(program)?;
     place_relation::validate(program)?;

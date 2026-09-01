@@ -46,6 +46,68 @@ fn string_literal_and_binding_whole_value_run() {
 }
 
 #[test]
+fn whole_subject_binding_deep_clones_a_stable_dynamic_place() {
+    let src = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    val cell source = cell(value = 7)
+    match source {
+        item -> { item.value = 99 }
+    }
+    return source.value
+}
+"#;
+    assert_eq!(run(src).unwrap(), 7);
+}
+
+#[test]
+fn constructor_payload_binding_does_not_partially_move_from_result() {
+    let src = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    val result<cell, string> wrapped = ok(cell(value = 7))
+    match wrapped {
+        ok(item) -> { item.value = 99 }
+        err(_) -> { return 1 }
+    }
+    return match wrapped {
+        ok(item) -> item.value
+        err(_) -> 2
+    }
+}
+"#;
+    assert_eq!(run(src).unwrap(), 7);
+}
+
+#[test]
+fn whole_subject_binding_accepts_owned_temporary_transfer() {
+    let src = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    return match cell(value = 7) {
+        item -> item.value
+    }
+}
+"#;
+    assert_eq!(run(src).unwrap(), 7);
+}
+
+#[test]
+fn stable_non_deep_cloneable_subject_does_not_fall_back_to_aliasing() {
+    let src = r#"
+func i32 main = () -> {
+    val array<i32> values = [7]
+    val iterator<i32> source = values.iterator()
+    return match source {
+        item -> 0
+    }
+}
+"#;
+    let error = err(src);
+    assert!(error.contains("不支持 clone"), "{error}");
+}
+
+#[test]
 fn duplicate_literal_pattern_is_rejected() {
     let src = "func i32 main = () -> {\n    val i32 n = 1\n    val i32 v = match n {\n        1 -> 1\n        1 -> 2\n        _ -> 3\n    }\n    return v\n}\n";
     assert!(err(src).contains("match 重复 Pattern: 1"));

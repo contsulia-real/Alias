@@ -200,7 +200,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
     }
 }
 
-fn pattern_binding_ty(subject: &Ty, pattern: &Pattern) -> AliasResult<Option<Ty>> {
+pub(super) fn pattern_binding_ty(subject: &Ty, pattern: &Pattern) -> AliasResult<Option<Ty>> {
     match pattern {
         Pattern::Binding { .. } => Ok(Some(subject.clone())),
         Pattern::Constructor {

@@ -26,6 +26,7 @@ pub(super) fn lower(
     // capture 仍需在整棵 HIR 建成后统一写回；全部完成后才允许权威 gate 把程序交给 codegen。
     super::capture::populate_captures(&mut checked, &mut facts.next_loan_id)?;
     super::parameter_effects::finalize(&mut checked, &mut facts.next_loan_id)?;
+    super::pattern_bindings::finalize(&mut checked)?;
     super::ownership_operations::finalize(&mut checked)?;
     super::borrow_contract::validate(&checked)?;
     // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
@@ -891,6 +892,7 @@ fn lower_match_arm(arm: &crate::ast::MatchArm, facts: &mut LowerFacts) -> AliasR
     Ok(MatchArm {
         pattern: arm.pattern.clone(),
         binding_id: facts.match_binding_ids.remove(&key),
+        binding_operation: None,
         body: match &arm.body {
             crate::ast::ArmBody::Block(stmts) => ArmBody::Block(
                 stmts

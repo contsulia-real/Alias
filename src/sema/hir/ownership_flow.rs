@@ -6,8 +6,8 @@
 
 use super::{
     place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, Body, BorrowKind,
-    CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwningWrite, Place, PlaceRelation,
-    ResolvedConversion, ReturnPass, Stmt, StorageRelation, StrPart,
+    CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwningWrite, PatternBindingOperation,
+    Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt, StorageRelation, StrPart,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -128,6 +128,7 @@ enum Task<'a> {
     },
     MatchArm {
         arm: &'a super::MatchArm,
+        binding_dynamic: bool,
         entry: usize,
         exit: usize,
         capture_holder: Option<LoanHolder>,
@@ -409,27 +410,70 @@ impl<'a> GraphBuilder<'a> {
                 },
                 Task::MatchArm {
                     arm,
+                    binding_dynamic,
                     entry,
                     exit,
                     capture_holder,
                     loops,
-                } => match &arm.body {
-                    ArmBody::Block(stmts) => self.tasks.push(Task::Stmts {
-                        stmts,
-                        entry,
-                        exit,
-                        loops,
-                    }),
-                    ArmBody::Value(value) => self.tasks.push(Task::Expr {
-                        expr: value,
-                        entry,
-                        exit,
-                        replacement: None,
-                        capture_holder,
-                        loops,
-                    }),
-                    ArmBody::Ret(value) => self.build_return_value(value, entry, loops)?,
-                },
+                } => {
+                    let body_entry = match (arm.binding_id, binding_dynamic) {
+                        (Some(binding_id), true) => {
+                            if matches!(
+                                arm.binding_operation,
+                                Some(PatternBindingOperation::InlineCopy)
+                            ) {
+                                return Err(error(
+                                    arm.pattern.span(),
+                                    "内部 sema 不变式被破坏: dynamic Pattern binding 被标为 InlineCopy",
+                                ));
+                            }
+                            self.owning.insert(binding_id);
+                            self.eligible.insert(binding_id);
+                            let body_entry = self.node(Action::Nop);
+                            self.action_between(entry, body_entry, Action::Declare(binding_id));
+                            body_entry
+                        }
+                        (Some(_), false) => {
+                            if matches!(
+                                arm.binding_operation,
+                                Some(
+                                    PatternBindingOperation::DeepClone(_)
+                                        | PatternBindingOperation::OwnershipTransfer
+                                )
+                            ) {
+                                return Err(error(
+                                    arm.pattern.span(),
+                                    "内部 sema 不变式被破坏: inline Pattern binding 携带 dynamic operation",
+                                ));
+                            }
+                            entry
+                        }
+                        (None, false) => entry,
+                        (None, true) => {
+                            return Err(error(
+                                arm.pattern.span(),
+                                "内部 sema 不变式被破坏: dynamic Pattern binding 缺少 BindingId",
+                            ))
+                        }
+                    };
+                    match &arm.body {
+                        ArmBody::Block(stmts) => self.tasks.push(Task::Stmts {
+                            stmts,
+                            entry: body_entry,
+                            exit,
+                            loops,
+                        }),
+                        ArmBody::Value(value) => self.tasks.push(Task::Expr {
+                            expr: value,
+                            entry: body_entry,
+                            exit,
+                            replacement: None,
+                            capture_holder,
+                            loops,
+                        }),
+                        ArmBody::Ret(value) => self.build_return_value(value, body_entry, loops)?,
+                    }
+                }
                 Task::PlaceEval {
                     place,
                     entry,
@@ -1240,8 +1284,12 @@ impl<'a> GraphBuilder<'a> {
                     loops,
                 });
                 for arm in arms {
+                    let binding_dynamic =
+                        super::binding_contract::pattern_binding_ty(subject.ty(), &arm.pattern)?
+                            .is_some_and(|ty| dynamic_owner(&ty));
                     self.tasks.push(Task::MatchArm {
                         arm,
+                        binding_dynamic,
                         entry: gate,
                         exit,
                         capture_holder,

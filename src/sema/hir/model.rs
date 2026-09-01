@@ -66,7 +66,6 @@ impl Binding {
     pub(crate) fn is_method(&self) -> bool {
         matches!(self.owner, BindingOwner::Method { .. })
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +196,7 @@ pub(crate) enum ArmBody {
 pub(crate) struct MatchArm {
     pub(crate) pattern: Pattern,
     pub(crate) binding_id: Option<BindingId>,
+    pub(crate) binding_operation: Option<PatternBindingOperation>,
     pub(crate) body: ArmBody,
 }
 
@@ -371,6 +371,13 @@ pub(crate) enum OwningWrite {
 pub(crate) enum AssignmentOperation {
     Replace(OwningWrite),
     RebindBorrowedAlias,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PatternBindingOperation {
+    InlineCopy,
+    DeepClone(DeepClonePlan),
+    OwnershipTransfer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

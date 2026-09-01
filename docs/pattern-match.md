@@ -1,6 +1,6 @@
 # Pattern / Match 当前语义
 
-**同步日期：** 2026-08-30
+**同步日期：** 2026-09-01
 
 > 本文是 Pattern 专题说明；总规范以 `docs/spec-notes.md` 为准。这里只描述当前有效状态。
 
@@ -8,7 +8,7 @@
 
 parser 的每个 match arm 持有独立 `Pattern` AST。`MatchArm` 不保存 result-only 的构造器特例，也不存在兼容 `Deref` 层。
 
-进入 sema 后，Pattern 的类型适配、绑定、覆盖关系、穷尽性和不可达检查统一完成；成功后的 `CheckedProgram` typed HIR 已固化主语/臂表达式最终静态类型。codegen 不得重新根据 Pattern 文本猜类型。
+进入 sema 后，Pattern 的类型适配、绑定、覆盖关系、穷尽性和不可达检查统一完成；成功后的 `CheckedProgram` typed HIR 已固化主语/臂表达式最终静态类型。产生绑定的 arm 还携带 resolved `PatternBindingOperation`；codegen 不得重新根据 Pattern 文本、主语表达式形状或机器位模式猜类型与 ownership 行为。
 
 ## 2. 当前公开 Pattern
 
@@ -48,7 +48,7 @@ match value {
 
 普通标识符绑定整个主语，而 `ok(name)` / `err(name)` 只绑定对应 payload。
 
-当前 Pattern binding 尚未接入 function/capture effect 与 loan 分析，不属于 `docs/spec-notes.md` 3.4 节已经落地的 owning-slot `ReadPlace`；其现有共享读取是迁移期实现事实，不是长期 ownership 合同。
+每个实际产生绑定的 arm 都由 `hir/pattern_bindings.rs` 固化 ownership operation：inline 标量使用 `InlineCopy`；普通整值 binding 面对 `OwnedTemporary + Available` 主语时使用 `OwnershipTransfer`，面对稳定 Place 或 borrowed value 时按静态类型执行 `DeepClonePlan`。`ok(name)` / `err(name)` 的 payload 仍属于 live result storage，因此只能 inline copy 或 clone，不能 partial move。ownership CFG 将动态 Pattern binding 作为新的 owning local 管理；final-HIR gate 独立复核 operation，codegen 只执行该 resolved 事实。
 
 ## 4. match 结果与控制流
 
@@ -74,5 +74,6 @@ match 的产生值臂必须统一到共同静态类型，并接受外层目标�
 - `tests/pattern_laws.rs`
 - `tests/result_laws.rs`
 - `tests/function_value_laws.rs`（match 产生函数值并直接调用）
+- `src/sema/hir/pattern_binding_tests.rs`（resolved operation 与 final-HIR drift）
 
 当前语义以本文件和 `docs/spec-notes.md` 为准。

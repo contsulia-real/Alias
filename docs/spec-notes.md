@@ -184,9 +184,9 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-在 function effect 完成后，sema 还会为每个 local/field assignment 固化 destination-side ownership operation：owning Place replacement 明确区分 `InlineCopy` 与 `OwnershipTransfer`，直接赋值给 `var` borrowed alias 固化为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这份结构化事实；后端不再通过 RHS category、target 形状或机器位模式重新猜 replacement / rebind。Binding 初始化、Pattern/match value 与容器写入仍需各自完整 effect/operation 合同，不能从这条 assignment 纵切反推为已经完成。
+在 function effect 完成后，sema 还会为每个 local/field assignment 固化 destination-side ownership operation：owning Place replacement 明确区分 `InlineCopy` 与 `OwnershipTransfer`，直接赋值给 `var` borrowed alias 固化为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这份结构化事实；后端不再通过 RHS category、target 形状或机器位模式重新猜 replacement / rebind。Binding 初始化与容器写入仍需各自完整 effect/operation 合同，不能从这条 assignment 纵切反推为已经完成。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 与 for iterable source 尚未完成各自 effect 合同；这部分不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for iterable source 尚未完成自身 effect 合同，不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -349,7 +349,7 @@ struct User {
 - `struct` 只能顶层定义；
 - 字段独立声明 `val` 或 `var`；
 - 已登记结构体名可进入类型槽；
-- owning binding 初始化、local/field replacement、字段默认值与构造实参从稳定 Place 读取时按 3.4 节递归 DeepClone；closure capture 按 4.4 节建立 loan；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 仍等待自身 effect；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
+- owning binding 初始化、local/field replacement、字段默认值与构造实参从稳定 Place 读取时按 3.4 节递归 DeepClone；closure capture 按 4.4 节建立 loan；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 按 7.2 节执行已解析 ownership operation；显式 `clone(instance)` 按 3.2 节创建递归独立副本；满足 3.3 递归 shallow-safe 条件时，显式 `shallow(instance)` 创建独立 aggregate root；
 - 字段写权限只由字段自身 `val/var` 决定，与持有实例的绑定是否为 `val/var` 无关；
 - 字段赋值的 receiver 链必须解析为已有 storage Place；当前允许从 binding root 经 Field/Index 继续投影，因此 `cells[0].value = 3` 合法，但 constructor/call/ternary 等临时 Value 不能作为字段赋值 receiver，例如 `cell().value = 1` 是编译错误；
 - 构造使用命名实参；
@@ -398,7 +398,7 @@ pub func Ret Receiver.method = (Args...) -> body
 
 单侧构造可暂含 `Unknown`，但必须在目标上下文或后续统一中确定为完整可用类型后才能进入需要 ABI 的路径。
 
-显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan。`ok/err` 构造 payload 从稳定 Place 读取时同样按 3.4 节 clone。若 `T/E` 都满足当前 shallow-safe 规则，显式 `shallow(result)` 建立新的 result root，并只对 active payload 执行 `ShallowClonePlan`。函数返回按 4.6 节处理，Pattern binding 等其余 result ownership 语义仍受尚未完成的 effect/loan 迁移限制。
+显式 `clone(result)` 会创建新的 result block，并只对当前 active payload 执行对应递归 DeepClonePlan。`ok/err` 构造 payload 从稳定 Place 读取时同样按 3.4 节 clone。若 `T/E` 都满足当前 shallow-safe 规则，显式 `shallow(result)` 建立新的 result root，并只对 active payload 执行 `ShallowClonePlan`。函数返回按 4.6 节处理；constructor payload Pattern binding 按 7.2 节 clone active payload，不从仍 live 的 result 中 partial move。
 
 result 值显示为 `<ok>` / `<err>`。
 
@@ -427,6 +427,8 @@ err(_)
 
 `match` 主语可以是一般静态类型，不限 result。
 
+每个实际产生绑定的 arm 都在 sema 固化 ownership operation，并由 ownership CFG、final-HIR gate 与 codegen 共同消费：inline 标量使用 `InlineCopy`；普通整值绑定若主语是 `OwnedTemporary + Available`，使用 `OwnershipTransfer`；若主语是稳定 Place 或 borrowed value，则按绑定类型固化并执行 `DeepClonePlan`。`ok(name)` / `err(name)` 的 payload 仍属于 live result storage，因此动态 payload 始终 clone，禁止借 Pattern 暗中 partial move。无法证明上述 operation 或绑定类型不满足 DeepCloneable 时静态拒绝，不按当前 pointer bit pattern 退回共享。
+
 ### 7.3 穷尽性与不可达
 
 - `_` 与普通绑定 Pattern 都是 catch-all；
@@ -446,7 +448,7 @@ err(_)
 
 ## 8. `array<T>` 与 `iterator<T>`
 
-数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素、`push` 实参或 `for` 循环变量从稳定 owning element 读取时，按 3.4 节递归 clone；`for` 的 element `DeepClonePlan` 固化在 HIR，不能由后端按机器表示猜测。closure capture 按 4.4 节借用现有 wrapper；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 仍等待自身 effect。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
+数组值当前使用 wrapper 引用表示。owning binding/local/field 从稳定 array Place 读取，以及 array 字面量元素、`push` 实参或 `for` 循环变量从稳定 owning element 读取时，按 3.4 节递归 clone；`for` 的 element `DeepClonePlan` 固化在 HIR，不能由后端按机器表示猜测。closure capture 按 4.4 节借用现有 wrapper；用户函数参数与方法 receiver/实参按 4.5 节建立 call loan 或显式 transfer，函数返回按 4.6 节建立 caller ownership/loan，Pattern binding 按 7.2 节执行已解析 ownership operation。显式 `clone(array)` 按 3.2 节执行相同递归复制。`array<T>` 当前不支持显式 shallow。
 
 ### 8.1 数组
 
@@ -788,7 +790,7 @@ line / col / len
 - 标量作为 user-level shallow 根；
 - `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
-- match/Pattern binding 与 for iterable 中稳定 dynamic Place 普通读取的 effect 解析；
+- for iterable 中稳定 dynamic Place 普通读取的 effect 解析；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；
