@@ -1,4 +1,4 @@
-use crate::codegen::abi::{norm_store, size_align, value_word_offset, VTy};
+use crate::codegen::abi::{norm_store, value_layout, value_word_offset, VTy};
 use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::{BindingId, StorageRelation};
 use crate::AliasResult;
@@ -90,12 +90,12 @@ pub(crate) fn emit_local_cell<M: Module>(
     id: BindingId,
     relation: Option<StorageRelation>,
 ) -> AliasResult<Variable> {
-    let (sz, _) = if relation == Some(StorageRelation::Borrowed) {
-        (8, 8)
+    let size = if relation == Some(StorageRelation::Borrowed) {
+        8
     } else {
-        size_align(&vty)
+        value_layout(&vty).size
     };
-    let szw = bcx.ins().iconst(types::I64, sz as i64);
+    let szw = bcx.ins().iconst(types::I64, size as i64);
     let cell = c.call_rt(bcx, "alias.cell.new", &[szw])?;
     let sv = if relation == Some(StorageRelation::Borrowed) {
         word
@@ -132,8 +132,7 @@ pub(crate) fn emit_temporary_cell<M: Module>(
     value: Value,
     vty: &VTy,
 ) -> AliasResult<Value> {
-    let (size, _) = size_align(vty);
-    let size = bcx.ins().iconst(types::I64, size as i64);
+    let size = bcx.ins().iconst(types::I64, value_layout(vty).size as i64);
     let cell = c.call_rt(bcx, "alias.cell.new", &[size])?;
     let stored = norm_store(bcx, value, vty);
     bcx.ins().store(MemFlagsData::new(), stored, cell, 0);

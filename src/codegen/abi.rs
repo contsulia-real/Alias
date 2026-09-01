@@ -59,6 +59,17 @@ pub(crate) struct ValueAbi {
     pub(crate) word: WordRepr,
 }
 
+/// Canonical physical storage layout for one language value. `stride` is kept distinct from
+/// `size`: aggregates and container elements may require tail padding even when every current
+/// scalar happens to have `stride == size`. If callers recompute this tuple independently, pointer
+/// fields and typed array backing will diverge as soon as multi-lane values enter the ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ValueLayout {
+    pub(crate) size: usize,
+    pub(crate) align: usize,
+    pub(crate) stride: usize,
+}
+
 impl VTy {
     pub(crate) fn abi(&self) -> ValueAbi {
         match self {
@@ -142,9 +153,13 @@ pub(crate) fn cl_type(vty: &VTy) -> Type {
     vty.abi().storage
 }
 
-pub(crate) fn size_align(vty: &VTy) -> (usize, usize) {
+pub(crate) fn value_layout(vty: &VTy) -> ValueLayout {
     let abi = vty.abi();
-    (abi.storage_bytes, abi.align_bytes)
+    ValueLayout {
+        size: abi.storage_bytes,
+        align: abi.align_bytes,
+        stride: align_to(abi.storage_bytes, abi.align_bytes),
+    }
 }
 
 pub(crate) fn align_to(off: usize, align: usize) -> usize {
@@ -263,17 +278,17 @@ pub(crate) fn build_struct_layouts(items: &[Item], projections: &ProjectionTable
         let mut max_align = 1usize;
         for field in &sd.fields {
             let vty = projected_ty(projections, &field.ty);
-            let abi = vty.abi();
+            let field_layout = value_layout(&vty);
             // 每个字段先对齐自身，再推进实际存储宽度；struct 值本身是引用 word，
             // 因此无需预注册其它 struct 的 inline layout。
-            off = align_to(off, abi.align_bytes);
-            max_align = max_align.max(abi.align_bytes);
+            off = align_to(off, field_layout.align);
+            max_align = max_align.max(field_layout.align);
             fields.push(StructFieldLayout {
                 default: field.default.clone(),
                 vty,
                 offset: off as i32,
             });
-            off += abi.storage_bytes;
+            off += field_layout.size;
         }
         // 尾部 padding 使数组/连续对象中的下一个 struct 仍满足本 struct 最大对齐要求。
         table.insert(
@@ -376,7 +391,7 @@ pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, el
 mod tests {
     use super::{
         build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
-        ProjectionTable, VTy,
+        value_layout, ProjectionTable, VTy,
     };
     use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
 
@@ -402,11 +417,16 @@ mod tests {
         ];
         for value in values {
             let abi = value.abi();
+            let layout = value_layout(&value);
             assert!(abi.storage_bytes > 0);
             assert!(abi.align_bytes.is_power_of_two());
             assert_eq!(abi.storage_bytes, abi.storage.bytes() as usize);
             assert_eq!(abi.param, abi.storage);
             assert_eq!(abi.ret, abi.storage);
+            assert_eq!(layout.size, abi.storage_bytes);
+            assert_eq!(layout.align, abi.align_bytes);
+            assert!(layout.stride >= layout.size);
+            assert_eq!(layout.stride % layout.align, 0);
         }
     }
 

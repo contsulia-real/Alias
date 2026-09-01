@@ -163,6 +163,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
 - `storage_word` / `restore_word` 当前承担一-word 容器与具体值表示之间的边界；
+- `ValueLayout { size, align, stride }` 是当前所有 value storage layout 查询的唯一入口；local/global/temporary cell 与 struct field layout 共同消费它，container backing 仍待后续 typed-stride 重构；
 - f32 在当前 word 容器中保存 I32 bit pattern 后扩展到 I64，不能按数值转换处理；
 - `unit` 与 `Unknown` 没有值 ABI，到达需要值 ABI 的位置属于内部不变式失败；
 - 结构体布局必须统一处理字段对齐与最终尾部 padding。
