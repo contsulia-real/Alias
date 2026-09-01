@@ -19,13 +19,13 @@ pub(crate) enum RuntimeTy {
 }
 
 impl RuntimeTy {
-    pub(crate) fn resolve(self, ptr_ty: Type) -> Type {
+    pub(crate) fn resolve(self, machine_ptr_ty: Type) -> Type {
         match self {
             Self::I32 => types::I32,
             Self::I64 => types::I64,
             Self::F32 => types::F32,
             Self::F64 => types::F64,
-            Self::Ptr => ptr_ty,
+            Self::Ptr => machine_ptr_ty,
         }
     }
 }
@@ -59,16 +59,17 @@ impl RuntimeContract {
     pub(crate) fn signature(
         &self,
         cc: cranelift_codegen::isa::CallConv,
-        ptr_ty: Type,
+        machine_ptr_ty: Type,
     ) -> Signature {
         let mut sig = Signature::new(cc);
         sig.params.extend(
             self.params
                 .iter()
-                .map(|p| AbiParam::new(p.ty.resolve(ptr_ty))),
+                .map(|p| AbiParam::new(p.ty.resolve(machine_ptr_ty))),
         );
         if let Some(ret) = self.ret {
-            sig.returns.push(AbiParam::new(ret.ty.resolve(ptr_ty)));
+            sig.returns
+                .push(AbiParam::new(ret.ty.resolve(machine_ptr_ty)));
         }
         sig
     }
@@ -152,7 +153,7 @@ impl<M: Module> Compiler<'_, M> {
     /// 参数数量、机器类型及 value-vs-unit 形态才不会在 emitter 中形成平行合同。
     pub(crate) fn import_runtime(&mut self, name: &str) -> AliasResult<FuncId> {
         let contract = runtime_contract(name)?;
-        let sig = contract.signature(self.cc, self.ptr_ty);
+        let sig = contract.signature(self.cc, self.machine_ptr_ty);
         self.module
             .declare_function(contract.symbol, Linkage::Import, &sig)
             .map_err(|error| native_err(Span::default(), format!("内部: runtime 声明失败 {error}")))
@@ -222,7 +223,7 @@ impl<M: Module> Compiler<'_, M> {
         }
         for (index, (arg, expected)) in args.iter().zip(contract.params).enumerate() {
             let actual = bcx.func.dfg.value_type(*arg);
-            let expected = expected.ty.resolve(self.ptr_ty);
+            let expected = expected.ty.resolve(self.machine_ptr_ty);
             if actual != expected {
                 return Err(native_err(
                     Span::default(),

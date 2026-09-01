@@ -25,7 +25,7 @@ pub(super) fn emit_display_runtime<M: Module>(
             let __gv = c
                 .module
                 .declare_data_in_func(static_ids[$name], &mut $bcx.func);
-            $bcx.ins().symbol_value(c.ptr_ty, __gv)
+            $bcx.ins().symbol_value(c.machine_ptr_ty, __gv)
         }};
     }
     macro_rules! call_rt_m {
@@ -89,8 +89,8 @@ pub(super) fn emit_display_runtime<M: Module>(
             };
             let ss =
                 bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-            let wa = bcx.ins().stack_addr(c.ptr_ty, ss, 0);
-            let null = bcx.ins().iconst(c.ptr_ty, 0);
+            let wa = bcx.ins().stack_addr(c.machine_ptr_ty, ss, 0);
+            let null = bcx.ins().iconst(c.machine_ptr_ty, 0);
             let wf = c.module.declare_func_in_func(ext.write_file, bcx.func);
             let len32 = bcx.ins().ireduce(types::I32, len);
             let wf_args = [a[0], start, len32, wa, null];

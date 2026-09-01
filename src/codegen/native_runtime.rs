@@ -50,7 +50,7 @@ macro_rules! shim {
     ($c:expr, $name:expr, |$bcx:ident, $a:ident| $body:block) => {{
         let (__fid, __sig, __contract) =
             $crate::codegen::native_runtime::declare_runtime_shim($c, $name)?;
-        let __ret = __contract.ret.map(|v| v.ty.resolve($c.ptr_ty));
+        let __ret = __contract.ret.map(|v| v.ty.resolve($c.machine_ptr_ty));
         let mut __ctx = cranelift_codegen::Context::new();
         __ctx.func = cranelift_codegen::ir::Function::with_name_signature(
             cranelift_codegen::ir::UserFuncName::user(0x77, __fid.as_u32()),
@@ -101,7 +101,7 @@ pub(super) fn declare_runtime_shim<M: Module>(
     &'static RuntimeContract,
 )> {
     let contract = runtime_contract(name)?;
-    let sig = contract.signature(c.cc, c.ptr_ty);
+    let sig = contract.signature(c.cc, c.machine_ptr_ty);
     let fid = c
         .module
         .declare_function(contract.symbol, Linkage::Export, &sig)

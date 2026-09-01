@@ -37,22 +37,33 @@ pub(super) fn runtime_static_len(name: &str) -> i64 {
 
 pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasResult<()> {
     let ext = NativeExterns {
-        get_std_handle: c.import_external("GetStdHandle", &[types::I32], Some(c.ptr_ty))?,
+        get_std_handle: c.import_external("GetStdHandle", &[types::I32], Some(c.machine_ptr_ty))?,
         write_file: c.import_external(
             "WriteFile",
-            &[c.ptr_ty, c.ptr_ty, types::I32, c.ptr_ty, c.ptr_ty],
+            &[
+                c.machine_ptr_ty,
+                c.machine_ptr_ty,
+                types::I32,
+                c.machine_ptr_ty,
+                c.machine_ptr_ty,
+            ],
             Some(types::I32),
         )?,
         exit_process: c.import_external("ExitProcess", &[types::I32], None)?,
     };
     let heap_alloc = c.import_external(
         "HeapAlloc",
-        &[c.ptr_ty, types::I32, types::I64],
-        Some(c.ptr_ty),
+        &[c.machine_ptr_ty, types::I32, types::I64],
+        Some(c.machine_ptr_ty),
     )?;
-    let get_process_heap = c.import_external("GetProcessHeap", &[], Some(c.ptr_ty))?;
+    let get_process_heap =
+        c.import_external("GetProcessHeap", &[], Some(c.machine_ptr_ty))?;
     let rtl_move_memory =
-        c.import_external("RtlMoveMemory", &[c.ptr_ty, c.ptr_ty, types::I64], None)?;
+        c.import_external(
+            "RtlMoveMemory",
+            &[c.machine_ptr_ty, c.machine_ptr_ty, types::I64],
+            None,
+        )?;
 
     let span_data = c
         .module

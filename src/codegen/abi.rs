@@ -2,6 +2,7 @@
 
 use crate::sema::hir::{CheckedProgram, Expr, Item};
 use crate::sema::types::{FloatW, IntW, ReturnEffect, Ty, UIntW};
+use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -52,6 +53,85 @@ pub(crate) struct ValueLayout {
     pub(crate) size: usize,
     pub(crate) align: usize,
     pub(crate) stride: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(crate) enum PtrLane {
+    Provenance = 0,
+    Address = 1,
+    ViewStart = 2,
+    ViewEnd = 3,
+}
+
+impl PtrLane {
+    const ALL: [Self; 4] = [
+        Self::Provenance,
+        Self::Address,
+        Self::ViewStart,
+        Self::ViewEnd,
+    ];
+}
+
+/// Windows x64 上 Alias pointer capability 的唯一物理布局 owner。
+///
+/// machine pointer 仍是单个 64-bit 地址；Alias pointer value 是四个独立 I64 lane。
+/// 把二者都当成单个 pointer type 会让后续 expression/storage/parameter lowering 把 32-byte
+/// capability 错压成一个 I64，因此这里同时冻结 lane 次序、offset 与 aggregate layout。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PtrLayout {
+    lanes: [Type; 4],
+    offsets: [i32; 4],
+    value: ValueLayout,
+}
+
+const WINDOWS_X64_PTR_LAYOUT: PtrLayout = PtrLayout {
+    lanes: [types::I64; 4],
+    offsets: [0, 8, 16, 24],
+    value: ValueLayout {
+        size: 32,
+        align: 8,
+        stride: 32,
+    },
+};
+
+impl PtrLayout {
+    /// Binds the frozen language capability layout to the explicit x64 machine-pointer target.
+    /// A different target must define its own complete layout instead of silently reusing these
+    /// offsets with a different machine address width.
+    pub(crate) fn for_current_target(machine_pointer: Type) -> AliasResult<Self> {
+        if machine_pointer != types::I64 {
+            return Err(AliasError {
+                msg: format!(
+                    "当前 Alias pointer ABI 需要 64-bit machine pointer，目标提供 {machine_pointer}"
+                ),
+                span: Span::default(),
+            });
+        }
+        let layout = WINDOWS_X64_PTR_LAYOUT;
+        for lane in PtrLane::ALL {
+            let index = lane as usize;
+            if layout.lanes[index] != machine_pointer
+                || layout.offsets[index] != (index * machine_pointer.bytes() as usize) as i32
+            {
+                return Err(AliasError {
+                    msg: "内部 ABI 不变式被破坏: PtrLayout lane 类型或 offset 漂移".into(),
+                    span: Span::default(),
+                });
+            }
+        }
+        if layout.value.size != 32 || layout.value.align != 8 || layout.value.stride != 32 {
+            return Err(AliasError {
+                msg: "内部 ABI 不变式被破坏: PtrLayout aggregate size/align/stride 漂移".into(),
+                span: Span::default(),
+            });
+        }
+        Ok(layout)
+    }
+
+    pub(crate) fn machine_pointer_type(self) -> Type {
+        self.lanes[PtrLane::Address as usize]
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -468,8 +548,8 @@ pub(crate) fn store_elem(bcx: &mut FunctionBuilder, word: Value, addr: Value, el
 mod tests {
     use super::{
         build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
-        value_layout, ExpressionAbi, ParameterAbi, ProjectionTable, ReturnAbi, StorageAbi,
-        ValueAbi, ValueLayout, VTy,
+        value_layout, ExpressionAbi, ParameterAbi, ProjectionTable, PtrLane, PtrLayout, ReturnAbi,
+        StorageAbi, ValueAbi, ValueLayout, VTy,
     };
     use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
     use cranelift_codegen::ir::types;
@@ -548,6 +628,29 @@ mod tests {
         assert!(std::panic::catch_unwind(|| abi.direct_parameter()).is_err());
         assert!(std::panic::catch_unwind(|| abi.direct_result()).is_err());
         assert!(std::panic::catch_unwind(|| abi.word()).is_err());
+    }
+
+    #[test]
+    fn pointer_layout_is_four_i64_lanes_with_exact_windows_x64_offsets() {
+        let layout = PtrLayout::for_current_target(types::I64).unwrap();
+        assert_eq!(layout.lanes, [types::I64; 4]);
+        assert_eq!(
+            PtrLane::ALL.map(|lane| layout.offsets[lane as usize]),
+            [0, 8, 16, 24]
+        );
+        assert_eq!(
+            layout.value,
+            ValueLayout {
+                size: 32,
+                align: 8,
+                stride: 32,
+            }
+        );
+        assert_eq!(layout.machine_pointer_type(), types::I64);
+
+        let error = PtrLayout::for_current_target(types::I32)
+            .expect_err("32-bit machine pointer must not reuse the Windows x64 layout");
+        assert!(error.msg.contains("64-bit machine pointer"), "{}", error.msg);
     }
 
     #[test]

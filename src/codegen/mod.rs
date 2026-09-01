@@ -26,7 +26,7 @@ use std::str::FromStr;
 
 use abi::{
     align_to, build_struct_layouts, project_ty, projected_ty, value_layout, ProjectionTable,
-    StructTable, VTy,
+    PtrLayout, StructTable, VTy,
 };
 use native_runtime::{define_span_data, emit_native_runtime};
 
@@ -59,7 +59,9 @@ pub(crate) struct Frame {
 pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) module: &'m mut M,
     pub(crate) cc: cranelift_codegen::isa::CallConv,
-    pub(crate) ptr_ty: cranelift_codegen::ir::Type,
+    /// Native address type of the fixed x64 target. This is one I64 machine pointer, not the
+    /// four-lane Alias pointer capability described by `PtrLayout`.
+    pub(crate) machine_ptr_ty: cranelift_codegen::ir::Type,
     pub(crate) globals_final: HashMap<BindingId, (usize, VTy, Option<StorageRelation>)>,
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
@@ -102,9 +104,10 @@ pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>>
     let mut module = cranelift_object::ObjectModule::new(builder);
 
     let type_projections = project_ty(&program);
+    let pointer_layout = PtrLayout::for_current_target(module.isa().pointer_type())?;
     let mut c = Compiler {
         cc: module.isa().default_call_conv(),
-        ptr_ty: module.isa().pointer_type(),
+        machine_ptr_ty: pointer_layout.machine_pointer_type(),
         module: &mut module,
         globals_final: HashMap::new(),
         top_slots: Vec::new(),
@@ -367,7 +370,7 @@ pub(crate) fn bound_relation<M: Module>(
 
 #[cfg(test)]
 mod fail_closed_tests {
-    use super::Compiler;
+    use super::{Compiler, PtrLayout};
     use crate::target::TARGET_TRIPLE;
     use cranelift_codegen::ir::types;
     use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, Signature, UserFuncName};
@@ -421,12 +424,15 @@ mod fail_closed_tests {
             .declare_function("invalid_then_valid", Linkage::Local, &sig)
             .unwrap();
         let cc = module.isa().default_call_conv();
-        let ptr_ty = module.isa().pointer_type();
+        let machine_ptr_ty =
+            PtrLayout::for_current_target(module.isa().pointer_type())
+                .unwrap()
+                .machine_pointer_type();
         let frontend = module.target_config();
         let mut compiler = Compiler {
             module: &mut module,
             cc,
-            ptr_ty,
+            machine_ptr_ty,
             globals_final: HashMap::new(),
             top_slots: Vec::new(),
             global_bytes: 0,

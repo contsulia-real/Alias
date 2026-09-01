@@ -57,7 +57,7 @@ pub(crate) fn str_literal_handle<M: Module>(
         }
     };
     let gv = c.module.declare_data_in_func(data_id, bcx.func);
-    let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
+    let addr = bcx.ins().symbol_value(c.machine_ptr_ty, gv);
     let len = bcx.ins().iconst(types::I32, s.len() as i64);
     c.call_rt(bcx, "alias.str.new", &[addr, len])
 }

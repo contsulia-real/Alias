@@ -27,7 +27,7 @@ fn static_string_block<M: Module>(
         .declare_data(data_name, Linkage::Local, false, false)
         .map_err(|e| native_err(Span::default(), format!("内部: 数据声明失败 {e}")))?;
     let gv = c.module.declare_data_in_func(id, bcx.func);
-    let addr = bcx.ins().symbol_value(c.ptr_ty, gv);
+    let addr = bcx.ins().symbol_value(c.machine_ptr_ty, gv);
     let alloc_ref = c.module.declare_func_in_func(alloc, bcx.func);
     let sz = bcx.ins().iconst(types::I64, STRING_BYTES);
     let call = bcx.ins().call(alloc_ref, &[sz]);
@@ -53,7 +53,7 @@ pub(super) fn emit_float_display_shim<M: Module>(
     param_ty: cranelift_codegen::ir::Type,
 ) -> AliasResult<()> {
     let (fid, sig, contract) = declare_runtime_shim(c, name)?;
-    if contract.params[0].ty.resolve(c.ptr_ty) != param_ty {
+    if contract.params[0].ty.resolve(c.machine_ptr_ty) != param_ty {
         return Err(native_err(
             Span::default(),
             format!("内部: 浮点 display '{}' 实现类型与契约不一致", name),

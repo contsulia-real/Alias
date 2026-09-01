@@ -58,7 +58,7 @@ fn emit_span_abort<M: Module>(
 
     let base = {
         let gv = c.module.declare_data_in_func(span_data, bcx.func);
-        bcx.ins().symbol_value(c.ptr_ty, gv)
+        bcx.ins().symbol_value(c.machine_ptr_ty, gv)
     };
     let id64 = bcx.ins().uextend(types::I64, a[0]);
     let off = bcx.ins().imul_imm_s(id64, SPAN_RECORD_BYTES);
@@ -74,12 +74,12 @@ fn emit_span_abort<M: Module>(
         ($bcx:expr, $err:expr, $data:expr, $len:expr) => {{
             let __wa =
                 $bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-            let __wa_addr = $bcx.ins().stack_addr(c.ptr_ty, __wa, 0);
-            let __null = $bcx.ins().iconst(c.ptr_ty, 0);
+            let __wa_addr = $bcx.ins().stack_addr(c.machine_ptr_ty, __wa, 0);
+            let __null = $bcx.ins().iconst(c.machine_ptr_ty, 0);
             let __gv = c
                 .module
                 .declare_data_in_func(static_ids[$data], &mut $bcx.func);
-            let __addr = $bcx.ins().symbol_value(c.ptr_ty, __gv);
+            let __addr = $bcx.ins().symbol_value(c.machine_ptr_ty, __gv);
             let __len = $bcx.ins().iconst(types::I32, $len);
             let __wf = c
                 .module

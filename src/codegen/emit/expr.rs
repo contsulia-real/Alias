@@ -64,7 +64,7 @@ pub(crate) fn emit_expr<M: Module>(
                 .this_fid
                 .ok_or_else(|| native_err(*span, "this 只能出现在 func 体内"))?;
             let fref = c.module.declare_func_in_func(fid, bcx.func);
-            let code = bcx.ins().func_addr(c.ptr_ty, fref);
+            let code = bcx.ins().func_addr(c.machine_ptr_ty, fref);
             let env = frame
                 .env
                 .map(|var| bcx.use_var(var))

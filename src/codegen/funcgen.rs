@@ -363,7 +363,7 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     }
 
     let fref = c.module.declare_func_in_func(fid, bcx.func);
-    let code = bcx.ins().func_addr(c.ptr_ty, fref);
+    let code = bcx.ins().func_addr(c.machine_ptr_ty, fref);
     let cn = c.import_runtime("alias.closure.new")?;
     let cnref = c.module.declare_func_in_func(cn, bcx.func);
     let cncall = bcx.ins().call(cnref, &[code, env_word]);
