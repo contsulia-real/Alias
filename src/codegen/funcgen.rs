@@ -1,5 +1,5 @@
 use crate::codegen::abi::{
-    norm_load, object_word_offset, user_function_abi, UserFunctionAbi, UserParameterPassing,
+    binding_cell_vty, norm_load, object_word_offset, user_function_abi, UserFunctionAbi, UserParameterPassing,
     UserReturnPassing, VTy,
 };
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
@@ -271,7 +271,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             };
             let off = self.top_slots[binding_index];
             let base = bcx.use_var(frame.globals);
-            v.store(&mut bcx, base, off as i32, &svty);
+            v.store(&mut bcx, base, off as i32, &binding_cell_vty(&svty, b.relation));
             frame.scopes[0].insert(b.binding_id, Slot::Global(off));
             frame.locals_vty[0].insert(b.binding_id, svty);
             frame.locals_relation[0].insert(b.binding_id, b.relation);

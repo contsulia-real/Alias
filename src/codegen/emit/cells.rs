@@ -1,6 +1,6 @@
 use super::value::ExprValue;
-use crate::codegen::abi::{object_word_offset, value_layout, VTy};
-use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
+use crate::codegen::abi::{binding_cell_vty, object_word_offset, value_layout, VTy};
+use crate::codegen::{bound_relation, bound_vty, invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::{BindingId, StorageRelation};
 use crate::AliasResult;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
@@ -52,7 +52,11 @@ pub(crate) fn binding_storage_addr<M: Module>(
 ) -> Option<Value> {
     let cell = materialize_cell_addr(bcx, frame, &cell_addr(c, frame, id)?);
     if bound_relation(c, frame, id) == Some(StorageRelation::Borrowed) {
-        Some(bcx.ins().load(types::I64, MemFlagsData::new(), cell, 0))
+        let cell_vty = binding_cell_vty(
+            &bound_vty(c, frame, id),
+            Some(StorageRelation::Borrowed),
+        );
+        Some(ExprValue::load(bcx, cell, 0, &cell_vty).into_scalar("alias cell 必须保存 referent address"))
     } else {
         Some(cell)
     }
@@ -91,19 +95,8 @@ pub(crate) fn emit_local_cell<M: Module>(
     id: BindingId,
     relation: Option<StorageRelation>,
 ) -> AliasResult<Variable> {
-    let size = if relation == Some(StorageRelation::Borrowed) {
-        8
-    } else {
-        value_layout(&vty).size
-    };
-    let szw = bcx.ins().iconst(types::I64, size as i64);
-    let cell = c.call_rt(bcx, "alias.cell.new", &[szw])?;
-    if relation == Some(StorageRelation::Borrowed) {
-        let referent = value.into_scalar("borrowed alias cell 必须保存单个 referent address");
-        bcx.ins().store(MemFlagsData::new(), referent, cell, 0);
-    } else {
-        value.store(bcx, cell, 0, &vty);
-    }
+    let cell_vty = binding_cell_vty(&vty, relation);
+    let cell = emit_temporary_cell(c, bcx, value, &cell_vty)?;
     let var = bcx.declare_var(types::I64);
     bcx.def_var(var, cell);
     frame
@@ -124,9 +117,9 @@ pub(crate) fn emit_local_cell<M: Module>(
     Ok(var)
 }
 
-/// Materialize an unnamed owning cell for a temporary passed through a borrow parameter. The
-/// caller owns this storage for the call expression; the callee receives only its address. Keeping
-/// allocation/storage here prevents call emitters from duplicating cell layout rules.
+/// Materialize storage for the supplied physical value ABI. A binding may store a value or a
+/// referent address; argument temporaries store their resolved value. Both allocation and write
+/// must consume the same ABI, otherwise a narrow referent can underallocate its address cell.
 pub(crate) fn emit_temporary_cell<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,

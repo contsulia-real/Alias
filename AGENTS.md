@@ -166,6 +166,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 - `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge、用户调用结果与返回路径保留完整 lane；pointer VTy 与具体 pointer expression 尚未接入；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
+- `binding_cell_vty` 统一把当前 resolved slot relation 投影为物理 cell 值：owning cell 保存原值，borrowed alias cell 复用 `VTy::Borrowed` 的 referent-address ABI。local/global 分配、初始化与 alias 重绑定共同消费这一表示及 `ExprValue::store`，不在各写入点另写 alias 宽度；该地址 carrier 不等于 pointer capability value。
 - 历史 `WordRepr` / `storage_word` / `restore_word` 已随 typed array/result storage 删除；任何值都不得为了进入 container 被重新压成 universal I64 word；
 - `ValueLayout { size, align, stride }` 是当前所有 value storage layout 查询的唯一入口；local/global/temporary cell、resolved Place、struct field、array backing 与 result payload 共同消费它及同一 `StorageLane` offset 合同。raw array header 固化创建时的 `stride(T)`；`ResultLayout` 以 ok/err 的最大 size/align 统一决定 payload offset、root size 与 tail padding；
 - f32 在真实 storage 中直接使用 F32 machine type；跨 expression/storage 边界只做声明类型要求的规范化，不能数值转换成整数 bit container；

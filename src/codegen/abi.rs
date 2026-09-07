@@ -1,6 +1,6 @@
 //! Alias 值 ABI 与内存布局的唯一真相源。
 
-use crate::sema::hir::{CheckedProgram, Expr, Item};
+use crate::sema::hir::{CheckedProgram, Expr, Item, StorageRelation};
 use crate::sema::types::{FloatW, IntW, ParamEffect, ReturnEffect, Ty, UIntW};
 use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::types;
@@ -29,8 +29,8 @@ pub(crate) enum VTy {
         param_effects: Vec<ParamEffect>,
         ret: Box<VTy>,
     },
-    /// Machine-level return lane for a semantic borrowed result. The pointee type remains
-    /// available for validation, but the caller/callee ABI carries the referent address as I64.
+    /// Machine-level referent address used by borrowed returns and alias cells. This describes
+    /// the address carrier, not the pointee value or its ownership capability.
     Borrowed(Box<VTy>),
     FuncPoly,
     Struct(String),
@@ -315,6 +315,16 @@ pub(crate) fn cl_type(vty: &VTy) -> Type {
 
 pub(crate) fn value_layout(vty: &VTy) -> ValueLayout {
     vty.abi().storage.layout
+}
+
+/// Project the resolved slot relation to its physical cell value. Keeping this boundary here
+/// prevents narrow referents from shrinking alias cells, or aggregate referents from making an
+/// alias allocation disagree with the single address stored by initialization/rebinding.
+pub(crate) fn binding_cell_vty(vty: &VTy, relation: Option<StorageRelation>) -> VTy {
+    match relation {
+        Some(StorageRelation::Borrowed) => VTy::Borrowed(Box::new(vty.clone())),
+        Some(StorageRelation::Owning) | None => vty.clone(),
+    }
 }
 
 pub(crate) fn align_to(off: usize, align: usize) -> usize {

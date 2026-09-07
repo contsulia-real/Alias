@@ -169,9 +169,11 @@ pub(crate) fn emit_stmt<M: Module>(
                     invariant_violation("borrowed rebind target 必须有 alias cell")
                 });
                 let cell = super::cells::materialize_cell_addr(bcx, frame, &cell);
-                let referent =
-                    value.into_scalar("borrowed alias rebind 必须保存单个 referent address");
-                bcx.ins().store(MemFlagsData::new(), referent, cell, 0);
+                let cell_vty = crate::codegen::abi::binding_cell_vty(
+                    &c.vty(target.ty()),
+                    Some(StorageRelation::Borrowed),
+                );
+                value.store(bcx, cell, 0, &cell_vty);
                 return Ok(());
             }
             emit_place_write(c, bcx, frame, target, value)

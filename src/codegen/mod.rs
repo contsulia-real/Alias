@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 
 use abi::{
-    align_to, build_struct_layouts, project_ty, projected_ty, value_layout, ProjectionTable,
+    align_to, binding_cell_vty, build_struct_layouts, project_ty, projected_ty, value_layout, ProjectionTable,
     PtrLayout, StructTable, UserReturnPassing, VTy,
 };
 use native_runtime::{define_span_data, emit_native_runtime};
@@ -203,7 +203,7 @@ fn compile_program<M: Module>(
             _ => None,
         }) {
             let slot_vty = c.vty(&b.ty);
-            let layout = value_layout(&slot_vty);
+            let layout = value_layout(&binding_cell_vty(&slot_vty, b.relation));
             off = align_to(off, layout.align);
             let slot = off;
             off += layout.size;
