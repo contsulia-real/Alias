@@ -1,7 +1,7 @@
 //! Alias 值 ABI 与内存布局的唯一真相源。
 
 use crate::sema::hir::{CheckedProgram, Expr, Item};
-use crate::sema::types::{FloatW, IntW, ReturnEffect, Ty, UIntW};
+use crate::sema::types::{FloatW, IntW, ParamEffect, ReturnEffect, Ty, UIntW};
 use crate::{AliasError, AliasResult, Span};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, Signature, Type, Value};
@@ -24,7 +24,11 @@ pub(crate) enum VTy {
     Bool,
     Str,
     Unit,
-    Func(Vec<VTy>, Box<VTy>),
+    Func {
+        params: Vec<VTy>,
+        param_effects: Vec<ParamEffect>,
+        ret: Box<VTy>,
+    },
     /// Machine-level return lane for a semantic borrowed result. The pointee type remains
     /// available for validation, but the caller/callee ABI carries the referent address as I64.
     Borrowed(Box<VTy>),
@@ -260,28 +264,6 @@ impl ValueAbi {
         }
     }
 
-    fn direct_parameter(&self) -> Type {
-        match (self.parameter.direct, self.parameter.indirect_by_value) {
-            (Some(ty), false) => ty,
-            (None, true) => panic!(
-                "内部 ABI 不变式被破坏: IndirectByValue({}, {}) 尚未进入 caller/callee lowering",
-                self.storage.layout.size, self.storage.layout.align
-            ),
-            _ => panic!("内部 ABI 不变式被破坏: parameter ABI 形态冲突"),
-        }
-    }
-
-    fn direct_result(&self) -> Type {
-        match (self.result.direct, self.result.explicit_sret) {
-            (Some(ty), false) => ty,
-            (None, true) => panic!(
-                "内部 ABI 不变式被破坏: ExplicitSRet({}, {}) 尚未进入 caller/callee lowering",
-                self.storage.layout.size, self.storage.layout.align
-            ),
-            _ => panic!("内部 ABI 不变式被破坏: return ABI 形态冲突"),
-        }
-    }
-
 }
 
 impl VTy {
@@ -295,7 +277,7 @@ impl VTy {
             VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
             VTy::Bool
             | VTy::Str
-            | VTy::Func(..)
+            | VTy::Func { .. }
             | VTy::Borrowed(_)
             | VTy::FuncPoly
             | VTy::Struct(_)
@@ -339,25 +321,138 @@ pub(crate) fn align_to(off: usize, align: usize) -> usize {
     off.div_ceil(align) * align
 }
 
-pub(crate) fn user_signature(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UserParameterPassing {
+    Direct(Type),
+    BorrowedAddress,
+    IndirectByValue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UserReturnPassing {
+    Unit,
+    Direct(Type),
+    ExplicitSRet,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UserFunctionAbi {
+    signature: Signature,
+    parameters: Vec<(usize, UserParameterPassing)>,
+    result: UserReturnPassing,
+    sret_index: Option<usize>,
+    globals_index: usize,
+    env_index: usize,
+}
+
+impl UserFunctionAbi {
+    pub(crate) fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    pub(crate) fn parameter(&self, index: usize) -> (usize, UserParameterPassing) {
+        self.parameters[index]
+    }
+
+    pub(crate) fn result(&self) -> UserReturnPassing {
+        self.result
+    }
+
+    pub(crate) fn sret_index(&self) -> Option<usize> {
+        self.sret_index
+    }
+
+    pub(crate) fn globals_index(&self) -> usize {
+        self.globals_index
+    }
+
+    pub(crate) fn env_index(&self) -> usize {
+        self.env_index
+    }
+}
+
+pub(crate) fn user_function_abi(
     cc: cranelift_codegen::isa::CallConv,
     params: &[VTy],
+    param_effects: &[ParamEffect],
     ret: &VTy,
-) -> Signature {
-    let mut sig = Signature::new(cc);
-    // 所有用户函数统一先接收 globals 与 closure env 两个隐藏 I64 参数；直接函数、
-    // 闭包和方法调用都依赖这一固定前缀，任何一侧自行增删都会造成 call ABI 错位。
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.extend(
-        params
-            .iter()
-            .map(|p| AbiParam::new(p.abi().direct_parameter())),
-    );
-    if *ret != VTy::Unit {
-        sig.returns.push(AbiParam::new(ret.abi().direct_result()));
+) -> UserFunctionAbi {
+    if params.len() != param_effects.len() {
+        panic!("内部 ABI 不变式被破坏: parameter VTy/effect 数量漂移")
     }
-    sig
+    let param_abis: Vec<ValueAbi> = params.iter().map(VTy::abi).collect();
+    let return_abi = (*ret != VTy::Unit).then(|| ret.abi());
+    user_function_abi_from_value_abis(cc, &param_abis, param_effects, return_abi.as_ref())
+}
+
+fn user_function_abi_from_value_abis(
+    cc: cranelift_codegen::isa::CallConv,
+    params: &[ValueAbi],
+    param_effects: &[ParamEffect],
+    ret: Option<&ValueAbi>,
+) -> UserFunctionAbi {
+    if params.len() != param_effects.len() {
+        panic!("内部 ABI 不变式被破坏: parameter ABI/effect 数量漂移")
+    }
+    let mut sig = Signature::new(cc);
+    let result = match ret {
+        None => UserReturnPassing::Unit,
+        Some(abi) => match (abi.result.direct, abi.result.explicit_sret) {
+            (Some(ty), false) => UserReturnPassing::Direct(ty),
+            (None, true) => UserReturnPassing::ExplicitSRet,
+            _ => panic!("内部 ABI 不变式被破坏: return ABI 形态冲突"),
+        },
+    };
+    // Hidden prefix is decided once here. Adding sret after globals/env would shift caller and
+    // callee differently as soon as an aggregate result appears.
+    let sret_index = if result == UserReturnPassing::ExplicitSRet {
+        sig.params.push(AbiParam::new(types::I64));
+        Some(0)
+    } else {
+        None
+    };
+    let globals_index = sig.params.len();
+    sig.params.push(AbiParam::new(types::I64));
+    let env_index = sig.params.len();
+    sig.params.push(AbiParam::new(types::I64));
+    let mut parameters = Vec::with_capacity(params.len());
+    for (value_abi, effect) in params.iter().zip(param_effects) {
+        let passing = match effect {
+            ParamEffect::ReadBorrow | ParamEffect::WriteBorrow => {
+                UserParameterPassing::BorrowedAddress
+            }
+            ParamEffect::Owned => {
+                match (
+                    value_abi.parameter.direct,
+                    value_abi.parameter.indirect_by_value,
+                ) {
+                    (Some(ty), false) => UserParameterPassing::Direct(ty),
+                    (None, true) => UserParameterPassing::IndirectByValue,
+                    _ => panic!("内部 ABI 不变式被破坏: parameter ABI 形态冲突"),
+                }
+            }
+        };
+        let machine_index = sig.params.len();
+        let machine_type = match passing {
+            UserParameterPassing::Direct(ty) => ty,
+            UserParameterPassing::BorrowedAddress | UserParameterPassing::IndirectByValue => {
+                types::I64
+            }
+        };
+        sig.params.push(AbiParam::new(machine_type));
+        parameters.push((machine_index, passing));
+    }
+    if let UserReturnPassing::Direct(ty) = result {
+        sig.returns.push(AbiParam::new(ty));
+    }
+    UserFunctionAbi {
+        signature: sig,
+        parameters,
+        result,
+        sret_index,
+        globals_index,
+        env_index,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +491,7 @@ fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
         Ty::Unit => VTy::Unit,
         Ty::Func {
             params,
+            param_effects,
             ret,
             return_effect,
             ..
@@ -410,10 +506,17 @@ fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
             } else {
                 return_vty
             };
-            VTy::Func(
-                params.iter().map(|param| table[param].clone()).collect(),
-                Box::new(return_vty),
-            )
+            let param_effects = param_effects.clone().unwrap_or_else(|| {
+                panic!("内部类型投影不变式被破坏: function type 缺少 resolved parameter effects")
+            });
+            if param_effects.len() != params.len() {
+                panic!("内部类型投影不变式被破坏: function parameter effects 数量漂移")
+            }
+            VTy::Func {
+                params: params.iter().map(|param| table[param].clone()).collect(),
+                param_effects,
+                ret: Box::new(return_vty),
+            }
         }
         Ty::FuncPoly => VTy::FuncPoly,
         Ty::Struct(name) => VTy::Struct(name.clone()),
@@ -516,11 +619,14 @@ pub(crate) fn norm_store(bcx: &mut FunctionBuilder, value: Value, vty: &VTy) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_struct_layouts, insert_projection, project_ty, projected_ty, user_signature,
-        value_layout, ExpressionAbi, ParameterAbi, ProjectionTable, PtrLane, PtrLayout, ReturnAbi,
-        StorageAbi, StorageLane, VTy, ValueAbi, ValueLayout,
+        build_struct_layouts, insert_projection, project_ty, projected_ty, user_function_abi,
+        user_function_abi_from_value_abis, value_layout, ExpressionAbi, ParameterAbi,
+        ProjectionTable, PtrLane, PtrLayout, ReturnAbi, StorageAbi, StorageLane,
+        UserParameterPassing, UserReturnPassing, VTy, ValueAbi, ValueLayout,
     };
-    use crate::sema::types::{FloatW, IntW, ReturnBorrowSource, ReturnEffect, Ty, UIntW};
+    use crate::sema::types::{
+        FloatW, IntW, ParamEffect, ReturnBorrowSource, ReturnEffect, Ty, UIntW,
+    };
     use cranelift_codegen::ir::types;
 
     #[test]
@@ -611,8 +717,6 @@ mod tests {
         assert!(abi.result.explicit_sret);
         assert!(std::panic::catch_unwind(|| abi.scalar_register()).is_err());
         assert!(std::panic::catch_unwind(|| abi.scalar_storage()).is_err());
-        assert!(std::panic::catch_unwind(|| abi.direct_parameter()).is_err());
-        assert!(std::panic::catch_unwind(|| abi.direct_result()).is_err());
     }
 
     #[test]
@@ -699,11 +803,15 @@ mod tests {
             (
                 Ty::Func {
                     params: vec![Ty::Int(IntW::W32), Ty::Str],
-                    param_effects: None,
-                    return_effect: None,
+                    param_effects: Some(vec![ParamEffect::ReadBorrow, ParamEffect::Owned]),
+                    return_effect: Some(ReturnEffect::Inline),
                     ret: Box::new(Ty::Bool),
                 },
-                VTy::Func(vec![VTy::I(IntW::W32), VTy::Str], Box::new(VTy::Bool)),
+                VTy::Func {
+                    params: vec![VTy::I(IntW::W32), VTy::Str],
+                    param_effects: vec![ParamEffect::ReadBorrow, ParamEffect::Owned],
+                    ret: Box::new(VTy::Bool),
+                },
             ),
             (
                 Ty::Func {
@@ -714,10 +822,11 @@ mod tests {
                     ))),
                     ret: Box::new(Ty::Int(IntW::W32)),
                 },
-                VTy::Func(
-                    Vec::new(),
-                    Box::new(VTy::Borrowed(Box::new(VTy::I(IntW::W32)))),
-                ),
+                VTy::Func {
+                    params: Vec::new(),
+                    param_effects: Vec::new(),
+                    ret: Box::new(VTy::Borrowed(Box::new(VTy::I(IntW::W32)))),
+                },
             ),
             (Ty::FuncPoly, VTy::FuncPoly),
             (Ty::Struct("point".into()), VTy::Struct("point".into())),
@@ -744,19 +853,67 @@ mod tests {
 
     #[test]
     fn unit_user_signature_has_no_return_value() {
-        let unit = user_signature(
+        let unit = user_function_abi(
             cranelift_codegen::isa::CallConv::WindowsFastcall,
+            &[],
             &[],
             &VTy::Unit,
         );
-        assert!(unit.returns.is_empty());
+        assert!(unit.signature().returns.is_empty());
+        assert_eq!(unit.result(), UserReturnPassing::Unit);
 
-        let value = user_signature(
+        let value = user_function_abi(
             cranelift_codegen::isa::CallConv::WindowsFastcall,
+            &[],
             &[],
             &VTy::I(IntW::W32),
         );
-        assert_eq!(value.returns.len(), 1);
+        assert_eq!(value.signature().returns.len(), 1);
+        assert_eq!(value.result(), UserReturnPassing::Direct(types::I32));
+    }
+
+    #[test]
+    fn borrowed_narrow_parameter_uses_machine_address_not_value_width() {
+        let abi = user_function_abi(
+            cranelift_codegen::isa::CallConv::WindowsFastcall,
+            &[VTy::I(IntW::W32)],
+            &[ParamEffect::ReadBorrow],
+            &VTy::Unit,
+        );
+        assert_eq!(abi.globals_index(), 0);
+        assert_eq!(abi.env_index(), 1);
+        assert_eq!(abi.parameter(0), (2, UserParameterPassing::BorrowedAddress));
+        assert_eq!(abi.signature().params[2].value_type, types::I64);
+    }
+
+    #[test]
+    fn aggregate_user_abi_has_single_canonical_sret_and_indirect_prefix() {
+        let pointer = PtrLayout::for_current_target(types::I64)
+            .unwrap()
+            .value_abi();
+        let abi = user_function_abi_from_value_abis(
+            cranelift_codegen::isa::CallConv::WindowsFastcall,
+            std::slice::from_ref(&pointer),
+            &[ParamEffect::Owned],
+            Some(&pointer),
+        );
+        assert_eq!(abi.result(), UserReturnPassing::ExplicitSRet);
+        assert_eq!(abi.sret_index(), Some(0));
+        assert_eq!(abi.globals_index(), 1);
+        assert_eq!(abi.env_index(), 2);
+        assert_eq!(
+            abi.parameter(0),
+            (3, UserParameterPassing::IndirectByValue)
+        );
+        assert_eq!(
+            abi.signature()
+                .params
+                .iter()
+                .map(|param| param.value_type)
+                .collect::<Vec<_>>(),
+            [types::I64; 4]
+        );
+        assert!(abi.signature().returns.is_empty());
     }
 
     #[test]

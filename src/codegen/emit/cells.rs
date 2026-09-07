@@ -1,5 +1,5 @@
 use super::value::ExprValue;
-use crate::codegen::abi::{norm_store, object_word_offset, value_layout, VTy};
+use crate::codegen::abi::{object_word_offset, value_layout, VTy};
 use crate::codegen::{bound_relation, invariant_violation, Compiler, Frame, Slot};
 use crate::sema::hir::{BindingId, StorageRelation};
 use crate::AliasResult;
@@ -133,10 +133,20 @@ pub(crate) fn emit_temporary_cell<M: Module>(
     value: ExprValue,
     vty: &VTy,
 ) -> AliasResult<Value> {
-    let size = bcx.ins().iconst(types::I64, value_layout(vty).size as i64);
-    let cell = c.call_rt(bcx, "alias.cell.new", &[size])?;
+    let cell = allocate_value_cell(c, bcx, vty)?;
     value.store(bcx, cell, 0, vty);
     Ok(cell)
+}
+
+/// Allocate canonical storage before its value exists. Sret callers need this return area before
+/// the call, while indirect-by-value arguments immediately fill the same canonical cell shape.
+pub(crate) fn allocate_value_cell<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    vty: &VTy,
+) -> AliasResult<Value> {
+    let size = bcx.ins().iconst(types::I64, value_layout(vty).size as i64);
+    c.call_rt(bcx, "alias.cell.new", &[size])
 }
 
 pub(crate) fn first_result(bcx: &FunctionBuilder, inst: cranelift_codegen::ir::Inst) -> Value {
@@ -155,13 +165,6 @@ pub(crate) fn ensure_current(bcx: &mut FunctionBuilder, frame: &mut Frame) {
         bcx.switch_to_block(dead);
         bcx.seal_block(dead);
         frame.terminated = false;
-    }
-}
-
-pub(crate) fn coerce_ret(bcx: &mut FunctionBuilder, frame: &Frame, v: Value) -> Value {
-    match &frame.ret_vty {
-        Some(vty) => norm_store(bcx, v, vty),
-        None => v,
     }
 }
 

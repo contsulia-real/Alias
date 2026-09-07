@@ -2,10 +2,11 @@ use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
 use super::clone::emit_deep_clone_value;
-use super::cells::{coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope};
+use super::cells::{emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::places::{emit_place_addr, emit_place_value, emit_place_write};
-use crate::codegen::abi::VTy;
+use super::value::ExprValue;
+use crate::codegen::abi::{norm_store, UserReturnPassing, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
 use crate::codegen::layout::{
     ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET,
@@ -47,7 +48,7 @@ pub(super) fn emit_return_value<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     value: &Expr,
-) -> AliasResult<cranelift_codegen::ir::Value> {
+) -> AliasResult<ExprValue> {
     match value
         .info()
         .return_pass
@@ -55,20 +56,48 @@ pub(super) fn emit_return_value<M: Module>(
         .unwrap_or_else(|| invariant_violation("return value 缺少 resolved ReturnPass"))
     {
         ReturnPass::Inline | ReturnPass::OwnedValue | ReturnPass::BorrowValue { .. } => {
-            emit_expr(c, bcx, frame, value).map(|value| {
-                value.into_scalar("function return 尚未支持 multi-lane expression value")
-            })
+            emit_expr(c, bcx, frame, value)
         }
         ReturnPass::OwnedTransfer { source } => {
-            emit_place_value(c, bcx, frame, source).map(|(value, _)| {
-                value.into_scalar("function return 尚未支持 multi-lane expression value")
-            })
+            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
         }
         ReturnPass::BorrowPlace { source, origin } => {
             let _ = origin;
-            emit_place_addr(c, bcx, frame, source).map(|(address, _)| address)
+            emit_place_addr(c, bcx, frame, source)
+                .map(|(address, _)| ExprValue::scalar(address))
         }
     }
+}
+
+pub(super) fn emit_return_jump(
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    value: ExprValue,
+    ret_block: Block,
+) {
+    let ret_vty = frame
+        .ret_vty
+        .as_ref()
+        .unwrap_or_else(|| invariant_violation("return 位于函数帧内"));
+    match frame.return_passing {
+        UserReturnPassing::Unit => invariant_violation("unit return 不应携带返回值"),
+        UserReturnPassing::Direct(machine_type) => {
+            let value = value.into_scalar("direct function return 必须是单 lane value");
+            let value = norm_store(bcx, value, ret_vty);
+            if bcx.func.dfg.value_type(value) != machine_type {
+                invariant_violation("direct return machine type 与 canonical ABI 漂移")
+            }
+            bcx.ins().jump(ret_block, &[BlockArg::Value(value)]);
+        }
+        UserReturnPassing::ExplicitSRet => {
+            let area = frame
+                .sret
+                .unwrap_or_else(|| invariant_violation("ExplicitSRet frame 缺少 return area"));
+            value.store(bcx, area, 0, ret_vty);
+            bcx.ins().jump(ret_block, &[]);
+        }
+    }
+    frame.terminated = true;
 }
 
 pub(crate) fn emit_stmt<M: Module>(
@@ -90,10 +119,11 @@ pub(crate) fn emit_stmt<M: Module>(
                 else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
-                let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+                let function_vty = c.vty(&b.ty);
+                let VTy::Func { ret: ret_vty, .. } = &function_vty else {
                     invariant_violation("局部 func 绑定携带完整函数类型")
                 };
-                let ret_vty = *ret_vty;
+                let ret_vty = (**ret_vty).clone();
                 let v = emit_funclit_value_typed(
                     c,
                     bcx,
@@ -108,7 +138,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     bcx,
                     frame,
                     super::value::ExprValue::scalar(v),
-                    VTy::Func(param_vtys, Box::new(ret_vty)),
+                    function_vty,
                     b.binding_id,
                     b.relation,
                 )?;
@@ -155,7 +185,10 @@ pub(crate) fn emit_stmt<M: Module>(
                 .ret_vty
                 .clone()
                 .unwrap_or_else(|| invariant_violation("return 位于函数帧内"));
-            if expected == VTy::Unit {
+            if frame.return_passing == UserReturnPassing::Unit {
+                if expected != VTy::Unit {
+                    invariant_violation("unit return passing 与返回 VTy 漂移")
+                }
                 bcx.ins().jump(ret_block, &[]);
                 frame.terminated = true;
                 return Ok(());
@@ -167,9 +200,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 ));
             };
             let v = emit_return_value(c, bcx, frame, value)?;
-            let v = coerce_ret(bcx, frame, v);
-            bcx.ins().jump(ret_block, &[BlockArg::Value(v)]);
-            frame.terminated = true;
+            emit_return_jump(bcx, frame, v, ret_block);
             Ok(())
         }
         Stmt::If {

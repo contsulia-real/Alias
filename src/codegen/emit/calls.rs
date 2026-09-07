@@ -1,12 +1,18 @@
 use super::arrays::{array_len, array_raw, bump_array_version, make_iterator};
-use super::cells::{binding_storage_addr, emit_temporary_cell, first_result};
+use super::cells::{
+    allocate_value_cell, binding_storage_addr, emit_temporary_cell, first_result,
+};
 use super::clone::emit_deep_clone;
 use super::expr::emit_expr;
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::places::emit_place_addr;
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, user_signature, VTy};
+use super::value::ExprValue;
+use crate::codegen::abi::{
+    cl_type, norm_load, norm_store, user_function_abi, UserFunctionAbi,
+    UserParameterPassing, UserReturnPassing, VTy,
+};
 use crate::codegen::layout::{
     result_layout, result_tag, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET, RESULT_TAG_OFFSET,
 };
@@ -28,44 +34,60 @@ pub(crate) fn emit_call<M: Module>(
     callee: &Expr,
     args: &[CallArg],
     resolved: (&CallTarget, &VTy, Span),
-) -> AliasResult<Value> {
+) -> AliasResult<ExprValue> {
     let (target, result_vty, span) = resolved;
     match target {
         CallTarget::Builtin(BuiltinCall::Increase) => {
-            emit_incdec(c, bcx, frame, BinOp::Add, args, span)
+            emit_incdec(c, bcx, frame, BinOp::Add, args, span).map(ExprValue::scalar)
         }
         CallTarget::Builtin(BuiltinCall::Decrease) => {
-            emit_incdec(c, bcx, frame, BinOp::Sub, args, span)
+            emit_incdec(c, bcx, frame, BinOp::Sub, args, span).map(ExprValue::scalar)
         }
-        CallTarget::Builtin(BuiltinCall::Print) => emit_print(c, bcx, frame, false, args),
-        CallTarget::Builtin(BuiltinCall::Println) => emit_print(c, bcx, frame, true, args),
+        CallTarget::Builtin(BuiltinCall::Print) => {
+            emit_print(c, bcx, frame, false, args).map(ExprValue::scalar)
+        }
+        CallTarget::Builtin(BuiltinCall::Println) => {
+            emit_print(c, bcx, frame, true, args).map(ExprValue::scalar)
+        }
         CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => {
             let [arg] = args else {
                 invariant_violation("clone 元数 (sema 已校验)")
             };
-            emit_deep_clone(c, bcx, frame, &arg.value, plan)
+            emit_deep_clone(c, bcx, frame, &arg.value, plan).map(ExprValue::scalar)
         }
         CallTarget::Builtin(BuiltinCall::ShallowClone(plan)) => {
             let [arg] = args else {
                 invariant_violation("shallow 元数 (sema 已校验)")
             };
-            emit_shallow_clone(c, bcx, frame, &arg.value, plan)
+            emit_shallow_clone(c, bcx, frame, &arg.value, plan).map(ExprValue::scalar)
         }
         CallTarget::StructConstructor {
             name,
             arg_field_indices,
-        } => emit_construct(c, bcx, frame, name, args, arg_field_indices),
+        } => emit_construct(c, bcx, frame, name, args, arg_field_indices).map(ExprValue::scalar),
         CallTarget::ResultConstructor(kind) => {
-            emit_result_ctor(c, bcx, frame, *kind, args, result_vty)
+            emit_result_ctor(c, bcx, frame, *kind, args, result_vty).map(ExprValue::scalar)
         }
         CallTarget::FunctionValue => {
             let callee_vty = c.vty(callee.ty());
-            let VTy::Func(param_vtys, ret_vty) = callee_vty else {
+            let VTy::Func {
+                params: param_vtys,
+                param_effects,
+                ret: ret_vty,
+            } = callee_vty
+            else {
                 invariant_violation("函数值调用必须携带完整函数签名")
             };
             let clo = emit_expr(c, bcx, frame, callee)?
                 .into_scalar("closure call target 收到 multi-lane expression value");
-            call_closure(c, bcx, frame, clo, &param_vtys, &ret_vty, args)
+            call_closure(
+                c,
+                bcx,
+                frame,
+                clo,
+                (&param_vtys, &param_effects, &ret_vty),
+                args,
+            )
         }
     }
 }
@@ -75,17 +97,33 @@ fn call_closure<M: Module>(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     clo: Value,
-    param_vtys: &[VTy],
-    ret_vty: &VTy,
+    signature: (&[VTy], &[crate::sema::types::ParamEffect], &VTy),
     args: &[CallArg],
-) -> AliasResult<Value> {
-    let mut words: Vec<Value> = Vec::with_capacity(args.len() + 2);
-    for (a, pt) in args.iter().zip(param_vtys) {
+) -> AliasResult<ExprValue> {
+    let (param_vtys, param_effects, ret_vty) = signature;
+    let abi = user_function_abi(c.cc, param_vtys, param_effects, ret_vty);
+    let (mut words, sret) = begin_user_call(c, bcx, frame, &abi, ret_vty)?;
+    if args.len() != param_vtys.len() {
+        invariant_violation("user call argument 数量与 function ABI 漂移")
+    }
+    for (index, (a, pt)) in args.iter().zip(param_vtys).enumerate() {
         let pass = a
             .pass
             .as_ref()
             .unwrap_or_else(|| invariant_violation("user call argument 缺少 resolved pass"));
-        words.push(emit_user_argument(c, bcx, frame, &a.value, pass, pt)?);
+        let (machine_index, passing) = abi.parameter(index);
+        if machine_index != words.len() {
+            invariant_violation("user call explicit parameter machine index 漂移")
+        }
+        words.push(emit_user_argument(
+            c,
+            bcx,
+            frame,
+            &a.value,
+            pass,
+            pt,
+            passing,
+        )?);
     }
     let code = bcx
         .ins()
@@ -93,18 +131,66 @@ fn call_closure<M: Module>(
     let env = bcx
         .ins()
         .load(types::I64, MemFlagsData::new(), clo, CLOSURE_ENV_OFFSET);
-    // user_signature 固定要求 [globals, closure env, 显式参数...]。这里逆序插入两个
-    // 隐藏值以保持该前缀；若与被调方各自维护顺序，所有显式参数都会整体错位。
-    words.insert(0, env);
-    words.insert(0, bcx.use_var(frame.globals));
-    let sig = user_signature(c.cc, param_vtys, ret_vty);
-    let sig_ref = bcx.func.import_signature(sig);
-    let inst = bcx.ins().call_indirect(sig_ref, code, &words);
-    if *ret_vty == VTy::Unit {
-        return Ok(bcx.ins().iconst(types::I64, 0));
+    if abi.env_index() + 1 > words.len() {
+        invariant_violation("user call hidden prefix 不完整")
     }
-    let raw = first_result(bcx, inst);
-    Ok(norm_load(bcx, raw, ret_vty))
+    words[abi.env_index()] = env;
+    let sig_ref = bcx.func.import_signature(abi.signature().clone());
+    let inst = bcx.ins().call_indirect(sig_ref, code, &words);
+    finish_user_call(bcx, inst, &abi, ret_vty, sret)
+}
+
+fn begin_user_call<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    abi: &UserFunctionAbi,
+    ret_vty: &VTy,
+) -> AliasResult<(Vec<Value>, Option<Value>)> {
+    let mut words = Vec::with_capacity(abi.signature().params.len());
+    let sret = if abi.result() == UserReturnPassing::ExplicitSRet {
+        let area = allocate_value_cell(c, bcx, ret_vty)?;
+        if abi.sret_index() != Some(words.len()) {
+            invariant_violation("ExplicitSRet hidden parameter index 漂移")
+        }
+        words.push(area);
+        Some(area)
+    } else {
+        None
+    };
+    if abi.globals_index() != words.len() {
+        invariant_violation("globals hidden parameter index 漂移")
+    }
+    words.push(bcx.use_var(frame.globals));
+    if abi.env_index() != words.len() {
+        invariant_violation("closure env hidden parameter index 漂移")
+    }
+    // Direct calls replace this null with their actual environment after loading the closure;
+    // named methods intentionally keep null because they cannot capture lexical storage.
+    words.push(bcx.ins().iconst(types::I64, 0));
+    Ok((words, sret))
+}
+
+fn finish_user_call(
+    bcx: &mut FunctionBuilder,
+    inst: cranelift_codegen::ir::Inst,
+    abi: &UserFunctionAbi,
+    ret_vty: &VTy,
+    sret: Option<Value>,
+) -> AliasResult<ExprValue> {
+    match abi.result() {
+        UserReturnPassing::Unit => Ok(ExprValue::scalar(bcx.ins().iconst(types::I64, 0))),
+        UserReturnPassing::Direct(_) => {
+            let raw = first_result(bcx, inst);
+            Ok(ExprValue::scalar(norm_load(bcx, raw, ret_vty)))
+        }
+        UserReturnPassing::ExplicitSRet => {
+            let area = sret.unwrap_or_else(|| {
+                invariant_violation("ExplicitSRet call 缺少 caller-owned return area")
+            });
+            Ok(ExprValue::load(bcx, area, 0, ret_vty))
+        }
+    }
 }
 
 fn emit_user_argument<M: Module>(
@@ -114,25 +200,41 @@ fn emit_user_argument<M: Module>(
     value: &Expr,
     pass: &ArgumentPass,
     vty: &VTy,
+    passing: UserParameterPassing,
 ) -> AliasResult<Value> {
-    match pass {
-        ArgumentPass::Inline | ArgumentPass::Owned => {
+    match (pass, passing) {
+        (ArgumentPass::Inline | ArgumentPass::Owned, UserParameterPassing::Direct(_)) => {
             let value = emit_expr(c, bcx, frame, value)?;
-            let value = value.into_scalar("direct user argument 尚未支持 multi-lane value");
+            let value = value.into_scalar("direct user argument 必须是单 lane value");
             Ok(norm_store(bcx, value, vty))
         }
-        ArgumentPass::ReadBorrow { source, .. } | ArgumentPass::WriteBorrow { source, .. } => {
+        (
+            ArgumentPass::Inline | ArgumentPass::Owned,
+            UserParameterPassing::IndirectByValue,
+        ) => {
+            let value = emit_expr(c, bcx, frame, value)?;
+            emit_temporary_cell(c, bcx, value, vty)
+        }
+        (
+            ArgumentPass::ReadBorrow { source, .. }
+            | ArgumentPass::WriteBorrow { source, .. },
+            UserParameterPassing::BorrowedAddress,
+        ) => {
             let (address, source_vty) = emit_place_addr(c, bcx, frame, source)?;
             if source_vty != *vty {
                 invariant_violation("borrow argument source ABI 与 parameter ABI 漂移")
             }
             Ok(address)
         }
-        ArgumentPass::BorrowTemporary { kind } => {
+        (
+            ArgumentPass::BorrowTemporary { kind },
+            UserParameterPassing::BorrowedAddress,
+        ) => {
             let _ = kind;
             let value = emit_expr(c, bcx, frame, value)?;
             emit_temporary_cell(c, bcx, value, vty)
         }
+        _ => invariant_violation("resolved argument pass 与 canonical function ABI 漂移"),
     }
 }
 
@@ -204,20 +306,36 @@ pub(crate) fn emit_method_call<M: Module>(
     args: &[CallArg],
     target: &MethodTarget,
     span: Span,
-) -> AliasResult<Value> {
+) -> AliasResult<ExprValue> {
     let (recv, receiver_pass) = receiver;
     let svt = c.vty(recv.ty());
-    let rv = if matches!(target, MethodTarget::User { .. }) {
-        let pass = receiver_pass
-            .unwrap_or_else(|| invariant_violation("user method receiver 缺少 resolved pass"));
-        emit_user_argument(c, bcx, frame, recv, pass, &svt)?
-    } else {
-        if receiver_pass.is_some() {
-            invariant_violation("builtin method receiver 携带 user pass")
+    if let MethodTarget::User {
+        receiver,
+        id: method_id,
+        ..
+    } = target
+    {
+        let receiver_vty = c.vty(receiver);
+        if receiver_vty != svt {
+            invariant_violation("已解析方法接收者与表达式静态类型一致")
         }
-        emit_expr(c, bcx, frame, recv)?
-            .into_scalar("builtin method receiver 收到 multi-lane expression value")
-    };
+        let receiver_pass = receiver_pass
+            .unwrap_or_else(|| invariant_violation("user method receiver 缺少 resolved pass"));
+        return emit_user_method_call(
+            c,
+            bcx,
+            frame,
+            recv,
+            receiver_pass,
+            args,
+            *method_id,
+        );
+    }
+    if receiver_pass.is_some() {
+        invariant_violation("builtin method receiver 携带 user pass")
+    }
+    let rv = emit_expr(c, bcx, frame, recv)?
+        .into_scalar("builtin method receiver 收到 multi-lane expression value");
 
     match target {
         MethodTarget::Numeric(op) => {
@@ -226,29 +344,35 @@ pub(crate) fn emit_method_call<M: Module>(
             };
             let r = emit_expr(c, bcx, frame, &arg.value)?;
             let r = r.into_scalar("numeric method argument 收到 multi-lane expression value");
-            emit_binary_values(c, bcx, (*op, &svt, rv, r, span))
+            emit_binary_values(c, bcx, (*op, &svt, rv, r, span)).map(ExprValue::scalar)
         }
         MethodTarget::BoolNot => {
             if !args.is_empty() {
                 invariant_violation("not 扩展函数元数 (sema 已校验)");
             }
             let b = bcx.ins().icmp_imm_s(IntCC::Equal, rv, 0);
-            Ok(bcx.ins().uextend(types::I64, b))
+            Ok(ExprValue::scalar(bcx.ins().uextend(types::I64, b)))
         }
         MethodTarget::StringLen => {
             let t = c.call_rt(bcx, "alias.str.len", &[rv])?;
-            Ok(bcx.ins().sextend(types::I64, t))
+            Ok(ExprValue::scalar(bcx.ins().sextend(types::I64, t)))
         }
-        MethodTarget::StringUpper => c.call_rt(bcx, "alias.str.upper", &[rv]),
-        MethodTarget::StringLower => c.call_rt(bcx, "alias.str.lower", &[rv]),
-        MethodTarget::StringTrim => c.call_rt(bcx, "alias.str.trim", &[rv]),
+        MethodTarget::StringUpper => c
+            .call_rt(bcx, "alias.str.upper", &[rv])
+            .map(ExprValue::scalar),
+        MethodTarget::StringLower => c
+            .call_rt(bcx, "alias.str.lower", &[rv])
+            .map(ExprValue::scalar),
+        MethodTarget::StringTrim => c
+            .call_rt(bcx, "alias.str.trim", &[rv])
+            .map(ExprValue::scalar),
         MethodTarget::ArrayLen => {
             let VTy::Array(_) = &svt else {
                 invariant_violation("array.len 目标必须保留数组类型")
             };
             let raw = array_raw(bcx, rv);
             let t = c.call_rt(bcx, "alias.arr.len", &[raw])?;
-            Ok(bcx.ins().sextend(types::I64, t))
+            Ok(ExprValue::scalar(bcx.ins().sextend(types::I64, t)))
         }
         MethodTarget::ArrayPush => {
             let VTy::Array(elem) = &svt else {
@@ -262,7 +386,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let slot = c.call_rt(bcx, "alias.arr.push", &[raw])?;
             value.store(bcx, slot, 0, elem);
             bump_array_version(bcx, rv);
-            Ok(bcx.ins().iconst(types::I64, 0))
+            Ok(ExprValue::scalar(bcx.ins().iconst(types::I64, 0)))
         }
         MethodTarget::ArrayPop => {
             let VTy::Array(elem) = &svt else {
@@ -273,8 +397,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let empty = bcx.ins().icmp_imm_s(IntCC::Equal, len, 0);
             emit_abort_branch(c, bcx, empty, "alias.abort_pop", span)?;
             let slot = c.call_rt(bcx, "alias.arr.pop", &[raw])?;
-            let value = super::value::ExprValue::load(bcx, slot, 0, elem)
-                .into_scalar("array.pop result 尚未支持 multi-lane method result");
+            let value = ExprValue::load(bcx, slot, 0, elem);
             bump_array_version(bcx, rv);
             Ok(value)
         }
@@ -282,45 +405,72 @@ pub(crate) fn emit_method_call<M: Module>(
             let VTy::Array(_) = &svt else {
                 invariant_violation("array.iterator 目标必须保留数组类型")
             };
-            make_iterator(c, bcx, rv)
+            make_iterator(c, bcx, rv).map(ExprValue::scalar)
         }
-        MethodTarget::User {
-            receiver,
-            id: method_id,
-            ..
-        } => {
-            let receiver_vty = c.vty(receiver);
-            if receiver_vty != svt {
-                invariant_violation("已解析方法接收者与表达式静态类型一致")
-            }
-            let (param_vtys, ret_vty) = c
-                .method_sigs
-                .get(method_id)
-                .cloned()
-                .unwrap_or_else(|| invariant_violation("MethodId 必须存在于方法签名表"));
-            let fid = *c
-                .methods
-                .get(method_id)
-                .unwrap_or_else(|| invariant_violation("MethodId 必须存在函数 ID"));
-            let fref = c.module.declare_func_in_func(fid, bcx.func);
-            let mut words: Vec<Value> = Vec::with_capacity(args.len() + 3);
-            words.push(bcx.use_var(frame.globals));
-            words.push(bcx.ins().iconst(types::I64, 0));
-            words.push(rv);
-            for (arg, param) in args.iter().zip(param_vtys.iter().skip(1)) {
-                let pass = arg.pass.as_ref().unwrap_or_else(|| {
-                    invariant_violation("user method argument 缺少 resolved pass")
-                });
-                words.push(emit_user_argument(c, bcx, frame, &arg.value, pass, param)?);
-            }
-            let inst = bcx.ins().call(fref, &words);
-            if ret_vty == VTy::Unit {
-                return Ok(bcx.ins().iconst(types::I64, 0));
-            }
-            let raw = first_result(bcx, inst);
-            Ok(norm_load(bcx, raw, &ret_vty))
-        }
+        MethodTarget::User { .. } => invariant_violation("user method 必须走 canonical ABI 分支"),
     }
+}
+
+fn emit_user_method_call<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    receiver: &Expr,
+    receiver_pass: &ArgumentPass,
+    args: &[CallArg],
+    method_id: crate::sema::hir::MethodId,
+) -> AliasResult<ExprValue> {
+    let (param_vtys, param_effects, ret_vty) = c
+        .method_sigs
+        .get(&method_id)
+        .cloned()
+        .unwrap_or_else(|| invariant_violation("MethodId 必须存在于方法签名表"));
+    if param_vtys.len() != args.len() + 1 {
+        invariant_violation("user method receiver/argument 数量与 function ABI 漂移")
+    }
+    let abi = user_function_abi(c.cc, &param_vtys, &param_effects, &ret_vty);
+    let (mut words, sret) = begin_user_call(c, bcx, frame, &abi, &ret_vty)?;
+
+    let (receiver_index, receiver_passing) = abi.parameter(0);
+    if receiver_index != words.len() {
+        invariant_violation("user method receiver machine index 漂移")
+    }
+    words.push(emit_user_argument(
+        c,
+        bcx,
+        frame,
+        receiver,
+        receiver_pass,
+        &param_vtys[0],
+        receiver_passing,
+    )?);
+    for (offset, (arg, param)) in args.iter().zip(param_vtys.iter().skip(1)).enumerate() {
+        let index = offset + 1;
+        let pass = arg
+            .pass
+            .as_ref()
+            .unwrap_or_else(|| invariant_violation("user method argument 缺少 resolved pass"));
+        let (machine_index, passing) = abi.parameter(index);
+        if machine_index != words.len() {
+            invariant_violation("user method argument machine index 漂移")
+        }
+        words.push(emit_user_argument(
+            c,
+            bcx,
+            frame,
+            &arg.value,
+            pass,
+            param,
+            passing,
+        )?);
+    }
+    let fid = *c
+        .methods
+        .get(&method_id)
+        .unwrap_or_else(|| invariant_violation("MethodId 必须存在函数 ID"));
+    let fref = c.module.declare_func_in_func(fid, bcx.func);
+    let inst = bcx.ins().call(fref, &words);
+    finish_user_call(bcx, inst, &abi, &ret_vty, sret)
 }
 
 fn emit_incdec<M: Module>(

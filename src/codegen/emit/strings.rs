@@ -103,7 +103,7 @@ pub(crate) fn display_typed<M: Module>(
             span,
             "内部: borrowed return ABI lane 不能作为语言值进入 display",
         )),
-        VTy::Func(..) | VTy::FuncPoly => c.call_rt(bcx, "alias.display.func", &[]),
+        VTy::Func { .. } | VTy::FuncPoly => c.call_rt(bcx, "alias.display.func", &[]),
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[]),
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),
         VTy::Iterator(_) => str_literal_handle(c, bcx, "<iterator>"),

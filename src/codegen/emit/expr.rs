@@ -1,7 +1,7 @@
 use super::arrays::{checked_array_element_addr, emit_array_lit};
 use super::calls::{emit_call, emit_method_call};
 use super::cells::{
-    binding_storage_addr, coerce_ret, emit_local_cell, ensure_current, pop_scope, push_scope,
+    binding_storage_addr, emit_local_cell, ensure_current, pop_scope, push_scope,
 };
 use super::clone::{emit_deep_clone_place, emit_deep_clone_value};
 use super::control::emit_stmt;
@@ -193,7 +193,6 @@ pub(crate) fn emit_expr<M: Module>(
         } => {
             let result_vty = c.vty(e.ty());
             emit_call(c, bcx, frame, callee, args, (target, &result_vty, *span))
-                .map(ExprValue::scalar)
         }
         Expr::MethodCall {
             recv,
@@ -210,8 +209,7 @@ pub(crate) fn emit_expr<M: Module>(
             args,
             target,
             *span,
-        )
-        .map(ExprValue::scalar),
+        ),
         Expr::Field {
             recv, field_index, ..
         } => {
@@ -268,8 +266,7 @@ pub(crate) fn emit_expr<M: Module>(
             let rb = frame
                 .ret_block
                 .unwrap_or_else(|| invariant_violation("? 仅在函数体内可达 (sema 已校验)"));
-            bcx.ins().jump(rb, &[BlockArg::Value(subj)]);
-            frame.terminated = true;
+            super::control::emit_return_jump(bcx, frame, ExprValue::scalar(subj), rb);
 
             bcx.switch_to_block(ok_b);
             frame.terminated = false;
@@ -570,12 +567,10 @@ pub(crate) fn emit_match_arm<M: Module>(
         }
         ArmBody::Ret(e) => {
             let v = super::control::emit_return_value(c, bcx, frame, e)?;
-            let v = coerce_ret(bcx, frame, v);
             let rb = frame
                 .ret_block
                 .unwrap_or_else(|| invariant_violation("never 臂仅在函数体内可达 (sema 已校验)"));
-            bcx.ins().jump(rb, &[BlockArg::Value(v)]);
-            frame.terminated = true;
+            super::control::emit_return_jump(bcx, frame, v, rb);
             false
         }
         ArmBody::Block(stmts) => {

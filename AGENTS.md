@@ -161,9 +161,9 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 当前实现事实：
 
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
-- `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；当前已接入的语言类型仍全部投影为 scalar 形态，aggregate caller/callee lowering 尚未开放并 fail-closed；
+- `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；调用与返回发射已消费对应 passing，当前已接入的语言类型仍全部投影为 scalar 形态，aggregate 原生路径尚待 pointer 类型接入后验证；
 - `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer expression/type projection 仍未开放；
-- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator/call 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge 已按 resolved `ValueAbi::expression_types()` 传递全部 lane，不再借 universal I64 word 合并表达式；pointer VTy 与具体 pointer expression、aggregate caller/callee lowering 尚未接入；
+- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge、用户调用结果与返回路径保留完整 lane；pointer VTy 与具体 pointer expression 尚未接入；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
 - 历史 `WordRepr` / `storage_word` / `restore_word` 已随 typed array/result storage 删除；任何值都不得为了进入 container 被重新压成 universal I64 word；
@@ -174,7 +174,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 
 当前已投影语言类型仍使用 scalar expression ABI 是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI；实施时必须沿现有 aggregate-capable `ValueAbi` 继续接入 pointer，不能把 `ptr<T>` 压成 I64 handle 或建立第二套临时 ABI。
 
-当前已实现用户函数机器前缀是 `[globals, closure_env, ...]`。`docs/plan.md` 已冻结需要 sret 时的目标内部 ABI 前缀 `[sret?, globals, closure_env, ...]`。迁移必须由统一 signature/ABI owner 一次性决定 caller/callee 两侧，不能在调用点和函数生成器各复制一套隐藏参数规则，也不能为了兼容开发期旧 ABI 保留双路径。
+`UserFunctionAbi` 统一决定用户函数机器签名、parameter passing、return passing 与 `[sret?, globals, closure_env, ...]` 的机器参数索引；`VTy::Func` 保留 resolved parameter effects。调用端与函数生成器共同消费这一 owner，borrow parameter 传递 I64 referent address，by-value parameter 消费 `Direct / IndirectByValue`。调用结果与 return 汇合已保留 `ExprValue`，显式 sret 分支写入 caller return area；当前语言类型仍只产生 scalar ABI，pointer 类型接入及 aggregate 原生端到端验证尚未完成，不能据此宣称 pointer function ABI 已落地。
 
 ### heap object layout
 

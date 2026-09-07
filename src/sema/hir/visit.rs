@@ -1,5 +1,5 @@
 use super::{
-    ArmBody, Binding, BindingOwner, Body, CheckedProgram, Expr, Item, MethodTarget, Place, Stmt,
+    ArmBody, Binding, BindingOwner, Body, CallTarget, CheckedProgram, Expr, Item, MethodTarget, Place, Stmt,
     StrPart,
 };
 use crate::sema::types::Ty;
@@ -142,11 +142,15 @@ impl CheckedProgram {
                             stack.push(TypeNode::Expr(then_expr));
                             stack.push(TypeNode::Expr(cond));
                         }
-                        Expr::Call { callee, args, .. } => {
+                        Expr::Call { callee, args, target, .. } => {
                             for arg in args.iter().rev() {
                                 stack.push(TypeNode::Expr(&arg.value));
                             }
-                            stack.push(TypeNode::Expr(callee));
+                            // Constructors and builtins are resolved targets, not executable
+                            // function values. Their syntax-only callee has no machine signature.
+                            if matches!(target, CallTarget::FunctionValue) {
+                                stack.push(TypeNode::Expr(callee));
+                            }
                         }
                         Expr::MethodCall { recv, args, .. } => {
                             for arg in args.iter().rev() {

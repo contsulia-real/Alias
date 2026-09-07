@@ -1,4 +1,7 @@
-use crate::codegen::abi::{cl_type, norm_load, object_word_offset, user_signature, VTy};
+use crate::codegen::abi::{
+    norm_load, object_word_offset, user_function_abi, UserFunctionAbi, UserParameterPassing,
+    UserReturnPassing, VTy,
+};
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
 use crate::codegen::emit::expr::emit_expr;
@@ -20,19 +23,25 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 impl<'m, M: Module> Compiler<'m, M> {
-    pub(crate) fn user_sig_typed(&self, params: &[VTy], ret: &VTy) -> Signature {
-        user_signature(self.cc, params, ret)
+    pub(crate) fn user_abi_typed(
+        &self,
+        params: &[VTy],
+        param_effects: &[ParamEffect],
+        ret: &VTy,
+    ) -> UserFunctionAbi {
+        user_function_abi(self.cc, params, param_effects, ret)
     }
 
     pub(crate) fn declare_user_func_typed(
         &mut self,
         params: &[VTy],
+        param_effects: &[ParamEffect],
         ret: &VTy,
         name: String,
     ) -> AliasResult<FuncId> {
-        let sig = self.user_sig_typed(params, ret);
+        let abi = self.user_abi_typed(params, param_effects, ret);
         self.module
-            .declare_function(&name, Linkage::Local, &sig)
+            .declare_function(&name, Linkage::Local, abi.signature())
             .map_err(|e| native_err(Span::default(), format!("内部: 函数声明失败 {e}")))
     }
 
@@ -45,9 +54,20 @@ impl<'m, M: Module> Compiler<'m, M> {
         ret_vty: VTy,
     ) -> AliasResult<()> {
         let param_vtys: Vec<VTy> = params.iter().map(|p| self.vty(&p.ty)).collect();
-        let sig = self.user_sig_typed(&param_vtys, &ret_vty);
+        let param_effects: Vec<ParamEffect> = params
+            .iter()
+            .map(|param| {
+                param
+                    .effect
+                    .unwrap_or_else(|| invariant_violation("用户函数参数缺少 resolved effect"))
+            })
+            .collect();
+        let abi = self.user_abi_typed(&param_vtys, &param_effects, &ret_vty);
         let mut ctx = Context::new();
-        ctx.func = Function::with_name_signature(UserFuncName::user(0, fid.as_u32()), sig);
+        ctx.func = Function::with_name_signature(
+            UserFuncName::user(0, fid.as_u32()),
+            abi.signature().clone(),
+        );
         let mut fbctx = FunctionBuilderContext::new();
         let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
 
@@ -56,12 +76,12 @@ impl<'m, M: Module> Compiler<'m, M> {
         bcx.switch_to_block(entry);
         bcx.seal_block(entry);
 
-        // user_signature 的前两个参数固定为 globals 与 closure env。显式参数从索引 2
-        // 开始；这里若与 call_closure 的前缀顺序漂移，函数体会把环境指针当成全局区。
+        // UserFunctionAbi owns every hidden/explicit machine index. Reading fixed positions here
+        // would swap globals/env once an sret prefix is present.
         let globals_v = bcx.declare_var(types::I64);
-        bcx.def_var(globals_v, bcx.block_params(entry)[0]);
+        bcx.def_var(globals_v, bcx.block_params(entry)[abi.globals_index()]);
         let env_v = bcx.declare_var(types::I64);
-        bcx.def_var(env_v, bcx.block_params(entry)[1]);
+        bcx.def_var(env_v, bcx.block_params(entry)[abi.env_index()]);
         let mut caps_map: HashMap<BindingId, usize> = HashMap::new();
         let mut caps_vty: HashMap<BindingId, VTy> = HashMap::new();
         let mut caps_relation: HashMap<BindingId, Option<StorageRelation>> = HashMap::new();
@@ -85,45 +105,52 @@ impl<'m, M: Module> Compiler<'m, M> {
             init_ctx: false,
             ret_block: None,
             ret_vty: Some(ret_vty.clone()),
+            return_passing: abi.result(),
+            sret: abi
+                .sret_index()
+                .map(|index| bcx.block_params(entry)[index]),
         };
 
         for (i, p) in params.iter().enumerate() {
-            let raw = bcx.block_params(entry)[i + 2];
+            let (machine_index, passing) = abi.parameter(i);
+            let raw = bcx.block_params(entry)[machine_index];
             let vty = self.vty(&p.ty);
-            let effect = p
-                .effect
-                .unwrap_or_else(|| invariant_violation("用户函数参数缺少 resolved effect"));
-            let borrowed = matches!(effect, ParamEffect::ReadBorrow | ParamEffect::WriteBorrow);
-            let word = if borrowed {
-                raw
-            } else {
-                norm_load(&mut bcx, raw, &vty)
+            let (value, relation) = match passing {
+                UserParameterPassing::BorrowedAddress => (
+                    ExprValue::scalar(raw),
+                    StorageRelation::Borrowed,
+                ),
+                UserParameterPassing::Direct(_) => (
+                    ExprValue::scalar(norm_load(&mut bcx, raw, &vty)),
+                    StorageRelation::Owning,
+                ),
+                UserParameterPassing::IndirectByValue => (
+                    ExprValue::load(&mut bcx, raw, 0, &vty),
+                    StorageRelation::Owning,
+                ),
             };
             emit_local_cell(
                 self,
                 &mut bcx,
                 &mut frame,
-                ExprValue::scalar(word),
+                value,
                 vty,
                 p.binding_id,
-                Some(if borrowed {
-                    StorageRelation::Borrowed
-                } else {
-                    StorageRelation::Owning
-                }),
+                Some(relation),
             )?;
         }
 
         let ret_block = bcx.create_block();
         frame.ret_block = Some(ret_block);
-        let ret_val = if ret_vty == VTy::Unit {
-            None
-        } else {
-            Some(bcx.append_block_param(ret_block, cl_type(&ret_vty)))
+        let ret_val = match abi.result() {
+            UserReturnPassing::Direct(machine_type) => {
+                Some(bcx.append_block_param(ret_block, machine_type))
+            }
+            UserReturnPassing::Unit | UserReturnPassing::ExplicitSRet => None,
         };
         emit_body(self, &mut bcx, &mut frame, body, ret_block)?;
         if !frame.terminated {
-            if ret_vty == VTy::Unit {
+            if abi.result() == UserReturnPassing::Unit {
                 bcx.ins().jump(ret_block, &[]);
             } else {
                 return Err(native_err(
@@ -190,6 +217,8 @@ impl<'m, M: Module> Compiler<'m, M> {
             init_ctx: false,
             ret_block: Some(abort_ret),
             ret_vty: Some(VTy::I(IntW::W32)),
+            return_passing: UserReturnPassing::Direct(types::I32),
+            sret: None,
         };
         frame.init_ctx = true;
 
@@ -213,10 +242,15 @@ impl<'m, M: Module> Compiler<'m, M> {
                 else {
                     return Err(native_err(b.span, "函数绑定必须由函数字面量初始化"));
                 };
-                let VTy::Func(param_vtys, ret_vty) = self.vty(&b.ty) else {
+                let function_vty = self.vty(&b.ty);
+                let VTy::Func {
+                    ret: ret_vty,
+                    ..
+                } = &function_vty
+                else {
                     invariant_violation("局部 func 绑定携带完整函数类型")
                 };
-                let ret_vty = *ret_vty;
+                let ret_vty = (**ret_vty).clone();
                 let v = emit_funclit_value_typed(
                     self,
                     &mut bcx,
@@ -228,7 +262,7 @@ impl<'m, M: Module> Compiler<'m, M> {
                 )?;
                 (
                     ExprValue::scalar(v),
-                    VTy::Func(param_vtys, Box::new(ret_vty)),
+                    function_vty,
                 )
             } else {
                 let vty = self.vty(&b.ty);
@@ -254,8 +288,8 @@ impl<'m, M: Module> Compiler<'m, M> {
         let env = bcx
             .ins()
             .load(types::I64, MemFlagsData::new(), clo, CLOSURE_ENV_OFFSET);
-        let msig = user_signature(self.cc, &[], &main_ret);
-        let uref = bcx.func.import_signature(msig);
+        let main_abi = user_function_abi(self.cc, &[], &[], &main_ret);
+        let uref = bcx.func.import_signature(main_abi.signature().clone());
         let icall = bcx.ins().call_indirect(uref, code, &[gword, env]);
         let raw = first_result(&bcx, icall);
         let code_word = norm_load(&mut bcx, raw, &main_ret);
@@ -289,7 +323,7 @@ pub(crate) fn emit_funclit_value<M: Module>(
     captures: &[Capture],
     funclit_type: &Ty,
 ) -> AliasResult<Value> {
-    let VTy::Func(_, ret_vty) = c.vty(funclit_type) else {
+    let VTy::Func { ret: ret_vty, .. } = c.vty(funclit_type) else {
         invariant_violation("函数字面量携带完整函数类型")
     };
     let ret_vty = *ret_vty;
@@ -306,9 +340,17 @@ pub(crate) fn emit_funclit_value_typed<M: Module>(
     ret_vty: VTy,
 ) -> AliasResult<Value> {
     let param_vtys: Vec<VTy> = params.iter().map(|p| c.vty(&p.ty)).collect();
+    let param_effects: Vec<ParamEffect> = params
+        .iter()
+        .map(|param| {
+            param
+                .effect
+                .unwrap_or_else(|| invariant_violation("函数字面量参数缺少 resolved effect"))
+        })
+        .collect();
     let name = format!("u{}", c.next_fid);
     c.next_fid += 1;
-    let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
+    let fid = c.declare_user_func_typed(&param_vtys, &param_effects, &ret_vty, name)?;
     let cap_vtys: Vec<(BindingId, VTy, Option<StorageRelation>)> = captures
         .iter()
         .map(|capture| {

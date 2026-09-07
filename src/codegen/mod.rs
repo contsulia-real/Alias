@@ -16,7 +16,7 @@ use crate::sema::hir::{
 use crate::sema::types::Ty;
 use crate::target::TARGET_TRIPLE;
 use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::{Block, Value};
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_frontend::Variable;
@@ -26,7 +26,7 @@ use std::str::FromStr;
 
 use abi::{
     align_to, build_struct_layouts, project_ty, projected_ty, value_layout, ProjectionTable,
-    PtrLayout, StructTable, VTy,
+    PtrLayout, StructTable, UserReturnPassing, VTy,
 };
 use native_runtime::{define_span_data, emit_native_runtime};
 
@@ -54,6 +54,8 @@ pub(crate) struct Frame {
     init_ctx: bool,
     ret_block: Option<Block>,
     ret_vty: Option<VTy>,
+    return_passing: UserReturnPassing,
+    sret: Option<Value>,
 }
 
 pub(crate) struct Compiler<'m, M: Module> {
@@ -73,7 +75,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     struct_layouts: StructTable,
     /// sema 已解析 MethodId → 原生函数/签名。codegen 禁止按 receiver/name 查方法。
     methods: HashMap<MethodId, FuncId>,
-    method_sigs: HashMap<MethodId, (Vec<VTy>, VTy)>,
+    method_sigs: HashMap<MethodId, (Vec<VTy>, Vec<crate::sema::types::ParamEffect>, VTy)>,
     runtime_defined: HashSet<&'static str>,
 }
 
@@ -170,7 +172,12 @@ fn compile_program<M: Module>(
             return Err(native_err(b.span, "方法体必须是函数字面量"));
         };
         let self_vty = c.vty(recv);
-        let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+        let VTy::Func {
+            params: param_vtys,
+            param_effects,
+            ret: ret_vty,
+        } = c.vty(&b.ty)
+        else {
             invariant_violation("方法绑定携带完整函数类型 (sema 已校验)")
         };
         if param_vtys.first() != Some(&self_vty) {
@@ -180,9 +187,10 @@ fn compile_program<M: Module>(
         // MethodId 已由 sema 唯一解析；内部 object 符号只需要结构化身份，不应再维护
         // 一套 receiver 的语言类型拼写来制造名字。
         let symbol = format!("m{}_{}", method_id.0, b.name);
-        let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, symbol)?;
+        let fid = c.declare_user_func_typed(&param_vtys, &param_effects, &ret_vty, symbol)?;
         c.methods.insert(*method_id, fid);
-        c.method_sigs.insert(*method_id, (param_vtys, ret_vty));
+        c.method_sigs
+            .insert(*method_id, (param_vtys, param_effects, ret_vty));
         pending_methods.push((fid, b));
     }
 
@@ -206,13 +214,19 @@ fn compile_program<M: Module>(
                 let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
                 };
-                let VTy::Func(param_vtys, ret_vty) = c.vty(&b.ty) else {
+                let VTy::Func {
+                    params: param_vtys,
+                    param_effects,
+                    ret: ret_vty,
+                } = c.vty(&b.ty)
+                else {
                     invariant_violation("func 绑定携带完整函数类型 (sema 已校验)")
                 };
                 let ret_vty = *ret_vty;
                 let name = format!("u{}", c.next_fid);
                 c.next_fid += 1;
-                let fid = c.declare_user_func_typed(&param_vtys, &ret_vty, name)?;
+                let fid =
+                    c.declare_user_func_typed(&param_vtys, &param_effects, &ret_vty, name)?;
                 top_funcs.push((fid, slot, b));
                 if b.binding_id == main_id {
                     main_slot_ret = Some((slot, ret_vty));
@@ -235,7 +249,7 @@ fn compile_program<M: Module>(
         if !captures.is_empty() {
             invariant_violation("顶层函数不应捕获局部绑定")
         }
-        let VTy::Func(_, ret_vty) = c.vty(&b.ty) else {
+        let VTy::Func { ret: ret_vty, .. } = c.vty(&b.ty) else {
             invariant_violation("func 绑定携带完整函数类型")
         };
         c.define_user_func(fid, params, body, Vec::new(), *ret_vty)?;
@@ -280,7 +294,7 @@ fn compile_program<M: Module>(
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);
         all_params.extend(params.iter().cloned());
-        let VTy::Func(_, ret_vty) = c.vty(&b.ty) else {
+        let VTy::Func { ret: ret_vty, .. } = c.vty(&b.ty) else {
             invariant_violation("方法绑定携带完整函数类型")
         };
         c.define_user_func(fid, &all_params, body, Vec::new(), *ret_vty)?;
