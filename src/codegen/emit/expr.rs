@@ -17,7 +17,7 @@ use crate::codegen::layout::{result_layout, result_tag, RESULT_ERR_TAG, RESULT_T
 use crate::codegen::{bound_vty, invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
     ArmBody, BinOp, CtorKind, Expr, MatchArm, Pattern, PatternBindingOperation, ResolvedConversion,
-    Stmt,
+    OwningWrite, Stmt,
 };
 use crate::sema::types::FloatW;
 use crate::AliasResult;
@@ -41,6 +41,21 @@ pub(crate) fn emit_expr<M: Module>(
             .map(ExprValue::scalar)
     } else {
         Ok(value)
+    }
+}
+
+pub(crate) fn emit_container_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    expr: &Expr,
+) -> AliasResult<ExprValue> {
+    // These writes initialize fresh storage; unlike replacement they cannot destroy an old value.
+    // The frozen operation carries transfer responsibility even when both paths emit the same lanes.
+    match expr.info().container_write.unwrap_or_else(|| {
+        invariant_violation("container initializer 缺少 resolved write operation")
+    }) {
+        OwningWrite::InlineCopy | OwningWrite::OwnershipTransfer => emit_expr(c, bcx, frame, expr),
     }
 }
 

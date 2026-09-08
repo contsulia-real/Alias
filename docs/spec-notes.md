@@ -184,7 +184,7 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这些事实，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。初始化不销毁旧值；容器写入的完整 operation 合同与 destruction 尚未完成。
+显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。初始化不销毁旧值；destruction 与 raw allocation 初始化跟踪尚未完成。
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 

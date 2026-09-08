@@ -3,6 +3,113 @@ use super::{
     validate_resolved_hir,
 };
 
+const CONTAINER_SOURCE: &str = r#"
+struct cell { var i32 value = 1 }
+struct holder { val cell item = cell() }
+func i32 main = () -> {
+    val cell original = cell()
+    val holder object = holder(item = original)
+    val array<cell> items = [original]
+    items.push(cell())
+    val result<cell, string> wrapped = ok(original)
+    return object.item.value + items.len()
+}
+"#;
+
+fn container_initializers(program: &mut super::CheckedProgram) -> Vec<&mut Expr> {
+    let mut values = Vec::new();
+    for item in &mut program.items {
+        match item {
+            Item::StructDef(def) => {
+                values.extend(
+                    def.fields
+                        .iter_mut()
+                        .filter_map(|field| field.default.as_mut()),
+                );
+            }
+            Item::Binding(binding) => {
+                let Expr::FuncLit { body, .. } = &mut binding.value else {
+                    continue;
+                };
+                let Body::Block(stmts) = body.as_mut() else {
+                    continue;
+                };
+                for stmt in stmts {
+                    let value = match stmt {
+                        Stmt::Binding(binding) => &mut binding.value,
+                        Stmt::Expr { expr } => expr,
+                        _ => continue,
+                    };
+                    match value {
+                        Expr::Call { args, .. } | Expr::MethodCall { args, .. } => {
+                            values.extend(args.iter_mut().map(|arg| &mut arg.value));
+                        }
+                        Expr::ArrayLit { elems, .. } => values.extend(elems),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    values
+}
+
+#[test]
+fn container_writes_are_frozen_and_fail_closed_at_each_destination() {
+    let mut program = checked(CONTAINER_SOURCE);
+    let values = container_initializers(&mut program);
+    assert_eq!(
+        values
+            .iter()
+            .map(|value| value.info().container_write)
+            .collect::<Vec<_>>(),
+        [
+            Some(OwningWrite::InlineCopy),
+            Some(OwningWrite::OwnershipTransfer),
+            Some(OwningWrite::OwnershipTransfer),
+            Some(OwningWrite::OwnershipTransfer),
+            Some(OwningWrite::OwnershipTransfer),
+            Some(OwningWrite::OwnershipTransfer),
+        ]
+    );
+    for index in 0..values.len() {
+        for replacement in [
+            None,
+            Some(if index == 0 {
+                OwningWrite::OwnershipTransfer
+            } else {
+                OwningWrite::InlineCopy
+            }),
+        ] {
+            let mut program = checked(CONTAINER_SOURCE);
+            container_initializers(&mut program)[index]
+                .info_mut()
+                .container_write = replacement;
+            let error =
+                validate_resolved_hir(&program).expect_err("container operation must be validated");
+            assert!(error.msg.contains("container write"), "{}", error.msg);
+        }
+    }
+}
+
+#[test]
+fn container_write_cannot_be_attached_to_an_unrelated_expression() {
+    let mut program = checked(CONTAINER_SOURCE);
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("block main")
+    };
+    let Stmt::Binding(binding) = &mut stmts[0] else {
+        panic!("first binding")
+    };
+    binding.value.info_mut().container_write = Some(OwningWrite::OwnershipTransfer);
+    let error = validate_resolved_hir(&program).expect_err("wrong destination must fail closed");
+    assert!(
+        error.msg.contains("非 container destination"),
+        "{}",
+        error.msg
+    );
+}
+
 #[test]
 fn binding_initialization_operations_are_frozen() {
     let mut program = checked(

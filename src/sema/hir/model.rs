@@ -430,6 +430,8 @@ pub(crate) struct ExprInfo {
     /// Owning-context read of a temporary projection/result payload. Unlike ReadPlace it has no
     /// stable source address; the evaluated payload is cloned before its enclosing owner expires.
     pub(crate) projection_read: Option<Box<DeepClonePlan>>,
+    /// Direct construction/default/array element destination, distinct from a user parameter pass.
+    pub(crate) container_write: Option<OwningWrite>,
 }
 
 #[derive(Debug, Clone)]

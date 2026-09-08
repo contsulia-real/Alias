@@ -1,4 +1,4 @@
-use super::expr::emit_expr;
+use super::expr::emit_container_value;
 use super::ops::{emit_index_guard, emit_runtime_abort};
 use crate::codegen::abi::{value_layout, VTy};
 use crate::codegen::layout::{
@@ -148,7 +148,7 @@ pub(crate) fn emit_array_lit<M: Module>(
         .iconst(types::I64, value_layout(elem_vty).stride as i64);
     let raw = c.call_rt(bcx, "alias.arr.new", &[cap, stride])?;
     for (i, el) in elems.iter().enumerate() {
-        let v = emit_expr(c, bcx, frame, el)?;
+        let v = emit_container_value(c, bcx, frame, el)?;
         let index = bcx.ins().iconst(types::I64, i as i64);
         let addr = array_element_addr(bcx, raw, index);
         v.store(bcx, addr, 0, elem_vty);

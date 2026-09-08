@@ -1,13 +1,13 @@
-//! Final-HIR ownership operations for binding initialization and assignment.
+//! Final-HIR ownership operations for binding/container initialization and assignment.
 //!
 //! Value categories describe what an expression produced; this owner resolves how a destination
 //! consumes that value. Ownership flow and codegen must consume the frozen operation rather than
 //! independently reconstructing transfer/rebind behavior from expression or target shape.
 
 use super::{
-    ArmBody, AssignmentOperation, Binding, BindingId, BindingOperation, Body, CheckedProgram, Expr,
-    ExprCategory, Item, OwnershipCapability, OwningWrite, Place, Stmt, StorageRelation, StrPart,
-    ValueCategory,
+    ArmBody, AssignmentOperation, Binding, BindingId, BindingOperation, Body, CallTarget,
+    CheckedProgram, Expr, ExprCategory, Item, MethodTarget, OwnershipCapability, OwningWrite,
+    Place, Stmt, StorageRelation, StrPart, ValueCategory,
 };
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -50,6 +50,22 @@ fn assignment_operation(
             if relations.get(binding_id) == Some(&StorageRelation::Borrowed)
     );
     assignment_operation_for(value, rebinds_alias)
+}
+
+fn container_write(value: &Expr) -> AliasResult<OwningWrite> {
+    provisional_owning_write(value)?.ok_or_else(|| {
+        invariant(
+            value.span(),
+            "container write 仍依赖 unresolved Place/General",
+        )
+    })
+}
+
+fn constructor_target(target: &CallTarget) -> bool {
+    matches!(
+        target,
+        CallTarget::StructConstructor { .. } | CallTarget::ResultConstructor(_)
+    )
 }
 
 pub(super) fn provisional_binding_operation(
@@ -153,7 +169,25 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                 }
                 push_mut_stmt_children(&mut stack, stmt);
             }
-            MutNode::Expr(expr) => push_mut_expr_children(&mut stack, expr),
+            MutNode::Expr(expr) => {
+                if expr.info().container_write.is_some() {
+                    return Err(invariant(
+                        expr.span(),
+                        "非 container destination 携带 write operation",
+                    ));
+                }
+                push_mut_expr_children(&mut stack, expr);
+            }
+            MutNode::ContainerValue(expr) => {
+                if expr.info().container_write.is_some() {
+                    return Err(invariant(
+                        expr.span(),
+                        "container write 被重复 finalization",
+                    ));
+                }
+                expr.info_mut().container_write = Some(container_write(expr)?);
+                push_mut_expr_children(&mut stack, expr);
+            }
         }
     }
     Ok(())
@@ -190,7 +224,24 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 }
                 push_stmt_children(&mut stack, stmt);
             }
-            Node::Expr(expr) => push_expr_children(&mut stack, expr),
+            Node::Expr(expr) => {
+                if expr.info().container_write.is_some() {
+                    return Err(invariant(
+                        expr.span(),
+                        "非 container destination 携带 write operation",
+                    ));
+                }
+                push_expr_children(&mut stack, expr);
+            }
+            Node::ContainerValue(expr) => {
+                if expr.info().container_write != Some(container_write(expr)?) {
+                    return Err(invariant(
+                        expr.span(),
+                        "container write 与 resolved value operation 漂移",
+                    ));
+                }
+                push_expr_children(&mut stack, expr);
+            }
         }
     }
     Ok(())
@@ -215,7 +266,7 @@ fn collect_binding_relations(
                 stack.push(Node::Expr(&binding.value));
             }
             Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
-            Node::Expr(expr) => push_expr_children(&mut stack, expr),
+            Node::Expr(expr) | Node::ContainerValue(expr) => push_expr_children(&mut stack, expr),
         }
     }
     Ok(relations)
@@ -225,12 +276,14 @@ enum Node<'a> {
     Binding(&'a Binding),
     Stmt(&'a Stmt),
     Expr(&'a Expr),
+    ContainerValue(&'a Expr),
 }
 
 enum MutNode<'a> {
     Binding(&'a mut Binding),
     Stmt(&'a mut Stmt),
     Expr(&'a mut Expr),
+    ContainerValue(&'a mut Expr),
 }
 
 fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {
@@ -241,7 +294,7 @@ fn root_nodes(program: &CheckedProgram) -> Vec<Node<'_>> {
             Item::StructDef(def) => {
                 for field in def.fields.iter().rev() {
                     if let Some(default) = &field.default {
-                        stack.push(Node::Expr(default));
+                        stack.push(Node::ContainerValue(default));
                     }
                 }
             }
@@ -258,7 +311,7 @@ fn root_mut_nodes(program: &mut CheckedProgram) -> Vec<MutNode<'_>> {
             Item::StructDef(def) => {
                 for field in def.fields.iter_mut().rev() {
                     if let Some(default) = &mut field.default {
-                        stack.push(MutNode::Expr(default));
+                        stack.push(MutNode::ContainerValue(default));
                     }
                 }
             }
@@ -472,15 +525,30 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(then_expr));
             stack.push(Node::Expr(cond));
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            target,
+            ..
+        } => {
             for arg in args.iter().rev() {
-                stack.push(Node::Expr(&arg.value));
+                stack.push(if constructor_target(target) {
+                    Node::ContainerValue(&arg.value)
+                } else {
+                    Node::Expr(&arg.value)
+                });
             }
             stack.push(Node::Expr(callee));
         }
-        Expr::MethodCall { recv, args, .. } => {
+        Expr::MethodCall {
+            recv, args, target, ..
+        } => {
             for arg in args.iter().rev() {
-                stack.push(Node::Expr(&arg.value));
+                stack.push(if *target == MethodTarget::ArrayPush {
+                    Node::ContainerValue(&arg.value)
+                } else {
+                    Node::Expr(&arg.value)
+                });
             }
             stack.push(Node::Expr(recv));
         }
@@ -491,7 +559,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::ArrayLit { elems, .. } => {
             for elem in elems.iter().rev() {
-                stack.push(Node::Expr(elem));
+                stack.push(Node::ContainerValue(elem));
             }
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
@@ -537,15 +605,30 @@ fn push_mut_expr_children<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
             stack.push(MutNode::Expr(then_expr));
             stack.push(MutNode::Expr(cond));
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            target,
+            ..
+        } => {
             for arg in args.iter_mut().rev() {
-                stack.push(MutNode::Expr(&mut arg.value));
+                stack.push(if constructor_target(target) {
+                    MutNode::ContainerValue(&mut arg.value)
+                } else {
+                    MutNode::Expr(&mut arg.value)
+                });
             }
             stack.push(MutNode::Expr(callee));
         }
-        Expr::MethodCall { recv, args, .. } => {
+        Expr::MethodCall {
+            recv, args, target, ..
+        } => {
             for arg in args.iter_mut().rev() {
-                stack.push(MutNode::Expr(&mut arg.value));
+                stack.push(if *target == MethodTarget::ArrayPush {
+                    MutNode::ContainerValue(&mut arg.value)
+                } else {
+                    MutNode::Expr(&mut arg.value)
+                });
             }
             stack.push(MutNode::Expr(recv));
         }
@@ -556,7 +639,7 @@ fn push_mut_expr_children<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
         }
         Expr::ArrayLit { elems, .. } => {
             for elem in elems.iter_mut().rev() {
-                stack.push(MutNode::Expr(elem));
+                stack.push(MutNode::ContainerValue(elem));
             }
         }
         Expr::FuncLit { body, .. } => push_mut_body(stack, body),

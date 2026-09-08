@@ -27,8 +27,10 @@ pub(super) fn lower(
     super::capture::populate_captures(&mut checked, &mut facts.next_loan_id)?;
     super::parameter_effects::finalize(&mut checked, &mut facts.next_loan_id)?;
     super::pattern_bindings::finalize(&mut checked)?;
-    super::ownership_operations::finalize(&mut checked)?;
+    // Reject illegal borrowed storage at its diagnostic owner before freezing owning writes;
+    // otherwise a user-level containment error would look like a missing internal transfer fact.
     super::borrow_contract::validate(&checked)?;
+    super::ownership_operations::finalize(&mut checked)?;
     // Loan kind depends on actual uses and CFG liveness, not on the borrow syntax site. Resolve it
     // only after captures are known; otherwise a closure use could be omitted from the loan region.
     super::ownership_flow::finalize(&mut checked)?;
@@ -373,6 +375,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         ownership_capability: None,
         return_pass: None,
         projection_read: lower_info.projection_read,
+        container_write: None,
     };
 
     if let Some(callee_ty) = implicit_zero_callee {
@@ -394,6 +397,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             ownership_capability: None,
             return_pass: None,
             projection_read: None,
+            container_write: None,
         };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(
@@ -679,6 +683,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             ownership_capability: None,
             return_pass: None,
             projection_read: None,
+            container_write: None,
         },
     })
 }

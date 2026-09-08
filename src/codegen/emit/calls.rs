@@ -3,7 +3,7 @@ use super::cells::{
     allocate_value_cell, binding_storage_addr, emit_temporary_cell, first_result,
 };
 use super::clone::emit_deep_clone;
-use super::expr::emit_expr;
+use super::expr::{emit_container_value, emit_expr};
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::places::emit_place_addr;
 use super::shallow::emit_shallow_clone;
@@ -260,7 +260,7 @@ pub(crate) fn emit_construct<M: Module>(
             .map(|(arg, _)| &arg.value)
             .or(field.default.as_ref())
             .unwrap_or_else(|| invariant_violation("构造字段全覆盖 (sema 已校验)"));
-        let v = emit_expr(c, bcx, frame, expr)?;
+        let v = emit_container_value(c, bcx, frame, expr)?;
         v.store(bcx, ptr, field.offset, &field.vty);
     }
     Ok(ptr)
@@ -287,7 +287,7 @@ pub(crate) fn emit_result_ctor<M: Module>(
     if c.vty(arg.value.ty()) != *pvty {
         invariant_violation("result constructor payload VTy 与 resolved variant 漂移")
     }
-    let payload = emit_expr(c, bcx, frame, &arg.value)?;
+    let payload = emit_container_value(c, bcx, frame, &arg.value)?;
     let layout = result_layout(ok_vty, err_vty);
     let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
     let blk = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
@@ -381,7 +381,7 @@ pub(crate) fn emit_method_call<M: Module>(
             let [arg] = args else {
                 invariant_violation("push 元数 (sema 已校验)")
             };
-            let value = emit_expr(c, bcx, frame, &arg.value)?;
+            let value = emit_container_value(c, bcx, frame, &arg.value)?;
             let raw = array_raw(bcx, rv);
             let slot = c.call_rt(bcx, "alias.arr.push", &[raw])?;
             value.store(bcx, slot, 0, elem);

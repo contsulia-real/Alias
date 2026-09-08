@@ -5,6 +5,42 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn move_transfers_through_array_constructor_push_struct_and_result() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+struct holder { val cell item }
+func i32 main = () -> {
+    val cell first = cell(value = 1)
+    val array<cell> items = [move first]
+    val cell second = cell(value = 2)
+    items.push(move second)
+    val cell removed = items.pop()
+    val holder object = holder(item = move removed)
+    val result<holder, string> wrapped = ok(move object)
+    return match wrapped {
+        ok(value) -> value.item.value * 10 + items[0].value
+        err(error) -> 99
+    }
+}
+"#;
+    assert_eq!(run(source).unwrap(), 21);
+}
+
+#[test]
+fn container_transfer_does_not_leave_the_source_readable() {
+    for destination in [
+        "val array<cell> items = [move source]",
+        "val array<cell> items = []\nitems.push(move source)",
+        "val holder object = holder(item = move source)",
+        "val result<cell, string> wrapped = ok(move source)",
+    ] {
+        let source = format!("struct cell {{ var i32 value = 1 }}\nstruct holder {{ val cell item }}\nfunc i32 main = () -> {{\nval cell source = cell()\n{destination}\nreturn source.value\n}}\n");
+        let error = fail(&source);
+        assert!(error.msg.contains("move"), "{}", error.msg);
+    }
+}
+
+#[test]
 fn move_transfers_a_dynamic_local_owner() {
     let source = r#"
 func i32 main = () -> {
