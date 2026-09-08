@@ -52,7 +52,7 @@ mod typed_contract_tests;
 mod value_category_tests;
 
 pub(crate) use model::{
-    ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOwner,
+    ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOperation, BindingOwner,
     Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
     CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
     MethodId, MethodTarget, OwnershipCapability, OwningWrite, Param, Pattern,

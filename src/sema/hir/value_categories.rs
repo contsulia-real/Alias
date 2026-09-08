@@ -5,6 +5,7 @@ use super::{
 };
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
+use std::collections::HashMap;
 
 enum Node<'a> {
     Expr(&'a Expr),
@@ -43,7 +44,10 @@ fn deep_clone_creates_owner(plan: &DeepClonePlan) -> bool {
     }
 }
 
-fn produces_owned_temporary(expr: &Expr) -> bool {
+fn produces_owned_temporary(
+    expr: &Expr,
+    category: &impl Fn(&Expr) -> Option<ExprCategory>,
+) -> bool {
     match expr {
         Expr::Str(..)
         | Expr::This(..)
@@ -82,18 +86,41 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
                 matches!(result.as_deref(), Some(CallResult::Owned))
             }
         },
+        Expr::Binary { .. } => matches!(expr.ty(), Ty::Str),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => [then_expr.as_ref(), else_expr.as_ref()]
+            .iter()
+            .all(|value| {
+                category(value) == Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+            }),
+        Expr::Match { arms, .. } => {
+            carries_dynamic_owner(expr.ty())
+                && arms.iter().all(|arm| {
+                    let value = match &arm.body {
+                        ArmBody::Value(value) => Some(value.as_ref()),
+                        ArmBody::Ret(_) => None,
+                        ArmBody::Block(stmts) => match stmts.last() {
+                            Some(Stmt::Expr { expr, .. }) => Some(expr),
+                            _ => None,
+                        },
+                    };
+                    value.is_none_or(|value| {
+                        category(value) == Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+                    })
+                })
+        }
         Expr::Int(..)
         | Expr::Float(..)
         | Expr::Bool(..)
         | Expr::Ident(..)
-        | Expr::Binary { .. }
         | Expr::Neg { .. }
         | Expr::Not { .. }
         | Expr::BitNot { .. }
-        | Expr::Ternary { .. }
         | Expr::Index { .. }
         | Expr::Field { .. }
-        | Expr::Match { .. }
         | Expr::Propagate { .. } => false,
         Expr::Convert {
             mode: ResolvedConversion::Identity,
@@ -102,19 +129,17 @@ fn produces_owned_temporary(expr: &Expr) -> bool {
     }
 }
 
-fn inherited_identity_category(inner: &Expr, span: Span) -> AliasResult<ExprCategory> {
-    let category = inner
-        .category()
-        .ok_or_else(|| invariant(span, "Identity Convert 的 inner category 尚未 finalization"))?;
-    Ok(match category {
-        ExprCategory::Place => ExprCategory::Place,
-        ExprCategory::Value(_) => ExprCategory::Value(inner.value_category().ok_or_else(|| {
-            invariant(span, "Identity Convert 的 inner Value 缺少 value category")
-        })?),
-    })
-}
-
-fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
+fn expected_category(
+    expr: &Expr,
+    category: &impl Fn(&Expr) -> Option<ExprCategory>,
+) -> AliasResult<ExprCategory> {
+    if let Some(plan) = &expr.info().projection_read {
+        return Ok(ExprCategory::Value(if deep_clone_creates_owner(plan) {
+            ValueCategory::OwnedTemporary
+        } else {
+            ValueCategory::InlineValue
+        }));
+    }
     Ok(match expr {
         Expr::Borrow { .. } => ExprCategory::Value(ValueCategory::BorrowedValue),
         Expr::Call {
@@ -137,8 +162,15 @@ fn expected_category(expr: &Expr) -> AliasResult<ExprCategory> {
             mode: ResolvedConversion::Identity,
             span,
             ..
-        } => inherited_identity_category(inner, *span)?,
-        _ if produces_owned_temporary(expr) => ExprCategory::Value(ValueCategory::OwnedTemporary),
+        } => category(inner).ok_or_else(|| {
+            invariant(
+                *span,
+                "Identity Convert 的 inner category 尚未 finalization",
+            )
+        })?,
+        _ if produces_owned_temporary(expr, category) => {
+            ExprCategory::Value(ValueCategory::OwnedTemporary)
+        }
         _ if is_inline_value(expr.ty()) => ExprCategory::Value(ValueCategory::InlineValue),
         _ => ExprCategory::Value(ValueCategory::General),
     })
@@ -148,9 +180,35 @@ pub(super) fn finalize(expr: &mut Expr) -> AliasResult<()> {
     if expr.category().is_some() {
         return Err(invariant(expr.span(), "Expr category 被重复 finalization"));
     }
-    let category = expected_category(expr)?;
+    let category = expected_category(expr, &Expr::category)?;
     expr.info_mut().category = Some(category);
     Ok(())
+}
+
+/// Call effects can change a branch result after lowering. Recompute child-before-parent without
+/// recursive host calls; updating calls alone leaves enclosing joins and identity wrappers stale.
+pub(super) fn resolved_categories(
+    program: &CheckedProgram,
+) -> AliasResult<HashMap<usize, ExprCategory>> {
+    let mut stack = root_nodes(program);
+    let mut expressions = Vec::new();
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Expr(expr) => {
+                expressions.push(expr);
+                push_expr_children(&mut stack, expr);
+            }
+            Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
+        }
+    }
+    let mut categories = HashMap::new();
+    for expr in expressions.into_iter().rev() {
+        let category = expected_category(expr, &|child| {
+            categories.get(&(child as *const Expr as usize)).copied()
+        })?;
+        categories.insert(expr as *const Expr as usize, category);
+    }
+    Ok(categories)
 }
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
@@ -161,7 +219,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 let got = expr
                     .category()
                     .ok_or_else(|| invariant(expr.span(), "Expr category 未 finalization"))?;
-                let want = expected_category(expr)?;
+                let want = expected_category(expr, &Expr::category)?;
                 if got != want {
                     return Err(invariant(
                         expr.span(),

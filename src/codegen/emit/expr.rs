@@ -33,6 +33,23 @@ pub(crate) fn emit_expr<M: Module>(
     frame: &mut Frame,
     e: &Expr,
 ) -> AliasResult<ExprValue> {
+    let value = emit_expr_value(c, bcx, frame, e)?;
+    if let Some(plan) = &e.info().projection_read {
+        let vty = c.vty(e.ty());
+        super::clone::emit_deep_clone_value(c, bcx,
+            value.into_scalar("projection clone 尚未支持 multi-lane value"), &vty, plan)
+            .map(ExprValue::scalar)
+    } else {
+        Ok(value)
+    }
+}
+
+fn emit_expr_value<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    e: &Expr,
+) -> AliasResult<ExprValue> {
     match e {
         Expr::Int(n, ..) => Ok(ExprValue::scalar(
             bcx.ins().iconst(types::I64, *n as i64),

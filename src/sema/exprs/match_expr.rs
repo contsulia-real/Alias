@@ -219,10 +219,16 @@ impl Checker {
             );
         }
         match &arm.body {
-            ArmBody::Value(e) => Ok(Some(match expected {
-                Some(w) => self.expr_expected(e, &local, w)?,
-                None => self.expr(e, &local)?,
-            })),
+            ArmBody::Value(e) => {
+                let ty = match expected {
+                    Some(w) => self.expr_expected(e, &local, w)?,
+                    None => self.expr(e, &local)?,
+                };
+                // A value arm leaves its lexical scope. Clone a stable Place while its binding
+                // facts are still available, so the join never aliases an arm-local owner.
+                self.record_branch_value_read(e, &local, &ty)?;
+                Ok(Some(ty))
+            }
             ArmBody::Ret(e) => {
                 self.check_return_value(Some(e), e.span(), &local)?;
                 Ok(None)
@@ -235,10 +241,14 @@ impl Checker {
                     return Ok(None);
                 }
                 match stmts.last() {
-                    Some(Stmt::Expr { expr, .. }) => Ok(Some(match expected {
-                        Some(w) => self.expr_expected(expr, &local, w)?,
-                        None => self.expr(expr, &local)?,
-                    })),
+                    Some(Stmt::Expr { expr, .. }) => {
+                        let ty = match expected {
+                            Some(w) => self.expr_expected(expr, &local, w)?,
+                            None => self.expr(expr, &local)?,
+                        };
+                        self.record_branch_value_read(expr, &local, &ty)?;
+                        Ok(Some(ty))
+                    }
                     _ => Ok(Some(Ty::Unit)),
                 }
             }

@@ -1,4 +1,77 @@
-use super::{validate_resolved_hir, AssignmentOperation, Body, Expr, Item, OwningWrite, Stmt};
+use super::{
+    AssignmentOperation, BindingOperation, Body, Expr, Item, OwningWrite, Stmt,
+    validate_resolved_hir,
+};
+
+#[test]
+fn binding_initialization_operations_are_frozen() {
+    let mut program = checked(
+        r#"
+struct box { var i32 value = 0 }
+val box global = box(value = 1)
+func box fresh = () -> return box(value = 2)
+func i32 main = () -> {
+    val i32 scalar = 3
+    val i32 copied = scalar
+    val box owner = fresh()
+    val box cloned = global
+    val box transferred = move owner
+    val box alias = borrow cloned
+    return alias.value + copied + transferred.value
+}
+"#,
+    );
+    for item in &program.items {
+        if let Item::Binding(binding) = item {
+            assert_eq!(
+                binding.operation,
+                Some(BindingOperation::Initialize(OwningWrite::OwnershipTransfer))
+            );
+        }
+    }
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let operations = stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Binding(binding) => Some(binding.operation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        operations,
+        [
+            Some(BindingOperation::Initialize(OwningWrite::InlineCopy)),
+            Some(BindingOperation::Initialize(OwningWrite::InlineCopy)),
+            Some(BindingOperation::Initialize(OwningWrite::OwnershipTransfer)),
+            Some(BindingOperation::Initialize(OwningWrite::OwnershipTransfer)),
+            Some(BindingOperation::Initialize(OwningWrite::OwnershipTransfer)),
+            Some(BindingOperation::BindBorrowedAlias),
+        ]
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_missing_or_drifted_binding_operation() {
+    for operation in [
+        None,
+        Some(BindingOperation::BindBorrowedAlias),
+        Some(BindingOperation::Initialize(OwningWrite::OwnershipTransfer)),
+    ] {
+        let mut program = checked("func i32 main = () -> {\nval i32 value = 1\nreturn value\n}\n");
+        let Body::Block(stmts) = main_body(&mut program) else {
+            panic!("fixture main must use block body")
+        };
+        let Stmt::Binding(binding) = &mut stmts[0] else {
+            panic!("fixture starts with binding")
+        };
+        binding.operation = operation;
+        let error =
+            validate_resolved_hir(&program).expect_err("binding operation must fail closed");
+        assert!(error.msg.contains("Binding operation"), "{}", error.msg);
+    }
+}
 
 fn checked(source: &str) -> super::CheckedProgram {
     let tokens = crate::lexer::lex(source).unwrap();

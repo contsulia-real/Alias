@@ -5,9 +5,9 @@
 //! unioning every capability that may already have been moved.
 
 use super::{
-    place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, Body, BorrowKind,
+    place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, BindingOperation, Body, BorrowKind,
     CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwningWrite, PatternBindingOperation,
-    Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt, StorageRelation, StrPart,
+    Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt, StrPart,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -524,6 +524,12 @@ impl<'a> GraphBuilder<'a> {
     ) -> AliasResult<()> {
         match stmt {
             Stmt::Binding(binding) => {
+                // Effect inference runs before final operations exist; both phases use the same
+                // destination-operation owner rather than reconstructing initialization semantics.
+                let operation = match binding.operation {
+                    Some(operation) => Some(operation),
+                    None => super::ownership_operations::provisional_binding_operation(binding)?,
+                };
                 let after_value = self.node(Action::Nop);
                 let capture_holder = if matches!(binding.ty, Ty::Func { .. }) {
                     self.loan_holder_bindings.insert(binding.binding_id);
@@ -539,7 +545,7 @@ impl<'a> GraphBuilder<'a> {
                     capture_holder,
                     loops,
                 });
-                if binding.relation == Some(StorageRelation::Borrowed) {
+                if operation == Some(BindingOperation::BindBorrowedAlias) {
                     self.borrowed.insert(binding.binding_id);
                     if let Some(source_writable) = returned_source_writable(&binding.value) {
                         self.borrowed_source_writable
@@ -556,7 +562,7 @@ impl<'a> GraphBuilder<'a> {
                         exit,
                         Action::BindLoan(LoanHolder::Binding(binding.binding_id), loan_id),
                     );
-                } else if binding.relation == Some(StorageRelation::Owning) {
+                } else if matches!(operation, Some(BindingOperation::Initialize(_))) {
                     self.owning.insert(binding.binding_id);
                     if dynamic_owner(&binding.ty) {
                         self.eligible.insert(binding.binding_id);
@@ -2213,16 +2219,18 @@ fn analyze_program(
 ) -> AliasResult<HashMap<LoanId, BorrowKind>> {
     let mut functions = Vec::new();
     let mut kinds = HashMap::new();
-    let global_owning: HashSet<_> = program
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Binding(binding) if binding.relation == Some(StorageRelation::Owning) => {
-                Some(binding.binding_id)
+    let mut global_owning = HashSet::new();
+    for item in &program.items {
+        if let Item::Binding(binding) = item {
+            let operation = match binding.operation {
+                Some(operation) => Some(operation),
+                None => super::ownership_operations::provisional_binding_operation(binding)?,
+            };
+            if matches!(operation, Some(BindingOperation::Initialize(_))) {
+                global_owning.insert(binding.binding_id);
             }
-            Item::Binding(_) | Item::StructDef(_) => None,
-        })
-        .collect();
+        }
+    }
     for item in &program.items {
         match item {
             Item::Binding(binding) => {

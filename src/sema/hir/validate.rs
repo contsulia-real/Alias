@@ -882,6 +882,19 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         format!("HIR 仍含未确定类型 {}", expr.ty().name()),
                     ));
                 }
+                if let Some(plan) = &expr.info().projection_read {
+                    if !matches!(expr, Expr::Field { .. } | Expr::Index { .. } | Expr::Propagate { .. })
+                        || super::expr_places::from_expr(expr).is_some()
+                    {
+                        return Err(invariant(expr.span(), "projection read 不属于非稳定 projection/payload"));
+                    }
+                    let expected = deep_clone_plan_with(expr.ty(), expr.span(), &|name| {
+                        structs.get(name).map(|def| def.fields.iter().map(|field| field.ty.clone()).collect())
+                    }).map_err(|_| invariant(expr.span(), "projection read 类型不可 DeepClone"))?;
+                    if plan.as_ref() != &expected {
+                        return Err(invariant(expr.span(), "projection read DeepClone plan 漂移"));
+                    }
+                }
                 match expr {
                     Expr::Ident(_, Some(id), ..) => {
                         if !known_ids.contains(id) {

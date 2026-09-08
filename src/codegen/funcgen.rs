@@ -271,10 +271,13 @@ impl<'m, M: Module> Compiler<'m, M> {
             };
             let off = self.top_slots[binding_index];
             let base = bcx.use_var(frame.globals);
-            v.store(&mut bcx, base, off as i32, &binding_cell_vty(&svty, b.relation));
+            let relation = Some(b.operation.unwrap_or_else(|| {
+                invariant_violation("global 初始化缺少 resolved BindingOperation")
+            }).storage_relation());
+            v.store(&mut bcx, base, off as i32, &binding_cell_vty(&svty, relation));
             frame.scopes[0].insert(b.binding_id, Slot::Global(off));
             frame.locals_vty[0].insert(b.binding_id, svty);
-            frame.locals_relation[0].insert(b.binding_id, b.relation);
+            frame.locals_relation[0].insert(b.binding_id, relation);
         }
 
         let clo = {

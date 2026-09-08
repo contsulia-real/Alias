@@ -109,6 +109,9 @@ pub(crate) fn emit_stmt<M: Module>(
 ) -> AliasResult<()> {
     match s {
         Stmt::Binding(b) => {
+            let relation = Some(b.operation.unwrap_or_else(|| {
+                invariant_violation("binding 初始化缺少 resolved BindingOperation")
+            }).storage_relation());
             if b.kind == BindKind::Func {
                 let Expr::FuncLit {
                     params,
@@ -140,12 +143,12 @@ pub(crate) fn emit_stmt<M: Module>(
                     super::value::ExprValue::scalar(v),
                     function_vty,
                     b.binding_id,
-                    b.relation,
+                    relation,
                 )?;
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr(c, bcx, frame, &b.value)?;
-                emit_local_cell(c, bcx, frame, v, vty, b.binding_id, b.relation)?;
+                emit_local_cell(c, bcx, frame, v, vty, b.binding_id, relation)?;
             }
             Ok(())
         }

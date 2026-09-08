@@ -7,6 +7,92 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn ternary_initializer_clones_only_the_selected_place() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+var i32 calls = 0
+func cell fresh = () -> {
+    calls = calls + 1
+    return cell(value = 3)
+}
+func i32 main = () -> {
+    val cell original = cell(value = 1)
+    val cell copied = true ? original : fresh()
+    copied.value = 9
+    val cell made = false ? original : fresh()
+    return original.value * 1000 + copied.value * 100 + made.value * 10 + calls
+}
+"#;
+    assert_eq!(run(source).unwrap(), 1931);
+}
+
+#[test]
+fn match_initializer_clones_value_and_block_arm_results() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+func i32 main = () -> {
+    val cell original = cell(value = 1)
+    val cell first = match true {
+        true -> original
+        false -> cell(value = 3)
+    }
+    val cell second = match false {
+        true -> cell(value = 4)
+        false -> {
+            val cell inner = original
+            inner.value = 2
+            inner
+        }
+    }
+    first.value = 7
+    second.value = 9
+    return original.value * 100 + first.value * 10 + second.value
+}
+"#;
+    assert_eq!(run(source).unwrap(), 179);
+}
+
+#[test]
+fn propagated_payload_initializer_keeps_the_result_owner_independent() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+func result<i32, string> check = () -> {
+    val result<cell, string> original = ok(cell(value = 1))
+    val cell copied = original?
+    copied.value = 9
+    return match original {
+        ok(value) -> ok(value.value * 10 + copied.value)
+        err(error) -> err(error)
+    }
+}
+func i32 main = () -> {
+    return match check() {
+        ok(value) -> value
+        err(error) -> 99
+    }
+}
+"#;
+    assert_eq!(run(source).unwrap(), 19);
+}
+
+#[test]
+fn temporary_projections_have_resolved_owning_reads() {
+    let source = r#"
+struct cell { var i32 value = 0 }
+struct holder { val cell item = cell(value = 4) }
+func holder fresh = () -> return holder()
+func i32 main = () -> {
+    val cell field = try_from fresh().item
+    val cell element = [cell(value = 5)][0]
+    field.value = 7
+    element.value = 9
+    return field.value * 10 + element.value
+}
+"#;
+    assert_eq!(run(source).unwrap(), 79);
+}
+
+#[test]
 fn local_replacement_clones_before_overwriting_target() {
     let source = r#"
 struct cell { var i32 value = 0 }

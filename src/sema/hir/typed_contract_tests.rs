@@ -35,8 +35,8 @@ fn final_hir_gate_rejects_binary_result_type_drift() {
         panic!("fixture must return binary expression")
     };
     info.ty = Ty::Str;
-    info.category = Some(super::ExprCategory::Value(super::ValueCategory::General));
-    info.ownership_capability = None;
+    info.category = Some(super::ExprCategory::Value(super::ValueCategory::OwnedTemporary));
+    info.ownership_capability = Some(super::OwnershipCapability::Available);
 
     let error = super::validate_resolved_hir(&program)
         .expect_err("binary result drift must fail the final HIR gate");

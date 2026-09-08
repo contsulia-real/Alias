@@ -1,12 +1,13 @@
-//! Final-HIR ownership operations for assignment.
+//! Final-HIR ownership operations for binding initialization and assignment.
 //!
 //! Value categories describe what an expression produced; this owner resolves how a destination
 //! consumes that value. Ownership flow and codegen must consume the frozen operation rather than
 //! independently reconstructing transfer/rebind behavior from expression or target shape.
 
 use super::{
-    ArmBody, AssignmentOperation, Binding, BindingId, Body, CheckedProgram, Expr, ExprCategory,
-    Item, OwnershipCapability, OwningWrite, Place, Stmt, StorageRelation, StrPart, ValueCategory,
+    ArmBody, AssignmentOperation, Binding, BindingId, BindingOperation, Body, CheckedProgram, Expr,
+    ExprCategory, Item, OwnershipCapability, OwningWrite, Place, Stmt, StorageRelation, StrPart,
+    ValueCategory,
 };
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -33,7 +34,7 @@ fn provisional_owning_write(value: &Expr) -> AliasResult<Option<OwningWrite>> {
             return Err(invariant(
                 value.span(),
                 "owning write RHS 缺少 inline-copy 或 ownership-transfer 事实",
-            ))
+            ));
         }
     })
 }
@@ -49,6 +50,35 @@ fn assignment_operation(
             if relations.get(binding_id) == Some(&StorageRelation::Borrowed)
     );
     assignment_operation_for(value, rebinds_alias)
+}
+
+pub(super) fn provisional_binding_operation(
+    binding: &Binding,
+) -> AliasResult<Option<BindingOperation>> {
+    let operation = provisional_assignment_operation_for(
+        &binding.value,
+        binding.relation == Some(StorageRelation::Borrowed),
+    )?;
+    Ok(operation.map(|operation| match operation {
+        AssignmentOperation::Replace(write) => BindingOperation::Initialize(write),
+        AssignmentOperation::RebindBorrowedAlias => BindingOperation::BindBorrowedAlias,
+    }))
+}
+
+fn binding_operation(binding: &Binding) -> AliasResult<BindingOperation> {
+    let operation = provisional_binding_operation(binding)?.ok_or_else(|| {
+        invariant(
+            binding.span,
+            "Binding operation 仍依赖 unresolved Place/General",
+        )
+    })?;
+    if binding.relation != Some(operation.storage_relation()) {
+        return Err(invariant(
+            binding.span,
+            "Binding operation 与 storage relation 漂移",
+        ));
+    }
+    Ok(operation)
 }
 
 pub(super) fn assignment_operation_for(
@@ -97,6 +127,13 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Binding(binding) => {
+                if binding.operation.is_some() {
+                    return Err(invariant(
+                        binding.span,
+                        "Binding operation 被重复 finalization",
+                    ));
+                }
+                binding.operation = Some(binding_operation(binding)?);
                 stack.push(MutNode::Expr(&mut binding.value));
             }
             MutNode::Stmt(stmt) => {
@@ -128,6 +165,12 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             Node::Binding(binding) => {
+                if binding.operation != Some(binding_operation(binding)?) {
+                    return Err(invariant(
+                        binding.span,
+                        "Binding operation 与 resolved value operation 漂移",
+                    ));
+                }
                 stack.push(Node::Expr(&binding.value));
             }
             Node::Stmt(stmt) => {

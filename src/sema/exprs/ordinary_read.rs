@@ -8,11 +8,25 @@ use super::super::{Checker, Env, LowerCallTarget};
 use super::deep_clone::deep_clone_plan_with;
 use crate::ast::Expr;
 use crate::sema::hir::{LowerOwningReadInfo, ResolvedConversion};
-use crate::sema::types::{types_match, Ty};
+use crate::sema::types::{Ty, types_match};
 use crate::{AliasError, AliasResult};
 
 impl Checker {
-    fn owning_read_source<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
+    pub(in crate::sema) fn record_branch_value_read(
+        &mut self,
+        expr: &Expr,
+        env: &Env,
+        ty: &Ty,
+    ) -> AliasResult<()> {
+        // Function selection feeds the existing callable/capture-loan path, not an owning data
+        // slot. Function bindings themselves still require a literal; do not invent a Func clone.
+        if matches!(ty, Ty::Func { .. } | Ty::Unknown | Ty::Unit) {
+            return Ok(());
+        }
+        self.record_owning_slot_read(expr, env, ty)
+    }
+
+    fn owning_read_operand<'a>(&self, expr: &'a Expr) -> &'a Expr {
         let mut current = expr;
         // Identity conversion is semantically transparent. If it hid the inner stable Place from
         // this owner, an owning target could retain a shared heap pointer merely by spelling
@@ -30,21 +44,14 @@ impl Checker {
                     ) =>
                 {
                     let [arg] = args.as_slice() else {
-                        return None;
+                        return expr;
                     };
                     current = &arg.value;
                 }
                 _ => break,
             }
         }
-        let source = current;
-        loop {
-            match current {
-                Expr::Ident(..) => return Some(source),
-                Expr::Field { recv, .. } | Expr::Index { recv, .. } => current = recv,
-                _ => return None,
-            }
-        }
+        current
     }
 
     pub(in crate::sema) fn record_owning_slot_read(
@@ -53,9 +60,20 @@ impl Checker {
         env: &Env,
         expected: &Ty,
     ) -> AliasResult<()> {
-        let Some(source) = self.owning_read_source(expr) else {
+        let source = self.owning_read_operand(expr);
+        let mut root = source;
+        while let Expr::Field { recv, .. } | Expr::Index { recv, .. } = root {
+            root = recv;
+        }
+        let stable = matches!(root, Expr::Ident(..));
+        if !stable
+            && !matches!(
+                source,
+                Expr::Field { .. } | Expr::Index { .. } | Expr::Propagate { .. }
+            )
+        {
             return Ok(());
-        };
+        }
         let key = Self::expr_key(source);
         let Some(expr_fact) = self.expr_facts.get(&key) else {
             return Err(AliasError {
@@ -74,13 +92,6 @@ impl Checker {
                 span: source.span(),
             });
         }
-        let place = self.resolve_place_expr(source, env)?;
-        if !types_match(place.ty(), expected) {
-            return Err(AliasError {
-                msg: "内部 sema 不变式被破坏: owning-slot read Place 类型漂移".into(),
-                span: source.span(),
-            });
-        }
         let plan = deep_clone_plan_with(expected, source.span(), &|name| {
             self.structs.get(name).map(|info| {
                 info.fields
@@ -89,8 +100,22 @@ impl Checker {
                     .collect::<Vec<_>>()
             })
         })?;
-        self.owning_reads
-            .insert(key, LowerOwningReadInfo { place, plan });
+        if stable {
+            let place = self.resolve_place_expr(source, env)?;
+            if !types_match(place.ty(), expected) {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: owning-slot read Place 类型漂移".into(),
+                    span: source.span(),
+                });
+            }
+            self.owning_reads
+                .insert(key, LowerOwningReadInfo { place, plan });
+        } else {
+            self.expr_facts
+                .get_mut(&key)
+                .expect("checked expression fact")
+                .projection_read = Some(Box::new(plan));
+        }
         Ok(())
     }
 }

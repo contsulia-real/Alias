@@ -184,7 +184,9 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-在 function effect 完成后，sema 还会为每个 local/field assignment 固化 destination-side ownership operation：owning Place replacement 明确区分 `InlineCopy` 与 `OwnershipTransfer`，直接赋值给 `var` borrowed alias 固化为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这份结构化事实；后端不再通过 RHS category、target 形状或机器位模式重新猜 replacement / rebind。Binding 初始化与容器写入仍需各自完整 effect/operation 合同，不能从这条 assignment 纵切反推为已经完成。
+显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。ownership CFG、final-HIR gate 与 codegen 共同消费这些事实，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。初始化不销毁旧值；容器写入的完整 operation 合同与 destruction 尚未完成。
+
+三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
 普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for iterable source 尚未完成自身 effect 合同，不能反推为长期语义。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 

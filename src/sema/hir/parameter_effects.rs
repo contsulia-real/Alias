@@ -8,7 +8,7 @@
 
 use super::{
     ArgumentPass, ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallResult,
-    CallTarget, CheckedProgram, Expr, ExprCategory, FunctionId, Item, LoanId, MethodId,
+    CallTarget, CheckedProgram, Expr, FunctionId, Item, LoanId, MethodId,
     MethodTarget, OwnershipCapability, Place, PlaceInfo, ResolvedConversion, ReturnPass, Stmt,
     StorageRelation, StrPart, ValueCategory,
 };
@@ -1693,23 +1693,6 @@ fn collect_return_maps(
     Ok(maps)
 }
 
-fn apply_result_category(expr: &mut Expr, result: &CallResult) -> AliasResult<()> {
-    let (category, capability) = match result {
-        CallResult::Inline => return Ok(()),
-        CallResult::Owned => (
-            ExprCategory::Value(ValueCategory::OwnedTemporary),
-            Some(OwnershipCapability::Available),
-        ),
-        CallResult::Borrowed { .. } => (
-            ExprCategory::Value(ValueCategory::BorrowedValue),
-            Some(OwnershipCapability::None),
-        ),
-    };
-    expr.info_mut().category = Some(category);
-    expr.info_mut().ownership_capability = capability;
-    Ok(())
-}
-
 fn apply_return_maps(program: &mut CheckedProgram, maps: &ReturnMaps) -> AliasResult<()> {
     let mut stack = root_mut_nodes(program);
     let mut seen_calls = HashSet::new();
@@ -1745,7 +1728,6 @@ fn apply_return_maps(program: &mut CheckedProgram, maps: &ReturnMaps) -> AliasRe
                         }
                         _ => return Err(invariant(expr_span, "call result map 指向非 user call")),
                     }
-                    apply_result_category(expr, &result)?;
                     seen_calls.insert(key);
                 }
                 push_mut_expr(&mut stack, expr);
@@ -1763,6 +1745,22 @@ fn apply_return_maps(program: &mut CheckedProgram, maps: &ReturnMaps) -> AliasRe
 }
 
 fn refresh_binding_relations(program: &mut CheckedProgram) -> AliasResult<()> {
+    let categories = super::value_categories::resolved_categories(program)?;
+    let mut stack = root_mut_nodes(program);
+    while let Some(node) = stack.pop() {
+        match node {
+            MutNode::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
+            MutNode::Stmt(stmt) => push_mut_stmt(&mut stack, stmt),
+            MutNode::Expr(expr) => {
+                let key = expr as *const Expr as usize;
+                expr.info_mut().category = Some(*categories.get(&key).ok_or_else(|| {
+                    invariant(expr.span(), "effect 写回缺少 resolved expression category")
+                })?);
+                super::ownership_capabilities::finalize(expr)?;
+                push_mut_expr(&mut stack, expr);
+            }
+        }
+    }
     let mut stack = root_mut_nodes(program);
     while let Some(node) = stack.pop() {
         match node {

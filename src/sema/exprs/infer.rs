@@ -114,6 +114,8 @@ impl Checker {
                 self.require_bool(cond, env, "?: 条件")?;
                 let a = self.expr(then_expr, env)?;
                 let b = self.expr(else_expr, env)?;
+                self.record_branch_value_read(then_expr, env, &a)?;
+                self.record_branch_value_read(else_expr, env, &b)?;
                 if a.is_unknown() {
                     Ok(b)
                 } else if b.is_unknown() || types_match(&a, &b) {

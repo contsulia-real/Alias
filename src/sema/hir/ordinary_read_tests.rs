@@ -1,6 +1,6 @@
 use super::{
-    validate_resolved_hir, Body, DeepClonePlan, Expr, ExprCategory, Item, OwnershipCapability,
-    Place, Stmt, StorageRelation, ValueCategory,
+    Body, DeepClonePlan, Expr, ExprCategory, Item, OwnershipCapability, Place, Stmt,
+    StorageRelation, ValueCategory, validate_resolved_hir,
 };
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -115,4 +115,24 @@ fn final_gate_rejects_ordinary_read_plan_drift() {
         "{}",
         error.msg
     );
+}
+
+#[test]
+fn temporary_projection_read_plan_is_required_and_revalidated() {
+    let source = "func i32 main = () -> {\nval string copied = ['x'][0]\nreturn copied.len()\n}\n";
+    for replacement in [
+        None,
+        Some(Box::new(DeepClonePlan::Array(Box::new(
+            DeepClonePlan::Inline,
+        )))),
+    ] {
+        let mut program = checked(source);
+        let copied = binding(&mut program, "copied");
+        assert_eq!(
+            copied.value.info().projection_read.as_deref(),
+            Some(&DeepClonePlan::String)
+        );
+        copied.value.info_mut().projection_read = replacement;
+        validate_resolved_hir(&program).expect_err("projection read must fail closed");
+    }
 }

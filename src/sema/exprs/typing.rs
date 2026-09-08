@@ -77,6 +77,7 @@ impl Checker {
                 ty,
                 call_target: None,
                 implicit_zero_callee: None,
+                projection_read: None,
             });
     }
 
@@ -96,6 +97,7 @@ impl Checker {
                 ty: Ty::Unknown,
                 call_target: Some(target),
                 implicit_zero_callee: None,
+                projection_read: None,
             });
     }
 
@@ -111,6 +113,7 @@ impl Checker {
                 ty: result_ty,
                 call_target: Some(LowerCallTarget::FunctionValue),
                 implicit_zero_callee: Some(callee_ty),
+                projection_read: None,
             });
     }
 
@@ -312,6 +315,8 @@ impl Checker {
                 self.require_bool(cond, env, "?: 条件")?;
                 self.expr_expected(then_expr, env, expected)?;
                 self.expr_expected(else_expr, env, expected)?;
+                self.record_branch_value_read(then_expr, env, expected)?;
+                self.record_branch_value_read(else_expr, env, expected)?;
                 Ok(expected.clone())
             }
             (

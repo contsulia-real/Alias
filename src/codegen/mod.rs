@@ -203,13 +203,16 @@ fn compile_program<M: Module>(
             _ => None,
         }) {
             let slot_vty = c.vty(&b.ty);
-            let layout = value_layout(&binding_cell_vty(&slot_vty, b.relation));
+            let relation = Some(b.operation.unwrap_or_else(|| {
+                invariant_violation("global allocation 缺少 resolved BindingOperation")
+            }).storage_relation());
+            let layout = value_layout(&binding_cell_vty(&slot_vty, relation));
             off = align_to(off, layout.align);
             let slot = off;
             off += layout.size;
             c.top_slots.push(slot);
             c.globals_final
-                .insert(b.binding_id, (slot, slot_vty, b.relation));
+                .insert(b.binding_id, (slot, slot_vty, relation));
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));

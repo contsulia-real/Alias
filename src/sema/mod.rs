@@ -22,6 +22,7 @@ pub(crate) struct LowerExprInfo {
     pub(crate) ty: Ty,
     pub(crate) call_target: Option<LowerCallTarget>,
     pub(crate) implicit_zero_callee: Option<Ty>,
+    pub(crate) projection_read: Option<Box<hir::DeepClonePlan>>,
 }
 
 /// 只允许存在于 sema 检查与 HIR lowering 之间；最终 HIR 按节点种类拆开调用目标。

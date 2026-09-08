@@ -46,6 +46,7 @@ pub(crate) struct Binding {
     pub(crate) owner: BindingOwner,
     pub(crate) kind: BindKind,
     pub(crate) relation: Option<StorageRelation>,
+    pub(crate) operation: Option<BindingOperation>,
     pub(crate) ty: Ty,
     pub(crate) name: String,
     pub(crate) value: Expr,
@@ -373,6 +374,21 @@ pub(crate) enum AssignmentOperation {
     RebindBorrowedAlias,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingOperation {
+    Initialize(OwningWrite),
+    BindBorrowedAlias,
+}
+
+impl BindingOperation {
+    pub(crate) fn storage_relation(self) -> StorageRelation {
+        match self {
+            Self::Initialize(_) => StorageRelation::Owning,
+            Self::BindBorrowedAlias => StorageRelation::Borrowed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PatternBindingOperation {
     InlineCopy,
@@ -411,6 +427,9 @@ pub(crate) struct ExprInfo {
     /// final gate 独立复算。这里和 call result 都必须保持 boxed：两者含完整 Place，若
     /// 内嵌会膨胀每个 Expr，并让合法深度边界在 HIR 析构/发射时耗尽编译线程栈。
     pub(crate) return_pass: Option<Box<ReturnPass>>,
+    /// Owning-context read of a temporary projection/result payload. Unlike ReadPlace it has no
+    /// stable source address; the evaluated payload is cloned before its enclosing owner expires.
+    pub(crate) projection_read: Option<Box<DeepClonePlan>>,
 }
 
 #[derive(Debug, Clone)]

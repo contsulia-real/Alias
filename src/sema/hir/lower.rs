@@ -156,6 +156,7 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
         owner,
         kind: binding.kind,
         relation,
+        operation: None,
         ty,
         name: binding.name.clone(),
         value,
@@ -371,6 +372,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
         category: None,
         ownership_capability: None,
         return_pass: None,
+        projection_read: lower_info.projection_read,
     };
 
     if let Some(callee_ty) = implicit_zero_callee {
@@ -391,6 +393,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             category: None,
             ownership_capability: None,
             return_pass: None,
+            projection_read: None,
         };
         let callee = match expr {
             crate::ast::Expr::Ident(name, span) => Expr::Ident(
@@ -675,6 +678,7 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             category: None,
             ownership_capability: None,
             return_pass: None,
+            projection_read: None,
         },
     })
 }
