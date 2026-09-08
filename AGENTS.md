@@ -211,7 +211,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 当前原生 runtime 使用 Windows process heap，分配路径依赖 zero-initialized memory。`HEAP_ZERO_MEMORY` 的意义是当前对象头、cell/env 等未显式写入的 word 初始为零；在相关旧布局仍存在期间，不能改成普通 HeapAlloc 后继续假设 null/0 初值。
 
-当前没有 HeapFree/GC/ARC，属于**当前实现事实**，不是目标模型。Alias 的目标 ownership、borrow、destruction、raw allocation、`malloc/free` 与 pointer 生命周期已经由 `docs/plan.md` 冻结。实现该计划时应直接把当前生命周期实现重构到该合同，不得擅自引入 GC、ARC、arena、“临时兼容释放层”或与计划竞争的第二套所有权机制。
+当前 `rt.heap.free` 统一调用 Windows HeapFree，释放失败必须终止；已用于数组扩容提交后的旧 backing、插值的内部累积字符串/字面量片段，以及整数/布尔输出包装器拥有的格式化临时字符串。字符串布局显式保存 allocation base，数据视图可指向块内或静态数据，`rt.str.drop` 不得从 data 地址猜测释放目标。该物理元数据不授予语言层 ownership。用户 binding 的 replacement、作用域退出与完整递归 destruction 尚未落地，当前也没有 GC/ARC。Alias 的目标 ownership、borrow、destruction、raw allocation、`malloc/free` 与 pointer 生命周期已经由 `docs/plan.md` 冻结。实现该计划时应直接把当前生命周期实现重构到该合同，不得擅自引入 GC、ARC、arena、“临时兼容释放层”或与计划竞争的第二套所有权机制。
 
 当前 zero-init、heap block、closure env 等实现细节若在计划执行中被正式替换，只保留新设计实际需要的约束；不要为了开发期旧对象布局制造兼容层。相反，只要某条当前路径仍依赖 zero-init，就必须在其 canonical owner 被完整替换前继续满足该不变量。
 

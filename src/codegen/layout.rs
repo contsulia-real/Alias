@@ -4,7 +4,7 @@
 //! 变成越界读写或把一个对象字段解释成另一个字段。这里仅拥有物理布局，不拥有
 //! array/iterator/closure/result/string 的语言语义。
 
-use super::abi::{align_to, object_word_offset, value_layout, VTy, OBJECT_WORD_BYTES};
+use super::abi::{OBJECT_WORD_BYTES, VTy, align_to, object_word_offset, value_layout};
 use crate::sema::hir::CtorKind;
 
 pub(crate) const ARRAY_RAW_WORDS: i64 = 4;
@@ -70,14 +70,17 @@ pub(crate) const fn result_tag(kind: CtorKind) -> i64 {
     }
 }
 
-pub(crate) const STRING_WORDS: i64 = 2;
+pub(crate) const STRING_WORDS: i64 = 3;
 pub(crate) const STRING_BYTES: i64 = STRING_WORDS * OBJECT_WORD_BYTES;
 pub(crate) const STRING_DATA_OFFSET: i32 = object_word_offset(0);
 pub(crate) const STRING_LEN_OFFSET: i32 = object_word_offset(1);
+// Display buffers may expose an interior data pointer, or immutable static bytes. Destruction
+// must free the allocation base, never infer it from data/length or free a static address.
+pub(crate) const STRING_ALLOCATION_OFFSET: i32 = object_word_offset(2);
 
 #[cfg(test)]
 mod tests {
-    use super::{result_layout_from_payloads, ResultLayout};
+    use super::{ResultLayout, result_layout_from_payloads};
     use crate::codegen::abi::ValueLayout;
 
     #[test]

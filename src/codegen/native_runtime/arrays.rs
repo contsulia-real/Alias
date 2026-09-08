@@ -1,10 +1,10 @@
+use crate::AliasResult;
+use crate::codegen::Compiler;
 use crate::codegen::layout::{
     ARRAY_CAP_OFFSET, ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_RAW_BYTES, ARRAY_STRIDE_OFFSET,
 };
-use crate::codegen::Compiler;
-use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData};
+use cranelift_codegen::ir::{BlockArg, InstBuilder, MemFlagsData, types};
 use cranelift_module::{FuncId, Module};
 
 // raw array 始终保持 0 <= len <= cap；cap = 0 时 data 才允许为 null。header 保存创建时
@@ -121,6 +121,9 @@ pub(super) fn emit_array_runtime<M: Module>(
                 .store(MemFlagsData::new(), grown, hdr, ARRAY_DATA_OFFSET);
             bcx.ins()
                 .store(MemFlagsData::new(), new_cap, hdr, ARRAY_CAP_OFFSET);
+            // Elements were relocated, not cloned: freeing only the obsolete backing preserves
+            // their owners in grown storage. No element destructor runs during relocation.
+            c.call_rt_void(&mut bcx, "rt.heap.free", &[dp0])?;
             bcx.ins().jump(join_b, &[BlockArg::Value(grown)]);
         }
         bcx.switch_to_block(ok_b);

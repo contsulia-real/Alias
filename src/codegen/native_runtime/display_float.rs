@@ -1,11 +1,13 @@
 use super::declare_runtime_shim;
 use crate::codegen::emit::cells::first_result;
-use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
-use crate::codegen::{native_err, Compiler};
+use crate::codegen::layout::{
+    STRING_ALLOCATION_OFFSET, STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET,
+};
+use crate::codegen::{Compiler, native_err};
 use crate::{AliasResult, Span};
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{types, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
 use cranelift_codegen::Context;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{Function, InstBuilder, MemFlagsData, UserFuncName, Value, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
 
@@ -35,6 +37,13 @@ fn static_string_block<M: Module>(
     let n = bcx.ins().iconst(types::I64, len);
     bcx.ins()
         .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+    let no_allocation = bcx.ins().iconst(types::I64, 0);
+    bcx.ins().store(
+        MemFlagsData::new(),
+        no_allocation,
+        blk,
+        STRING_ALLOCATION_OFFSET,
+    );
     bcx.ins()
         .store(MemFlagsData::new(), n, blk, STRING_LEN_OFFSET);
     Ok(blk)
@@ -353,6 +362,8 @@ pub(super) fn emit_float_display_shim<M: Module>(
     let blk = first_result(&bcx, blk_call);
     bcx.ins()
         .store(MemFlagsData::new(), buf, blk, STRING_DATA_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), buf, blk, STRING_ALLOCATION_OFFSET);
     bcx.ins()
         .store(MemFlagsData::new(), final_len, blk, STRING_LEN_OFFSET);
     bcx.ins().return_(&[blk]);

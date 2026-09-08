@@ -1,13 +1,15 @@
 use super::declare_runtime_shim;
-use crate::codegen::emit::cells::first_result;
-use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
-use crate::codegen::Compiler;
 use crate::AliasResult;
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{
-    types, BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value,
+use crate::codegen::Compiler;
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::layout::{
+    STRING_ALLOCATION_OFFSET, STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET,
 };
 use cranelift_codegen::Context;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{
+    BlockArg, Function, InstBuilder, MemFlagsData, UserFuncName, Value, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Module};
 
@@ -110,6 +112,8 @@ fn emit_case_shim<M: Module>(
         bcx.ins()
             .store(MemFlagsData::new(), out, blk, STRING_DATA_OFFSET);
         bcx.ins()
+            .store(MemFlagsData::new(), out, blk, STRING_ALLOCATION_OFFSET);
+        bcx.ins()
             .store(MemFlagsData::new(), la, blk, STRING_LEN_OFFSET);
         bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
     }
@@ -125,6 +129,8 @@ fn emit_case_shim<M: Module>(
         };
         bcx.ins()
             .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), zero, blk, STRING_ALLOCATION_OFFSET);
         bcx.ins()
             .store(MemFlagsData::new(), zero, blk, STRING_LEN_OFFSET);
         bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
@@ -146,6 +152,18 @@ pub(super) fn emit_string_runtime<M: Module>(
             c.call_rt(&mut $bcx, $nm, &__args)?
         }};
     }
+
+    shim!(c, "rt.str.drop", |bcx, a| {
+        let allocation = bcx.ins().load(
+            types::I64,
+            MemFlagsData::new(),
+            a[0],
+            STRING_ALLOCATION_OFFSET,
+        );
+        c.call_rt_void(&mut bcx, "rt.heap.free", &[allocation])?;
+        c.call_rt_void(&mut bcx, "rt.heap.free", &[a[0]])?;
+        false
+    });
 
     shim!(c, "alias.str.new", |bcx, a| {
         let blk = call_rt_m!(
@@ -170,6 +188,8 @@ pub(super) fn emit_string_runtime<M: Module>(
             bcx.ins().call(mv, &[buf, a[0], len64]);
             bcx.ins()
                 .store(MemFlagsData::new(), buf, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), buf, blk, STRING_ALLOCATION_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(else_b);
@@ -177,6 +197,8 @@ pub(super) fn emit_string_runtime<M: Module>(
             let zero = bcx.ins().iconst(types::I64, 0);
             bcx.ins()
                 .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, blk, STRING_ALLOCATION_OFFSET);
             bcx.ins().jump(end_b, &[]);
         }
         bcx.switch_to_block(end_b);
@@ -250,6 +272,8 @@ pub(super) fn emit_string_runtime<M: Module>(
         );
         bcx.ins()
             .store(MemFlagsData::new(), out_word, blk, STRING_DATA_OFFSET);
+        bcx.ins()
+            .store(MemFlagsData::new(), out_word, blk, STRING_ALLOCATION_OFFSET);
         bcx.ins()
             .store(MemFlagsData::new(), total, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
@@ -426,6 +450,8 @@ pub(super) fn emit_string_runtime<M: Module>(
             bcx.ins()
                 .store(MemFlagsData::new(), out, blk, STRING_DATA_OFFSET);
             bcx.ins()
+                .store(MemFlagsData::new(), out, blk, STRING_ALLOCATION_OFFSET);
+            bcx.ins()
                 .store(MemFlagsData::new(), n, blk, STRING_LEN_OFFSET);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);
         }
@@ -439,6 +465,8 @@ pub(super) fn emit_string_runtime<M: Module>(
             );
             bcx.ins()
                 .store(MemFlagsData::new(), zero, blk, STRING_DATA_OFFSET);
+            bcx.ins()
+                .store(MemFlagsData::new(), zero, blk, STRING_ALLOCATION_OFFSET);
             bcx.ins()
                 .store(MemFlagsData::new(), zero, blk, STRING_LEN_OFFSET);
             bcx.ins().jump(end_b, &[BlockArg::Value(blk)]);

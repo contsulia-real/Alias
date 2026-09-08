@@ -211,7 +211,7 @@ move place
 - `Owned` parameter 是当前函数内的 owning local capability，因此允许 dynamic `move(parameter)` 并由 caller 显式 transfer；captured Place 与 global 的 dynamic move 仍等待各自 transfer source 固化，不会把缺失 effect 当 owning fallback；
 - `move(place)` 与 `move place` 使用同一 semantic resolution、resolved Place 和 ownership dataflow。
 
-sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前 runtime 仍未实现 destruction/deallocation，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前泄漏式实现限制。
+sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前用户值的完整 destruction/deallocation 尚未实现，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前实现限制。
 
 ### 3.6 局部 borrow 与 NLL loan
 
@@ -745,11 +745,12 @@ line / col / len
 
 ## 18. Runtime 与内存模型当前事实
 
-当前 runtime 采用泄漏式分配，没有回收机制：
+当前 runtime 已回收部分内部临时分配，但用户值的完整生命周期回收尚未落地：
 
 - 绑定使用清零单元格；
 - 闭包环境保存捕获单元格指针；
-- 字符串为复制后的泄漏块；
+- 字符串拥有独立存储；插值内部累积值/字面量片段、整数与布尔输出包装器的格式化临时值已回收，用户字符串仍未在作用域退出时回收；
+- 数组扩容完成后释放旧 backing，不销毁迁移到新 backing 的元素；
 - struct/result/array/iterator 等对象也由原生 runtime/调用端分配并不回收；
 - 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root，但当前仍不会在生命周期结束时回收这些 block。
 

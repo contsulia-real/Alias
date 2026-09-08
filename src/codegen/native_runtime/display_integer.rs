@@ -1,11 +1,13 @@
 use super::declare_runtime_shim;
-use crate::codegen::emit::cells::first_result;
-use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
-use crate::codegen::Compiler;
 use crate::AliasResult;
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Function, InstBuilder, MemFlagsData, UserFuncName};
+use crate::codegen::Compiler;
+use crate::codegen::emit::cells::first_result;
+use crate::codegen::layout::{
+    STRING_ALLOCATION_OFFSET, STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET,
+};
 use cranelift_codegen::Context;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{Function, InstBuilder, MemFlagsData, UserFuncName, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
 
@@ -105,6 +107,8 @@ pub(super) fn emit_integer_display_shim<M: Module>(
     let blk = first_result(&bcx, blk_call);
     bcx.ins()
         .store(MemFlagsData::new(), start, blk, STRING_DATA_OFFSET);
+    bcx.ins()
+        .store(MemFlagsData::new(), buf, blk, STRING_ALLOCATION_OFFSET);
     bcx.ins()
         .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
     bcx.ins().return_(&[blk]);

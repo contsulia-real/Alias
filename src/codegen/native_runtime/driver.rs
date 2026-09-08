@@ -1,5 +1,5 @@
-use super::{validate_native_runtime_coverage, NativeExterns};
-use crate::codegen::{invariant_violation, native_err, Compiler};
+use super::{NativeExterns, validate_native_runtime_coverage};
+use crate::codegen::{Compiler, invariant_violation, native_err};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::types;
 use cranelift_module::{Linkage, Module};
@@ -56,14 +56,17 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         &[c.machine_ptr_ty, types::I32, types::I64],
         Some(c.machine_ptr_ty),
     )?;
-    let get_process_heap =
-        c.import_external("GetProcessHeap", &[], Some(c.machine_ptr_ty))?;
-    let rtl_move_memory =
-        c.import_external(
-            "RtlMoveMemory",
-            &[c.machine_ptr_ty, c.machine_ptr_ty, types::I64],
-            None,
-        )?;
+    let get_process_heap = c.import_external("GetProcessHeap", &[], Some(c.machine_ptr_ty))?;
+    let heap_free = c.import_external(
+        "HeapFree",
+        &[c.machine_ptr_ty, types::I32, c.machine_ptr_ty],
+        Some(types::I32),
+    )?;
+    let rtl_move_memory = c.import_external(
+        "RtlMoveMemory",
+        &[c.machine_ptr_ty, c.machine_ptr_ty, types::I64],
+        None,
+    )?;
 
     let span_data = c
         .module
@@ -84,7 +87,7 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
         static_ids.insert(name, id);
     }
 
-    super::alloc::emit_alloc_runtime(c, &ext, heap_alloc, get_process_heap)?;
+    super::alloc::emit_alloc_runtime(c, &ext, heap_alloc, heap_free, get_process_heap)?;
     super::strings::emit_string_runtime(c, rtl_move_memory)?;
     super::arrays::emit_array_runtime(c, rtl_move_memory)?;
     super::display::emit_display_runtime(c, &ext, &static_ids)?;

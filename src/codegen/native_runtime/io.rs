@@ -1,9 +1,9 @@
 use super::NativeExterns;
+use crate::AliasResult;
+use crate::codegen::Compiler;
 use crate::codegen::emit::cells::first_result;
 use crate::codegen::layout::{STRING_DATA_OFFSET, STRING_LEN_OFFSET};
-use crate::codegen::Compiler;
-use crate::AliasResult;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, types};
 use cranelift_module::Module;
 use std::collections::HashMap;
 
@@ -92,6 +92,7 @@ pub(super) fn emit_io_runtime<M: Module>(
         shim!(c, pname, |bcx, a| {
             let blk = call_rt_m!(bcx, "alias.display.int", vec![a[0]]);
             call_rt_void_m!(bcx, dname, vec![blk]);
+            call_rt_void_m!(bcx, "rt.str.drop", vec![blk]);
             false
         });
     }
@@ -102,6 +103,7 @@ pub(super) fn emit_io_runtime<M: Module>(
         shim!(c, pname, |bcx, a| {
             let blk = call_rt_m!(bcx, "alias.display.bool", vec![a[0]]);
             call_rt_void_m!(bcx, dname, vec![blk]);
+            call_rt_void_m!(bcx, "rt.str.drop", vec![blk]);
             false
         });
     }

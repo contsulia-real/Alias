@@ -1,16 +1,16 @@
 use super::arrays::{array_element_addr, array_len, array_raw, wrap_array};
 use super::expr::emit_expr;
 use super::places::emit_place_value;
-use crate::codegen::abi::{cl_type, norm_load, norm_store, value_layout, VTy};
-use crate::codegen::layout::{
-    result_layout, RESULT_OK_TAG, RESULT_TAG_OFFSET, STRING_BYTES, STRING_DATA_OFFSET,
-    STRING_LEN_OFFSET,
-};
-use crate::codegen::{invariant_violation, Compiler, Frame};
-use crate::sema::hir::{DeepClonePlan, Expr, Place};
 use crate::AliasResult;
+use crate::codegen::abi::{VTy, cl_type, norm_load, norm_store, value_layout};
+use crate::codegen::layout::{
+    RESULT_OK_TAG, RESULT_TAG_OFFSET, STRING_ALLOCATION_OFFSET, STRING_BYTES, STRING_DATA_OFFSET,
+    STRING_LEN_OFFSET, result_layout,
+};
+use crate::codegen::{Compiler, Frame, invariant_violation};
+use crate::sema::hir::{DeepClonePlan, Expr, Place};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{BlockArg, InstBuilder, MemFlagsData, Value, types};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -106,9 +106,7 @@ fn clone_string<M: Module>(
     let out_block = c.call_rt(bcx, "rt.heap.alloc", &[size])?;
 
     // 空字符串允许 data=null；只有正长度分支才能复制字节或对 data 做地址运算。
-    let has_data = bcx
-        .ins()
-        .icmp_imm_s(IntCC::SignedGreaterThan, len, 0);
+    let has_data = bcx.ins().icmp_imm_s(IntCC::SignedGreaterThan, len, 0);
     let copy_b = bcx.create_block();
     let empty_b = bcx.create_block();
     let end_b = bcx.create_block();
@@ -133,9 +131,7 @@ fn clone_string<M: Module>(
     bcx.seal_block(body_b);
     bcx.switch_to_block(body_b);
     let src_addr = bcx.ins().iadd(data, current);
-    let byte = bcx
-        .ins()
-        .load(types::I8, MemFlagsData::new(), src_addr, 0);
+    let byte = bcx.ins().load(types::I8, MemFlagsData::new(), src_addr, 0);
     let dst_addr = bcx.ins().iadd(copied, current);
     bcx.ins().store(MemFlagsData::new(), byte, dst_addr, 0);
     let next = bcx.ins().iadd_imm_s(current, 1);
@@ -154,6 +150,12 @@ fn clone_string<M: Module>(
     bcx.seal_block(end_b);
     bcx.ins()
         .store(MemFlagsData::new(), out_data, out_block, STRING_DATA_OFFSET);
+    bcx.ins().store(
+        MemFlagsData::new(),
+        out_data,
+        out_block,
+        STRING_ALLOCATION_OFFSET,
+    );
     bcx.ins()
         .store(MemFlagsData::new(), len, out_block, STRING_LEN_OFFSET);
     Ok(out_block)
@@ -177,9 +179,12 @@ fn clone_struct<M: Module>(
     let bytes = bcx.ins().iconst(types::I64, layout.size as i64);
     let out = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
     for (field, plan) in layout.fields.iter().zip(plans) {
-        let raw = bcx
-            .ins()
-            .load(cl_type(&field.vty), MemFlagsData::new(), source, field.offset);
+        let raw = bcx.ins().load(
+            cl_type(&field.vty),
+            MemFlagsData::new(),
+            source,
+            field.offset,
+        );
         let value = norm_load(bcx, raw, &field.vty);
         let cloned = clone_value(c, bcx, value, &field.vty, plan)?;
         let stored = norm_store(bcx, cloned, &field.vty);
@@ -264,24 +269,14 @@ fn clone_result<M: Module>(
     let ok_value = super::value::ExprValue::load(bcx, source, layout.payload_offset, ok_vty)
         .into_scalar("result deep clone 尚未支持 multi-lane payload");
     let ok_clone = clone_value(c, bcx, ok_value, ok_vty, ok_plan)?;
-    super::value::ExprValue::scalar(ok_clone).store(
-        bcx,
-        out,
-        layout.payload_offset,
-        ok_vty,
-    );
+    super::value::ExprValue::scalar(ok_clone).store(bcx, out, layout.payload_offset, ok_vty);
     bcx.ins().jump(end_b, &[]);
 
     bcx.switch_to_block(err_b);
     let err_value = super::value::ExprValue::load(bcx, source, layout.payload_offset, err_vty)
         .into_scalar("result deep clone 尚未支持 multi-lane payload");
     let err_clone = clone_value(c, bcx, err_value, err_vty, err_plan)?;
-    super::value::ExprValue::scalar(err_clone).store(
-        bcx,
-        out,
-        layout.payload_offset,
-        err_vty,
-    );
+    super::value::ExprValue::scalar(err_clone).store(bcx, out, layout.payload_offset, err_vty);
     bcx.ins().jump(end_b, &[]);
 
     bcx.switch_to_block(end_b);

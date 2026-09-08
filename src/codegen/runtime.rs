@@ -3,9 +3,9 @@
 //! 调用点和原生 runtime 实现都只引用符号名；参数、返回值与可空性
 //! 从本表生成并在构建/测试时校验。
 
-use crate::codegen::{native_err, Compiler};
+use crate::codegen::{Compiler, native_err};
 use crate::{AliasError, AliasResult, Span};
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature, Type, Value};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, Signature, Type, Value, types};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{FuncId, Linkage, Module};
 
@@ -131,6 +131,8 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.abort_overflow", [val(RuntimeTy::I32)]),
     contract!("alias.abort_iter", [val(RuntimeTy::I32)]),
     contract!("rt.heap.alloc", [val(RuntimeTy::I64)] -> val(RuntimeTy::Ptr)),
+    contract!("rt.heap.free", [nullable(RuntimeTy::Ptr)]),
+    contract!("rt.str.drop", [val(RuntimeTy::I64)]),
     contract!("rt.write.dec", [val(RuntimeTy::Ptr), val(RuntimeTy::I64)]),
     contract!(
         "rt.write.stdout",
@@ -264,6 +266,12 @@ mod tests {
 
     #[test]
     fn nullable_edges_are_frozen_in_the_contract_table() {
+        let free = runtime_contract("rt.heap.free").unwrap();
+        assert!(free.params[0].nullable, "无物理分配时释放为空操作");
+        assert!(free.ret.is_none());
+        let drop_string = runtime_contract("rt.str.drop").unwrap();
+        assert!(!drop_string.params[0].nullable, "字符串 root 必须存在");
+        assert!(drop_string.ret.is_none());
         let str_new = runtime_contract("alias.str.new").unwrap();
         assert!(str_new.params[0].nullable, "空字符串允许 null 数据指针");
         let stdout = runtime_contract("rt.write.stdout").unwrap();

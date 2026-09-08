@@ -2,6 +2,33 @@
 
 use alias::run;
 
+/// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
+/// A borrowed hole must survive concatenation; relocation must not destroy its elements.
+#[test]
+fn internal_string_release_and_array_relocation_preserve_live_values() {
+    let src = r#"
+func i32 main = () -> {
+    val string seed = 'live'
+    var array<string> values = []
+    var i32 i = 0
+    while i < 512 {
+        val string text = 'prefix ${seed} suffix'
+        while text != 'prefix live suffix' { return 1 }
+        values.push(text)
+        i = i + 1
+    }
+    while seed != 'live' { return 2 }
+    i = 0
+    while i < values.len() {
+        while values[i] != 'prefix live suffix' { return 3 }
+        i = i + 1
+    }
+    return 0
+}
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 struct Lcg(u64);
 
 impl Lcg {

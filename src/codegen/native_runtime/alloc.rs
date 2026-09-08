@@ -1,11 +1,11 @@
 use super::NativeExterns;
+use crate::AliasResult;
+use crate::codegen::Compiler;
 use crate::codegen::abi::OBJECT_WORD_BYTES;
 use crate::codegen::emit::cells::first_result;
 use crate::codegen::layout::{CLOSURE_BYTES, CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
-use crate::codegen::Compiler;
-use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, TrapCode};
+use cranelift_codegen::ir::{InstBuilder, MemFlagsData, TrapCode, types};
 use cranelift_module::{FuncId, Module};
 
 const HEAP_ZERO_MEMORY: i64 = 0x0000_0008;
@@ -14,6 +14,7 @@ pub(super) fn emit_alloc_runtime<M: Module>(
     c: &mut Compiler<'_, M>,
     ext: &NativeExterns,
     heap_alloc: FuncId,
+    heap_free: FuncId,
     get_process_heap: FuncId,
 ) -> AliasResult<()> {
     macro_rules! call_rt_m {
@@ -53,6 +54,31 @@ pub(super) fn emit_alloc_runtime<M: Module>(
         bcx.switch_to_block(ok_b);
         bcx.ins().return_(&[p]);
         true
+    });
+
+    shim!(c, "rt.heap.free", |bcx, a| {
+        // Null denotes an absent physical allocation (empty/static string, empty array backing),
+        // not permission to release a semantic owner. Only resolved/internal owners call this.
+        let absent = bcx.ins().icmp_imm_s(IntCC::Equal, a[0], 0);
+        let free_b = bcx.create_block();
+        let done_b = bcx.create_block();
+        let fail_b = bcx.create_block();
+        bcx.ins().brif(absent, done_b, &[], free_b, &[]);
+        bcx.seal_block(free_b);
+        bcx.switch_to_block(free_b);
+        let heap = call_ext_m!(bcx, get_process_heap, vec![]);
+        let flags = bcx.ins().iconst(types::I32, 0);
+        let freed = call_ext_m!(bcx, heap_free, vec![heap, flags, a[0]]);
+        bcx.ins().brif(freed, done_b, &[], fail_b, &[]);
+        bcx.seal_block(fail_b);
+        bcx.switch_to_block(fail_b);
+        let one = bcx.ins().iconst(types::I32, 1);
+        let exit = c.module.declare_func_in_func(ext.exit_process, bcx.func);
+        bcx.ins().call(exit, &[one]);
+        bcx.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+        bcx.seal_block(done_b);
+        bcx.switch_to_block(done_b);
+        false
     });
 
     shim!(c, "alias.cell.new", |bcx, a| {

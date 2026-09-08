@@ -1,11 +1,11 @@
 use super::expr::emit_expr;
 use crate::codegen::abi::VTy;
 use crate::codegen::layout::RESULT_TAG_OFFSET;
-use crate::codegen::{native_err, Compiler, Frame};
+use crate::codegen::{Compiler, Frame, native_err};
 use crate::sema::hir::{Expr, StrPart};
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{InstBuilder, MemFlagsData, Value, types};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
@@ -30,7 +30,14 @@ pub(crate) fn emit_str<M: Module>(
                 display_word(c, bcx, h, value)?
             }
         };
-        acc = c.call_rt(bcx, "alias.str.concat", &[acc, piece])?;
+        let next = c.call_rt(bcx, "alias.str.concat", &[acc, piece])?;
+        // The accumulator is an emitter-private owner, never a user-visible borrowed string.
+        // Keep it alive until concat has copied its bytes; only then release it.
+        c.call_rt_void(bcx, "rt.str.drop", &[acc])?;
+        if matches!(p, StrPart::Lit(_)) {
+            c.call_rt_void(bcx, "rt.str.drop", &[piece])?;
+        }
+        acc = next;
     }
     Ok(acc)
 }

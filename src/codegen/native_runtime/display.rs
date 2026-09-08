@@ -1,11 +1,13 @@
+use super::NativeExterns;
 use super::display_float::emit_float_display_shim;
 use super::display_integer::emit_integer_display_shim;
-use super::NativeExterns;
-use crate::codegen::layout::{STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET};
-use crate::codegen::Compiler;
 use crate::AliasResult;
+use crate::codegen::Compiler;
+use crate::codegen::layout::{
+    STRING_ALLOCATION_OFFSET, STRING_BYTES, STRING_DATA_OFFSET, STRING_LEN_OFFSET,
+};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, types};
 use cranelift_module::Module;
 use std::collections::HashMap;
 
@@ -182,6 +184,8 @@ pub(super) fn emit_display_runtime<M: Module>(
             bcx.ins()
                 .store(MemFlagsData::new(), start, blk, STRING_DATA_OFFSET);
             bcx.ins()
+                .store(MemFlagsData::new(), buf, blk, STRING_ALLOCATION_OFFSET);
+            bcx.ins()
                 .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
             bcx.ins().return_(&[blk]);
         }
@@ -208,6 +212,13 @@ pub(super) fn emit_display_runtime<M: Module>(
         );
         bcx.ins()
             .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+        let no_allocation = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().store(
+            MemFlagsData::new(),
+            no_allocation,
+            blk,
+            STRING_ALLOCATION_OFFSET,
+        );
         bcx.ins()
             .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
@@ -234,6 +245,13 @@ pub(super) fn emit_display_runtime<M: Module>(
             );
             bcx.ins()
                 .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+            let no_allocation = bcx.ins().iconst(types::I64, 0);
+            bcx.ins().store(
+                MemFlagsData::new(),
+                no_allocation,
+                blk,
+                STRING_ALLOCATION_OFFSET,
+            );
             bcx.ins()
                 .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
             bcx.ins().return_(&[blk]);
@@ -256,6 +274,13 @@ pub(super) fn emit_display_runtime<M: Module>(
         );
         bcx.ins()
             .store(MemFlagsData::new(), addr, blk, STRING_DATA_OFFSET);
+        let no_allocation = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().store(
+            MemFlagsData::new(),
+            no_allocation,
+            blk,
+            STRING_ALLOCATION_OFFSET,
+        );
         bcx.ins()
             .store(MemFlagsData::new(), len, blk, STRING_LEN_OFFSET);
         bcx.ins().return_(&[blk]);
