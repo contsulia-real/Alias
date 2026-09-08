@@ -5,6 +5,35 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn pattern_binding_is_an_independent_owner_for_local_loans() {
+    for (subject, arms) in [
+        ("'abc'", "item -> { val string alias = borrow item\nval i32 size = alias.len()\nval string taken = move item\nreturn size + taken.len() }"),
+        ("wrapped", "ok(item) -> { val string alias = borrow item\nval i32 size = alias.len()\nval string taken = move item\nreturn size + taken.len() }\nerr(error) -> 99"),
+        ("3", "item -> { val i32 alias = borrow item\nreturn alias + item }"),
+    ] {
+        let source = format!("func i32 main = () -> {{\nval result<string, i32> wrapped = ok('abc')\nmatch {subject} {{ {arms} }}\nreturn 0\n}}");
+        assert_eq!(run(&source).unwrap(), 6);
+    }
+}
+
+#[test]
+fn pattern_binding_move_conflicts_with_its_live_loan() {
+    let error = fail(r#"
+func i32 main = () -> {
+    match 'abc' {
+        item -> {
+            val string alias = borrow item
+            val string taken = move item
+            return alias.len()
+        }
+    }
+    return 0
+}
+"#);
+    assert!(error.msg.contains("live loan"), "{}", error.msg);
+}
+
+#[test]
 fn for_element_loan_ends_before_transfer_and_the_next_iteration() {
     let source = r#"
 func i32 main = () -> {

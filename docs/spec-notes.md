@@ -431,6 +431,8 @@ err(_)
 
 每个实际产生绑定的 arm 都在 sema 固化 ownership operation，并由 ownership CFG、final-HIR gate 与 codegen 共同消费：inline 标量使用 `InlineCopy`；普通整值绑定若主语是 `OwnedTemporary + Available`，使用 `OwnershipTransfer`；若主语是稳定 Place 或 borrowed value，则按绑定类型固化并执行 `DeepClonePlan`。`ok(name)` / `err(name)` 的 payload 仍属于 live result storage，因此动态 payload 始终 clone，禁止借 Pattern 暗中 partial move。无法证明上述 operation 或绑定类型不满足 DeepCloneable 时静态拒绝，不按当前 pointer bit pattern 退回共享。
 
+Pattern binding 是独立的 owning local，可建立局部 borrow；这也适用于 inline 标量与 constructor payload 的副本。动态 binding 的 move 必须等它的 live loan 结束，不能借此转移仍属于 subject 的 payload。
+
 ### 7.3 穷尽性与不可达
 
 - `_` 与普通绑定 Pattern 都是 catch-all；

@@ -156,6 +156,8 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 
 `for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，iterable source 的完整 effect 合同仍独立待完成。
 
+borrow containment 收集 owning local 时必须包含 `for` 与 Pattern 的隐式 binding；ownership CFG 同样登记 inline Pattern 的 owning storage，但不为它制造 dynamic capability。Pattern 的 copy/clone/transfer 分类仍仅由 `pattern_bindings.rs` 决定。
+
 ## 5. ABI、物理布局与 runtime 契约
 
 ### 值 ABI

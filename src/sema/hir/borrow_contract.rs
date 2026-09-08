@@ -82,7 +82,18 @@ fn collect_relations(program: &CheckedProgram) -> HashMap<BindingId, StorageRela
                 }
                 push_stmt_children(&mut stack, stmt, &relations);
             }
-            Node::Expr(expr, _) => push_expr_children(&mut stack, expr, false),
+            Node::Expr(expr, _) => {
+                if let Expr::Match { arms, .. } = expr {
+                    // Pattern initialization always creates an owning binding, whether it copies
+                    // inline data, clones a payload, or transfers a fresh whole subject.
+                    for arm in arms {
+                        if let Some(id) = arm.binding_id {
+                            relations.insert(id, StorageRelation::Owning);
+                        }
+                    }
+                }
+                push_expr_children(&mut stack, expr, false);
+            }
         }
     }
     relations

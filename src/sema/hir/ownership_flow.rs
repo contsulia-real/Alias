@@ -433,7 +433,7 @@ impl<'a> GraphBuilder<'a> {
                             self.action_between(entry, body_entry, Action::Declare(binding_id));
                             body_entry
                         }
-                        (Some(_), false) => {
+                        (Some(binding_id), false) => {
                             if matches!(
                                 arm.binding_operation,
                                 Some(
@@ -446,6 +446,9 @@ impl<'a> GraphBuilder<'a> {
                                     "内部 sema 不变式被破坏: inline Pattern binding 携带 dynamic operation",
                                 ));
                             }
+                            // Inline bindings have no dynamic move capability, but their storage
+                            // is still an owning local and can be the referent of a local loan.
+                            self.owning.insert(binding_id);
                             entry
                         }
                         (None, false) => entry,
