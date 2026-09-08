@@ -5,6 +5,36 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn for_element_has_a_fresh_owner_on_each_iteration_and_continue() {
+    let source = r#"
+struct cell { var i32 value }
+func i32 main = () -> {
+    val array<cell> values = [cell(value = 1), cell(value = 2), cell(value = 3)]
+    var i32 total = 0
+    for cell item in values {
+        val cell taken = move item
+        taken.value = taken.value + 10
+        total = total + taken.value
+        continue
+    }
+    return total + values[0].value + values[1].value + values[2].value
+}
+"#;
+    assert_eq!(run(source).unwrap(), 42);
+}
+
+#[test]
+fn for_element_move_does_not_authorize_another_use_in_the_same_iteration() {
+    for tail in ["val cell second = move item", "val i32 observed = item.value"] {
+        let source = format!(
+            "struct cell {{ var i32 value = 1 }}\nfunc i32 main = () -> {{\nval array<cell> values = [cell()]\nfor cell item in values {{\nval cell taken = move item\n{tail}\n}}\nreturn 0\n}}"
+        );
+        let error = fail(&source);
+        assert!(error.msg.contains("move"), "{}", error.msg);
+    }
+}
+
+#[test]
 fn move_transfers_through_array_constructor_push_struct_and_result() {
     let source = r#"
 struct cell { var i32 value = 0 }

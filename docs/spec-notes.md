@@ -490,6 +490,7 @@ for T item in iterable {
 
 - iterable 当前接受 `array<T>` 或 `iterator<T>`；
 - 循环变量为不可重新绑定的隐式 `val`；
+- 每轮循环变量是新初始化的 owning binding；动态元素副本可被借用或整值 move，同一轮 move 后不能再读，下一轮会恢复新副本的 capability，`continue` 也遵守该规则；这不等于 iterable source 的 loan 合同已经完整落地；
 - 旧 condition-for 与 C 风格 for 均不存在；条件循环使用 `while`。
 
 ---

@@ -154,6 +154,8 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 
 若 codegen 需要新增语言层判断，优先判断 HIR 是否缺少 resolved payload，而不是把 sema predicate 复制到后端或放进共享 helper 让两层共同决定。
 
+`for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，iterable source 的完整 effect 合同仍独立待完成。
+
 ## 5. ABI、物理布局与 runtime 契约
 
 ### 值 ABI

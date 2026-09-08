@@ -721,9 +721,21 @@ impl<'a> GraphBuilder<'a> {
                 });
                 self.edge(body_exit, header);
             }
-            Stmt::For { iterable, body, .. } => {
+            Stmt::For { binding_id, ty, iterable, body, .. } => {
                 let header = self.node(Action::Nop);
                 let body_exit = self.node(Action::Nop);
+                // Each iteration constructs a fresh owning element copy. Initialization belongs
+                // on the taken-body edge, not before the loop: a previous iteration's move must
+                // not invalidate the next copy, and a zero-iteration loop creates no owner.
+                self.owning.insert(*binding_id);
+                let body_entry = if dynamic_owner(ty) {
+                    self.eligible.insert(*binding_id);
+                    let initialized = self.node(Action::Nop);
+                    self.action_between(header, initialized, Action::Declare(*binding_id));
+                    initialized
+                } else {
+                    header
+                };
                 self.tasks.push(Task::Expr {
                     expr: iterable,
                     entry,
@@ -735,7 +747,7 @@ impl<'a> GraphBuilder<'a> {
                 self.edge(header, exit);
                 self.tasks.push(Task::Stmts {
                     stmts: body,
-                    entry: header,
+                    entry: body_entry,
                     exit: body_exit,
                     loops: LoopTargets {
                         break_target: Some(exit),

@@ -75,6 +75,11 @@ fn collect_relations(program: &CheckedProgram) -> HashMap<BindingId, StorageRela
                         relations.insert(binding.binding_id, relation);
                     }
                 }
+                if let Stmt::For { binding_id, .. } = stmt {
+                    // The resolved element clone initializes an independent owning loop slot,
+                    // just like an explicit local initializer; the iterable is not this owner.
+                    relations.insert(*binding_id, StorageRelation::Owning);
+                }
                 push_stmt_children(&mut stack, stmt, &relations);
             }
             Node::Expr(expr, _) => push_expr_children(&mut stack, expr, false),

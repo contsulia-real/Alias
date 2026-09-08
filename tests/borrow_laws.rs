@@ -5,6 +5,38 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn for_element_loan_ends_before_transfer_and_the_next_iteration() {
+    let source = r#"
+func i32 main = () -> {
+    var i32 total = 0
+    for string item in ['a', 'bb', 'ccc'] {
+        val string alias = borrow item
+        total = total + alias.len()
+        val string taken = move item
+        total = total + taken.len()
+    }
+    return total
+}
+"#;
+    assert_eq!(run(source).unwrap(), 12);
+}
+
+#[test]
+fn for_element_cannot_move_while_its_loan_is_live() {
+    let error = fail(r#"
+func i32 main = () -> {
+    for string item in ['a'] {
+        val string alias = borrow item
+        val string taken = move item
+        return alias.len()
+    }
+    return 0
+}
+"#);
+    assert!(error.msg.contains("live loan"), "{}", error.msg);
+}
+
+#[test]
 fn borrow_supports_parenthesized_and_no_paren_forms() {
     let source = r#"
 func i32 main = () -> {
