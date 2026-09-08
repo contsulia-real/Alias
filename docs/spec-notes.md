@@ -323,6 +323,8 @@ effect 由函数体、用户函数调用和用户方法调用组成的有限格 
 
 ### 4.6 函数 return effects
 
+return 的操作数可包含嵌套 match 返回出口。所有属于当前函数的出口都参与 return-effect 求解，各自固化 ReturnPass；嵌套函数字面量的出口只属于其自身。若操作数所有路径已返回，不会再执行外层 return 或 match 的值汇合。
+
 每个完整函数类型还在 final HIR 前固化返回 effect：
 
 - `Inline`：返回 inline 值；

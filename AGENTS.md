@@ -207,6 +207,8 @@ borrow containment 收集 owning local 时必须包含 `for` 与 Pattern 的隐�
 
 `Frame::terminated` 表示当前 Cranelift insertion point 已由 return/jump/trap 等终止。后续若源码结构要求继续建立不可达块，必须显式创建/seal 新 block，再清除此状态；不能向已终止 block 继续插指令。
 
+return-effect 遍历必须继续进入 return 操作数与 match `ArmBody::Ret` 的表达式，收集其中属于同一函数的嵌套出口，但跳过嵌套 FuncLit。发射外层 return 或 match 值汇合前必须检查操作数是否已终止当前 block；全返回表达式的占位 carrier 不得被当作真实返回值存储或规范化。
+
 for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进入循环 body 前推进，是为了让 `continue` 仍然前进；把增量放到 body 尾部会让 continue 跳过推进并破坏循环语义。
 
 进程终止 runtime 调用之后仍保留 trap 作为控制流终结保证；不得假设外部函数永不返回来替代 IR terminator。

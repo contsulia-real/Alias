@@ -583,19 +583,24 @@ pub(crate) fn emit_match_arm<M: Module>(
     let joined = match &arm.body {
         ArmBody::Value(e) => {
             let v = emit_expr(c, bcx, frame, e)?;
-            if *result_vty == VTy::Unit {
-                bcx.ins().jump(join_b, &[]);
+            if frame.terminated {
+                // A nested match may return on every path; no value reaches this arm's join.
+                false
             } else {
-                let result_abi = result_vty.abi();
-                v.assert_types(
-                    bcx,
-                    result_abi.expression_types(),
-                    "match arm value 与 resolved expression ABI 不一致",
-                );
-                bcx.ins().jump(join_b, &v.block_args());
+                if *result_vty == VTy::Unit {
+                    bcx.ins().jump(join_b, &[]);
+                } else {
+                    let result_abi = result_vty.abi();
+                    v.assert_types(
+                        bcx,
+                        result_abi.expression_types(),
+                        "match arm value 与 resolved expression ABI 不一致",
+                    );
+                    bcx.ins().jump(join_b, &v.block_args());
+                }
+                frame.terminated = true;
+                true
             }
-            frame.terminated = true;
-            true
         }
         ArmBody::Ret(e) => {
             let v = super::control::emit_return_value(c, bcx, frame, e)?;

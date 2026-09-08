@@ -1279,6 +1279,9 @@ fn function_return_values(function: &Expr) -> AliasResult<Vec<&Expr>> {
             Node::Binding(binding) => stack.push(Node::Expr(&binding.value)),
             Node::Stmt(Stmt::Return { value: Some(value) }) => {
                 values.push(value);
+                // Evaluating a return operand can itself return from a nested match arm. Those
+                // exits need their own effect/pass; only nested function bodies are excluded.
+                stack.push(Node::Expr(value));
             }
             Node::Stmt(stmt) => push_stmt_children(&mut stack, stmt),
             Node::Expr(Expr::FuncLit { .. }) => {}
@@ -1292,7 +1295,10 @@ fn function_return_values(function: &Expr) -> AliasResult<Vec<&Expr>> {
                             }
                         }
                         ArmBody::Value(value) => stack.push(Node::Expr(value)),
-                        ArmBody::Ret(value) => values.push(value),
+                        ArmBody::Ret(value) => {
+                            values.push(value);
+                            stack.push(Node::Expr(value));
+                        }
                     }
                 }
             }

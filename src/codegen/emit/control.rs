@@ -75,6 +75,11 @@ pub(super) fn emit_return_jump(
     value: ExprValue,
     ret_block: Block,
 ) {
+    // The operand may already have returned through every match arm. Its placeholder carrier is
+    // not a return value: do not normalize/store it or append a second terminator to that block.
+    if frame.terminated {
+        return;
+    }
     let ret_vty = frame
         .ret_vty
         .as_ref()

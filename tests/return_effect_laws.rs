@@ -1,5 +1,19 @@
 use alias::{run, AliasError};
 
+#[test]
+fn returns_nested_inside_a_return_operand_keep_their_own_passes() {
+    for source in [
+        "func i32 main = () -> return match true { true -> { return 7 } false -> 9 }",
+        "func i32 main = () -> return match true { true -> { return 7 } false -> { return 9 } }",
+        "func i32 main = () -> return match true {\ntrue -> match false {\ntrue -> { return 9 }\nfalse -> { return 7 }\n}\nfalse -> 9\n}",
+        "func i32 main = () -> { match true {\ntrue -> return match false {\ntrue -> { return 9 }\nfalse -> 7\n}\nfalse -> return 0\n} }",
+    ] {
+        assert_eq!(run(source).unwrap_or_else(|error| panic!("{error}\n{source}")), 7);
+    }
+    let owned = "func string make = () -> { val string local = 'abc'\nreturn match true { true -> { return local } false -> 'x' } }\nfunc i32 main = () -> { val string value = make()\nreturn value.len() }";
+    assert_eq!(run(owned).unwrap(), 3);
+}
+
 fn fail(source: &str) -> AliasError {
     run(source).expect_err("source should be rejected")
 }
