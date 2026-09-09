@@ -484,7 +484,7 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 
 ### 8.3 `for`
 
-`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。iterator replacement、跨函数返回及容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。
+`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。跨函数返回及容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。
 
 当前集合迭代语法：
 
@@ -800,7 +800,7 @@ line / col / len
 - 标量作为 user-level shallow 根；
 - `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
-- iterator replacement、跨函数返回及容器内的完整源数组 loan 传播；
+- iterator 跨函数返回及容器内的完整源数组 loan 传播；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；

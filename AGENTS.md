@@ -154,7 +154,7 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 
 若 codegen 需要新增语言层判断，优先判断 HIR 是否缺少 resolved payload，而不是把 sema predicate 复制到后端或放进共享 helper 让两层共同决定。
 
-`for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，source_pass 复用 parameter_effects 的 argument-pass owner 并在 final gate 独立复核，loop header 的 UseLoanHolder 保持回边上的 NLL region。显式 ArrayIterator receiver_pass 同样复用该 owner；局部 iterator binding 是 loan holder，move 到新 binding 通过 CarryLoans 保留原 source loans，而不是重新借用已经 moved 的 iterator cell。iterator replacement、跨函数返回与容器内 loan 传播仍未闭合。
+`for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，source_pass 复用 parameter_effects 的 argument-pass owner 并在 final gate 独立复核，loop header 的 UseLoanHolder 保持回边上的 NLL region。显式 ArrayIterator receiver_pass 同样复用该 owner；局部 iterator binding 是 loan holder，move 到新 binding 通过 CarryLoans 保留原 source loans，而不是重新借用已经 moved 的 iterator cell。局部 owning iterator replacement 先以独立 RHS holder 求值，通过 Reinitialize 的冲突检查后再用 SetLoans 提交新来源集合；SetLoans 同时是 reaching-definition 的替换边界和 backward liveness 的 kill 边界。临时 holder 分配统一经 ownership CFG 的 temporary_holder，开始求值前清空上一执行轮次的 loans；不得在 for 的内部回边上清空仍需使用的来源。跨函数返回与容器内 loan 传播仍未闭合。
 
 borrow containment 收集 owning local 时必须包含 `for` 与 Pattern 的隐式 binding；ownership CFG 同样登记 inline Pattern 的 owning storage，但不为它制造 dynamic capability。Pattern 的 copy/clone/transfer 分类仍仅由 `pattern_bindings.rs` 决定。
 

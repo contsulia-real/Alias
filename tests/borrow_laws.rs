@@ -5,6 +5,74 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn iterator_replacement_switches_source_loans_without_retaining_old_generations() {
+    for replacement in [
+        "it = right.iterator()",
+        "val iterator<i32> next = right.iterator()\nit = move next",
+        "if round == 0 { it = right.iterator() } else { it = right.iterator() }",
+    ] {
+        let source = format!(r#"
+func i32 main = () -> {{
+    val array<i32> left = [1]
+    val array<i32> right = [2]
+    var iterator<i32> it = left.iterator()
+    var i32 total = 0
+    var i32 round = 0
+    while round < 2 {{
+        it = left.iterator()
+        for i32 item in it {{ total = total + item }}
+        {replacement}
+        left.push(3)
+        for i32 item in it {{ total = total + item }}
+        round = round + 1
+    }}
+    right.push(4)
+    return total
+}}
+"#);
+        assert_eq!(run(&source).unwrap(), 9);
+    }
+}
+
+#[test]
+fn iterator_replacement_protects_the_new_source_and_live_aliases() {
+    for replacement in ["it = right.iterator()", "val iterator<i32> next = right.iterator()\nit = move next"] {
+        let source = format!("func i32 main = () -> {{\nval array<i32> left = [1]\nval array<i32> right = [2]\nvar iterator<i32> it = left.iterator()\n{replacement}\nright.push(3)\nfor i32 item in it {{ println item }}\nreturn 0\n}}");
+        let error = fail(&source);
+        assert!(error.msg.contains("loan") || error.msg.contains("Loan"), "{}", error.msg);
+    }
+    let error = fail(r#"
+func i32 main = () -> {
+    val array<i32> left = [1]
+    val array<i32> right = [2]
+    var iterator<i32> it = left.iterator()
+    for i32 item in it { it = right.iterator() }
+    return 0
+}
+"#);
+    assert!(error.msg.contains("loan") || error.msg.contains("Loan"), "{}", error.msg);
+}
+
+#[test]
+fn conditional_iterator_replacement_keeps_both_possible_sources_live() {
+    for source in ["left", "right"] {
+        let program = format!(r#"
+func i32 main = () -> {{
+    val array<i32> left = [1]
+    val array<i32> right = [2]
+    var iterator<i32> it = left.iterator()
+    if left.len() == 1 {{ it = right.iterator() }}
+    {source}.push(3)
+    for i32 item in it {{ println item }}
+    return 0
+}}
+"#);
+        let error = fail(&program);
+        assert!(error.msg.contains("loan") || error.msg.contains("Loan"), "{}", error.msg);
+    }
+}
+
+#[test]
 fn explicit_iterator_retains_the_original_array_loan_after_move() {
     for transfer in ["", "val iterator<i32> moved = move it\n"] {
         let iterator = if transfer.is_empty() { "it" } else { "moved" };
