@@ -1,6 +1,40 @@
 use alias::{run, AliasError};
 
 #[test]
+fn iterator_return_cannot_outlive_its_local_array_source() {
+    for returned in [
+        "return values.iterator()",
+        "val iterator<i32> it = values.iterator()\nreturn it",
+        "val iterator<i32> it = values.iterator()\nreturn move it",
+        "val iterator<i32> it = values.iterator()\nval iterator<i32> next = move it\nreturn next",
+    ] {
+        let source = format!("func iterator<i32> make = () -> {{\nval array<i32> values = [1]\n{returned}\n}}\nfunc i32 main = () -> {{ val iterator<i32> it = make()\nfor i32 item in it {{ println item }}\nreturn 0 }}");
+        let error = fail(&source);
+        assert!(error.msg.contains("源数组 loan") && error.msg.contains("local owner"), "{}", error.msg);
+    }
+}
+
+#[test]
+fn iterator_return_uses_the_reaching_source_after_replacement() {
+    let source = r#"
+val array<i32> shared = [7]
+func iterator<i32> make = () -> {
+    val array<i32> local = [1]
+    var iterator<i32> it = local.iterator()
+    it = shared.iterator()
+    return it
+}
+func i32 main = () -> {
+    val iterator<i32> it = make()
+    var i32 total = 0
+    for i32 item in it { total = total + item }
+    return total
+}
+"#;
+    assert_eq!(run(source).unwrap(), 7);
+}
+
+#[test]
 fn returns_nested_inside_a_return_operand_keep_their_own_passes() {
     for source in [
         "func i32 main = () -> return match true { true -> { return 7 } false -> 9 }",

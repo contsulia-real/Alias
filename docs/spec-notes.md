@@ -482,6 +482,8 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 遍历期间集合结构已修改
 ```
 
+owned iterator return 已在函数出口检查其当前 reaching source loans：若仍依赖当前函数的动态 local owner（包括 Owned parameter），编译失败；整值 move iterator 不会延长源数组寿命。replacement 已结束的旧来源不参与出口检查。此检查不等于 caller 侧跨函数来源传播已完成。
+
 ### 8.3 `for`
 
 `for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。跨函数返回及容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。

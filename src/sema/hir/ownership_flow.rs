@@ -67,6 +67,7 @@ enum Action<'a> {
     // None starts an empty generation; Some commits the fully evaluated RHS holder.
     SetLoans(LoanHolder, Option<LoanHolder>),
     UseLoanHolder(LoanHolder),
+    EscapeLoans(LoanHolder, Span),
     Write(&'a Place, Span),
     Move(&'a Place, Span),
     Declare(BindingId),
@@ -849,13 +850,26 @@ impl<'a> GraphBuilder<'a> {
             });
             return Ok(());
         };
+        let return_holder = if matches!(value.ty(), Ty::Iterator(_))
+            && matches!(pass, ReturnPass::OwnedValue | ReturnPass::OwnedTransfer { .. })
+        {
+            let (holder, value_entry) = self.temporary_holder(entry, value.span())?;
+            let after_value = self.node(Action::Nop);
+            self.action_between(after_value, self.return_sink, Action::EscapeLoans(holder, value.span()));
+            Some((holder, value_entry, after_value))
+        } else {
+            None
+        };
+        let (entry, return_exit) = return_holder
+            .map(|(_, entry, exit)| (entry, exit))
+            .unwrap_or((entry, self.return_sink));
         match pass {
             ReturnPass::Inline | ReturnPass::OwnedValue => self.tasks.push(Task::Expr {
                 expr: value,
                 entry,
-                exit: self.return_sink,
+                exit: return_exit,
                 replacement: None,
-                capture_holder: None,
+                capture_holder: return_holder.map(|(holder, _, _)| holder),
                 loops,
             }),
             ReturnPass::OwnedTransfer { source } => {
@@ -871,9 +885,16 @@ impl<'a> GraphBuilder<'a> {
                         access: AccessKind::Read,
                     },
                 });
+                let after_move = if let Some((holder, _, _)) = return_holder {
+                    let after_move = self.node(Action::Nop);
+                    self.action_between(after_move, return_exit, Action::CarryLoans(LoanHolder::Binding(source.root_binding_id()), holder));
+                    after_move
+                } else {
+                    return_exit
+                };
                 self.action_between(
                     before_move,
-                    self.return_sink,
+                    after_move,
                     Action::Move(source, value.span()),
                 );
             }
@@ -1644,7 +1665,7 @@ fn compute_liveness(
                 next_in.insert(LoanHolder::Binding(binding));
             }
         }
-        if let Action::UseLoanHolder(holder) = graph.nodes[node_id].action {
+        if let Action::UseLoanHolder(holder) | Action::EscapeLoans(holder, _) = graph.nodes[node_id].action {
             next_in.insert(holder);
         }
         if let Action::Borrow { source, .. } = graph.nodes[node_id].action {
@@ -1801,6 +1822,14 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
         let active = active_loans(graph, facts, node_id);
         match graph.nodes[node_id].action {
             Action::Nop => {}
+            Action::EscapeLoans(_, span) => {
+                // Moving iterator state does not extend the lifetime of its borrowed array.
+                // eligible roots are this function's dynamic owners (including Owned parameters),
+                // unlike borrowed parameters/globals whose storage outlives this local frame.
+                if active.iter().any(|loan| graph.eligible.contains(&facts.sources[loan].root_binding_id())) {
+                    return Err(error(span, "iterator return 的源数组 loan 依赖即将结束生命周期的 local owner"));
+                }
+            }
             Action::Read(id, access, projected, span) => {
                 if graph.borrowed.contains(&id) {
                     if facts.reaching[node_id]
@@ -2227,6 +2256,7 @@ pub(super) fn infer_parameter_effects_for_function(
             | Action::CarryLoans(_, _)
             | Action::SetLoans(_, _)
             | Action::UseLoanHolder(_)
+            | Action::EscapeLoans(_, _)
             | Action::Declare(_)
             | Action::Reinitialize(_, _) => continue,
         };
@@ -2427,6 +2457,7 @@ pub(super) fn infer_capture_kinds_for_function(
             | Action::CarryLoans(_, _)
             | Action::SetLoans(_, _)
             | Action::UseLoanHolder(_)
+            | Action::EscapeLoans(_, _)
             | Action::Declare(_)
             | Action::Reinitialize(_, _) => continue,
         };
