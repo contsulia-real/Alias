@@ -605,6 +605,11 @@ fn collect_pass_maps(
                             }
                         }
                     }
+                    Expr::MethodCall { recv, target: MethodTarget::ArrayIterator, .. } => {
+                        let key = expr as *const Expr as usize;
+                        let mut allocate = || loan_for_site(PassSite::Receiver(key), site_loans, next_loan_id, recv.span());
+                        maps.receivers.insert(key, argument_pass(recv, ParamEffect::ReadBorrow, facts, &mut allocate)?);
+                    }
                     _ => {}
                 }
                 push_scoped_expr(&mut stack, expr, current);
@@ -624,6 +629,7 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
     let mut stack = root_mut_nodes(program);
     let mut seen_args = HashSet::new();
     let mut seen_methods = HashSet::new();
+    let mut seen_receivers = HashSet::new();
     let mut seen_iterations = HashSet::new();
     while let Some(node) = stack.pop() {
         match node {
@@ -672,6 +678,7 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
                                 invariant(expr_span, "user method target 缺少 effect fact")
                             })?);
                         seen_methods.insert(expr_key);
+                        seen_receivers.insert(expr_key);
                         for arg in args.iter_mut() {
                             let key = arg as *const CallArg as usize;
                             arg.pass =
@@ -686,11 +693,15 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
                     }
                     _ => {}
                 }
+                if let Expr::MethodCall { receiver_pass, target: MethodTarget::ArrayIterator, .. } = expr {
+                    *receiver_pass = Some(maps.receivers.get(&expr_key).cloned().ok_or_else(|| invariant(expr_span, "iterator receiver 缺少 pass fact"))?);
+                    seen_receivers.insert(expr_key);
+                }
                 push_mut_expr(&mut stack, expr);
             }
         }
     }
-    if seen_args.len() != maps.arguments.len() || seen_methods.len() != maps.methods.len() || seen_iterations.len() != maps.iterations.len() {
+    if seen_args.len() != maps.arguments.len() || seen_methods.len() != maps.methods.len() || seen_iterations.len() != maps.iterations.len() || seen_receivers.len() != maps.receivers.len() {
         return Err(invariant(
             Span::default(),
             "存在未写回的 call parameter-effect fact",
@@ -2405,6 +2416,13 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                                 invariant(arg.value.span(), "user method CallArg 缺少 pass fact")
                             })?;
                             validate_argument_pass(&arg.value, *effect, pass, &facts)?;
+                        }
+                    }
+                    Expr::MethodCall { recv, receiver_pass, args, target: MethodTarget::ArrayIterator, .. } => {
+                        let pass = receiver_pass.as_ref().ok_or_else(|| invariant(recv.span(), "iterator receiver 缺少 pass fact"))?;
+                        validate_argument_pass(recv, ParamEffect::ReadBorrow, pass, &facts)?;
+                        if args.iter().any(|arg| arg.pass.is_some()) {
+                            return Err(invariant(expr.span(), "iterator method 携带 argument pass"));
                         }
                     }
                     Expr::Call { args, .. } => {

@@ -5,6 +5,35 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn explicit_iterator_retains_the_original_array_loan_after_move() {
+    for transfer in ["", "val iterator<i32> moved = move it\n"] {
+        let iterator = if transfer.is_empty() { "it" } else { "moved" };
+        for modification in ["items.push(3)", "items = [3]", "val array<i32> taken = move items"] {
+            let source = format!("func i32 main = () -> {{\nvar array<i32> items = [1, 2]\nval iterator<i32> it = items.iterator()\n{transfer}{modification}\nfor i32 item in {iterator} {{ println item }}\nreturn 0\n}}");
+            // A runtime invalidation error cannot satisfy the static loan diagnostic below.
+            let error = fail(&source);
+            assert!(error.msg.contains("loan") || error.msg.contains("Loan"), "{}", error.msg);
+        }
+    }
+}
+
+#[test]
+fn moved_iterator_source_loan_ends_after_its_last_consumption() {
+    let source = r#"
+func i32 main = () -> {
+    val array<i32> items = [1, 2]
+    val iterator<i32> first = items.iterator()
+    val iterator<i32> second = move first
+    var i32 total = 0
+    for i32 item in second { total = total + item }
+    items.push(3)
+    return total + items.len()
+}
+"#;
+    assert_eq!(run(source).unwrap(), 6);
+}
+
+#[test]
 fn direct_array_iteration_keeps_its_source_read_loan_over_backedges() {
     for modification in ["items.push(3)", "val i32 removed = items.pop()", "items = [3]", "val array<i32> taken = move items"] {
         let source = format!("func i32 main = () -> {{ var array<i32> items = [1, 2]\nfor i32 item in items {{ {modification}\n}}\nreturn 0 }}");

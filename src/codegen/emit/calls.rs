@@ -5,7 +5,7 @@ use super::cells::{
 use super::clone::emit_deep_clone;
 use super::expr::{emit_container_value, emit_expr};
 use super::ops::{emit_abort_branch, emit_binary_values};
-use super::places::emit_place_addr;
+use super::places::{emit_place_addr, emit_place_value};
 use super::shallow::emit_shallow_clone;
 use super::strings::display_word;
 use super::value::ExprValue;
@@ -18,7 +18,7 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{
-    ArgumentPass, BinOp, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget,
+    ArgumentPass, BinOp, BorrowKind, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget,
 };
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
@@ -331,6 +331,17 @@ pub(crate) fn emit_method_call<M: Module>(
             *method_id,
         );
     }
+    if matches!(target, MethodTarget::ArrayIterator) {
+        let value = match receiver_pass {
+            Some(ArgumentPass::ReadBorrow { source, .. }) => {
+                emit_place_value(c, bcx, frame, source)?.0
+            }
+            Some(ArgumentPass::BorrowTemporary { kind: BorrowKind::Read }) => emit_expr(c, bcx, frame, recv)?,
+            _ => invariant_violation("iterator receiver 缺少 resolved read pass"),
+        };
+        let array = value.into_scalar("iterator receiver 必须是 array root");
+        return make_iterator(c, bcx, array).map(ExprValue::scalar);
+    }
     if receiver_pass.is_some() {
         invariant_violation("builtin method receiver 携带 user pass")
     }
@@ -401,12 +412,7 @@ pub(crate) fn emit_method_call<M: Module>(
             bump_array_version(bcx, rv);
             Ok(value)
         }
-        MethodTarget::ArrayIterator => {
-            let VTy::Array(_) = &svt else {
-                invariant_violation("array.iterator 目标必须保留数组类型")
-            };
-            make_iterator(c, bcx, rv).map(ExprValue::scalar)
-        }
+        MethodTarget::ArrayIterator => invariant_violation("iterator 必须消费 resolved read pass"),
         MethodTarget::User { .. } => invariant_violation("user method 必须走 canonical ABI 分支"),
     }
 }

@@ -19,8 +19,8 @@ enum AccessKind {
     Write,
 }
 
-/// Loan liveness is tied either to a named alias/closure cell or to one temporary function value
-/// consumed by an immediate call. Keeping this distinct from BindingId prevents synthetic compiler
+/// Loan liveness is tied to a named alias/closure/iterator cell or to a temporary value consumed
+/// by a call or iteration. Keeping this distinct from BindingId prevents synthetic compiler
 /// identities from leaking into the language binding graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum LoanHolder {
@@ -60,6 +60,9 @@ enum Action<'a> {
     // arguments die before invocation and misses conflicts between overlapping parameters.
     BindLoan(LoanHolder, LoanId),
     AddLoan(LoanHolder, LoanId),
+    // Transfer the referent loans, not a loan of the moved iterator cell itself.
+    // The old cell is unusable after Move; the new holder keeps the original array protected.
+    CarryLoans(LoanHolder, LoanHolder),
     UseLoanHolder(LoanHolder),
     Write(&'a Place, Span),
     Move(&'a Place, Span),
@@ -534,7 +537,7 @@ impl<'a> GraphBuilder<'a> {
                     None => super::ownership_operations::provisional_binding_operation(binding)?,
                 };
                 let after_value = self.node(Action::Nop);
-                let capture_holder = if matches!(binding.ty, Ty::Func { .. }) {
+                let capture_holder = if matches!(binding.ty, Ty::Func { .. } | Ty::Iterator(_)) {
                     self.loan_holder_bindings.insert(binding.binding_id);
                     Some(LoanHolder::Binding(binding.binding_id))
                 } else {
@@ -907,7 +910,17 @@ impl<'a> GraphBuilder<'a> {
                         ));
                     }
                 }
-                self.action_between(entry, exit, Action::Move(source, *span));
+                if matches!(expr.ty(), Ty::Iterator(_)) {
+                    if let Some(holder) = capture_holder {
+                        let after_move = self.node(Action::Nop);
+                        self.action_between(entry, after_move, Action::Move(source, *span));
+                        self.action_between(after_move, exit, Action::CarryLoans(LoanHolder::Binding(source.root_binding_id()), holder));
+                    } else {
+                        self.action_between(entry, exit, Action::Move(source, *span));
+                    }
+                } else {
+                    self.action_between(entry, exit, Action::Move(source, *span));
+                }
             }
             Expr::ReadPlace { source, .. } => self.tasks.push(Task::PlaceEval {
                 place: source,
@@ -1101,6 +1114,23 @@ impl<'a> GraphBuilder<'a> {
                 target,
                 ..
             } => {
+                if matches!(target, super::MethodTarget::ArrayIterator) {
+                    if let Some(pass) = receiver_pass {
+                        let holder = match capture_holder {
+                            Some(holder) => holder,
+                            None => {
+                                let holder = LoanHolder::Temporary(self.next_temporary_holder);
+                                self.next_temporary_holder = self.next_temporary_holder.checked_add(1)
+                                    .ok_or_else(|| error(expr.span(), "临时 iterator loan holder 数量超限"))?;
+                                holder
+                            }
+                        };
+                        self.tasks.push(Task::Argument { value: recv, pass, holder, entry, exit, loops });
+                        return Ok(());
+                    } else if self.return_passes_required {
+                        return Err(error(expr.span(), "iterator receiver 缺少 resolved argument pass"));
+                    }
+                }
                 if matches!(target, super::MethodTarget::User { .. }) {
                     let holder = LoanHolder::Temporary(self.next_temporary_holder);
                     self.next_temporary_holder = self
@@ -1528,6 +1558,10 @@ fn compute_reaching(graph: &GraphBuilder<'_>, entry: usize) -> Vec<Option<Reachi
             Action::AddLoan(binding, loan_id) => {
                 state.entry(binding).or_default().insert(loan_id);
             }
+            Action::CarryLoans(source, destination) => {
+                let loans = state.get(&source).cloned().unwrap_or_default();
+                state.entry(destination).or_default().extend(loans);
+            }
             _ => {}
         }
         for successor in &graph.nodes[node_id].successors {
@@ -1566,6 +1600,11 @@ fn compute_liveness(
             next_out.extend(live_in[*successor].iter().copied());
         }
         let mut next_in = next_out.clone();
+        if let Action::CarryLoans(source, destination) = graph.nodes[node_id].action {
+            if next_out.contains(&destination) {
+                next_in.insert(source);
+            }
+        }
         if let Action::BindLoan(binding, _) = graph.nodes[node_id].action {
             next_in.remove(&binding);
         }
@@ -1580,9 +1619,8 @@ fn compute_liveness(
         if let Action::Borrow { source, .. } = graph.nodes[node_id].action {
             let source_holder = source.root_binding_id();
             if graph.loan_holder_bindings.contains(&source_holder) {
-                // Capturing another closure uses that closure value now. Its own capture loans stay
-                // live through this creation, then active_loans follows the new loan dependency for
-                // as long as the outer closure remains live.
+                // Borrowing a loan holder uses its referents now. active_loans follows the holder's
+                // inner dependencies while the new loan remains live, including iterator sources.
                 next_in.insert(LoanHolder::Binding(source_holder));
             }
         }
@@ -1855,7 +1893,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "新 loan 与现有 live loan 冲突"));
                 }
             }
-            Action::BindLoan(_, _) | Action::AddLoan(_, _) | Action::UseLoanHolder(_) => {}
+            Action::BindLoan(_, _) | Action::AddLoan(_, _) | Action::CarryLoans(_, _) | Action::UseLoanHolder(_) => {}
             Action::Write(target, span) => {
                 let root = target.root_binding_id();
                 if graph.parameter_permissions.get(&root) == Some(&ParamEffect::ReadBorrow) {
@@ -2155,6 +2193,7 @@ pub(super) fn infer_parameter_effects_for_function(
             Action::Nop
             | Action::BindLoan(_, _)
             | Action::AddLoan(_, _)
+            | Action::CarryLoans(_, _)
             | Action::UseLoanHolder(_)
             | Action::Declare(_)
             | Action::Reinitialize(_, _) => continue,
@@ -2353,6 +2392,7 @@ pub(super) fn infer_capture_kinds_for_function(
             Action::Nop
             | Action::BindLoan(_, _)
             | Action::AddLoan(_, _)
+            | Action::CarryLoans(_, _)
             | Action::UseLoanHolder(_)
             | Action::Declare(_)
             | Action::Reinitialize(_, _) => continue,
@@ -2643,7 +2683,7 @@ fn apply_kinds(
                         recv,
                         args,
                         result,
-                        target: super::MethodTarget::User { .. },
+                        target: super::MethodTarget::User { .. } | super::MethodTarget::ArrayIterator,
                         ..
                     } => {
                         let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
