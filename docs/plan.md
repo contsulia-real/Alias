@@ -695,6 +695,16 @@ borrowed alias 的 loan kind **不由 `val` / `var` 或创建语法固定**，�
 
 loan conflict 使用第 10 节的 Place overlap 三态模型。
 
+## 11.1 Iterator 来源 loan
+
+`iterator<T>` 对其源数组建立 `ReadLoan`，不取得 array elements 的 ownership。直接遍历数组的 `for` 同样必须保持遍历所需的来源 loan。
+
+来源 loan 在最后一次实际使用后结束，按同一 CFG/NLL 与 Place overlap 规则分析；不能把 iterator 变量仍在词法作用域内当作 loan 必然存活，也不能在仍有后续消费时提前结束 loan。
+
+live 来源 loan 期间，对重叠区域的冲突修改必须在编译期拒绝，包括结构修改与 owning Place replacement；move、free、owner 生命周期结束同样服从本章已有冲突规则。不能依靠 runtime iterator invalidation 来放宽静态 ownership / borrow exclusivity。
+
+现有 iterator fail-fast 版本检查继续保留，作为原生执行边界的不变式检查；它不再是授权源码进行冲突修改的语义依据。此项是已确认的目标合同，实现状态以当前规范为准。
+
 ---
 
 # 12. Closure capture
