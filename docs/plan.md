@@ -825,6 +825,8 @@ else -> borrow(param1)
 
 这样 caller 能精确建立返回值 loan，而不需要用户书写 lifetime parameter。
 
+Owned iterator return 同样要求唯一来源：iterator 自身状态的 ownership transfer 不会消除它对源数组的 ReadLoan。若同一函数不同返回路径分别依赖不同数组来源（例如分别返回 `a.iterator()` 与 `b.iterator()`），必须静态拒绝，不能把多个可能来源合并为返回 loan 集合。函数签名及 caller-side 来源传播必须保留这一单来源合同；不能只记录 `Owned` 而丢弃 iterator 携带的来源。
+
 ## 13.3 Return ownership transfer
 
 Owned return 可以直接返回 `OwnedTemporary`。
