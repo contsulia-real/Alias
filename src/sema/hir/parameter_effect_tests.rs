@@ -7,6 +7,23 @@ fn checked(source: &str) -> super::CheckedProgram {
     crate::sema::check(program).unwrap()
 }
 
+#[test]
+fn iteration_source_pass_is_required_and_rechecked_at_the_final_gate() {
+    let source = "func i32 main = () -> { val array<i32> values = [1]\nfor i32 item in values { println item }\nreturn 0 }";
+    for missing in [true, false] {
+        let mut program = checked(source);
+        let main = top_binding(&mut program, "main");
+        let Expr::FuncLit { body, .. } = &mut main.value else { panic!("main body") };
+        let Body::Block(stmts) = body.as_mut() else { panic!("main block") };
+        let Stmt::For { source_pass, .. } = &mut stmts[1] else { panic!("for") };
+        let Some(ArgumentPass::ReadBorrow { loan_id, source }) = source_pass.take() else { panic!("read loan") };
+        if !missing {
+            *source_pass = Some(ArgumentPass::WriteBorrow { loan_id, source });
+        }
+        assert!(validate_resolved_hir(&program).is_err());
+    }
+}
+
 fn top_binding<'a>(program: &'a mut super::CheckedProgram, name: &str) -> &'a mut super::Binding {
     program
         .items

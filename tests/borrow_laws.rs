@@ -5,6 +5,34 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn direct_array_iteration_keeps_its_source_read_loan_over_backedges() {
+    for modification in ["items.push(3)", "val i32 removed = items.pop()", "items = [3]", "val array<i32> taken = move items"] {
+        let source = format!("func i32 main = () -> {{ var array<i32> items = [1, 2]\nfor i32 item in items {{ {modification}\n}}\nreturn 0 }}");
+        let error = fail(&source);
+        assert!(error.msg.contains("loan") || error.msg.contains("Loan"), "{}", error.msg);
+    }
+}
+
+#[test]
+fn direct_array_iteration_releases_its_loan_and_allows_disjoint_writes() {
+    let source = r#"
+struct pair { val array<i32> left = [1, 2] val array<i32> right = [] }
+func i32 main = () -> {
+    val pair values = pair()
+    var i32 total = 0
+    for i32 item in values.left {
+        values.right.push(item)
+        total = total + item
+        continue
+    }
+    values.left.push(3)
+    return total + values.left.len() + values.right.len()
+}
+"#;
+    assert_eq!(run(source).unwrap(), 8);
+}
+
+#[test]
 fn pattern_binding_is_an_independent_owner_for_local_loans() {
     for (subject, arms) in [
         ("'abc'", "item -> { val string alias = borrow item\nval i32 size = alias.len()\nval string taken = move item\nreturn size + taken.len() }"),

@@ -173,6 +173,7 @@ pub(crate) enum Stmt {
         ty: Ty,
         element_plan: DeepClonePlan,
         iterable: Expr,
+        source_pass: Option<ArgumentPass>,
         body: Vec<Stmt>,
         span: Span,
     },

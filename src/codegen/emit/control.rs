@@ -224,6 +224,7 @@ pub(crate) fn emit_stmt<M: Module>(
             ty,
             element_plan,
             iterable,
+            source_pass,
             body,
             span,
             ..
@@ -235,6 +236,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 frame,
                 (
                     iterable,
+                    source_pass.as_ref().unwrap_or_else(|| invariant_violation("for source 缺少 resolved pass")),
                     *binding_id,
                     body,
                     &elem_vty,
@@ -396,6 +398,7 @@ fn emit_for<M: Module>(
     frame: &mut Frame,
     input: (
         &Expr,
+        &crate::sema::hir::ArgumentPass,
         BindingId,
         &[Stmt],
         &VTy,
@@ -404,11 +407,14 @@ fn emit_for<M: Module>(
         Block,
     ),
 ) -> AliasResult<()> {
-    let (iterable, binding_id, body, elem_vty, element_plan, span, ret_block) = input;
+    let (iterable, source_pass, binding_id, body, elem_vty, element_plan, span, ret_block) = input;
     ensure_current(bcx, frame);
     let source_vty = c.vty(iterable.ty());
-    let source = emit_expr(c, bcx, frame, iterable)?
-        .into_scalar("for iterable 尚未支持 multi-lane source");
+    let source = match source_pass {
+        crate::sema::hir::ArgumentPass::ReadBorrow { source, .. } => emit_place_value(c, bcx, frame, source)?.0,
+        crate::sema::hir::ArgumentPass::BorrowTemporary { kind: crate::sema::hir::BorrowKind::Read } => emit_expr(c, bcx, frame, iterable)?,
+        _ => invariant_violation("for source 必须是 resolved ReadBorrow"),
+    }.into_scalar("for iterable 尚未支持 multi-lane source");
     let iter = match source_vty {
         VTy::Array(_) => make_iterator(c, bcx, source)?,
         VTy::Iterator(_) => source,

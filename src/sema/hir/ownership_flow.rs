@@ -48,7 +48,7 @@ enum Action<'a> {
     Nop,
     Read(BindingId, AccessKind, bool, Span),
     CloneRead(&'a Place, Span),
-    ProjectedRead(&'a Expr, Span),
+    ProjectedAccess(&'a Expr, AccessKind, Span),
     Borrow {
         loan_id: LoanId,
         source: &'a Place,
@@ -724,8 +724,13 @@ impl<'a> GraphBuilder<'a> {
                 });
                 self.edge(body_exit, header);
             }
-            Stmt::For { binding_id, ty, iterable, body, .. } => {
-                let header = self.node(Action::Nop);
+            Stmt::For { binding_id, ty, iterable, source_pass, body, .. } => {
+                let holder = LoanHolder::Temporary(self.next_temporary_holder);
+                self.next_temporary_holder = self.next_temporary_holder.checked_add(1)
+                    .ok_or_else(|| error(iterable.span(), "iteration loan holder 数量超限"))?;
+                // Every header visit consumes the next element. Backward liveness therefore
+                // keeps the source loan over loop backedges, but not beyond its final use.
+                let header = self.node(Action::UseLoanHolder(holder));
                 let body_exit = self.node(Action::Nop);
                 // Each iteration constructs a fresh owning element copy. Initialization belongs
                 // on the taken-body edge, not before the loop: a previous iteration's move must
@@ -739,14 +744,14 @@ impl<'a> GraphBuilder<'a> {
                 } else {
                     header
                 };
-                self.tasks.push(Task::Expr {
-                    expr: iterable,
-                    entry,
-                    exit: header,
-                    replacement: None,
-                    capture_holder: None,
-                    loops,
-                });
+                if let Some(pass) = source_pass {
+                    self.tasks.push(Task::Argument { value: iterable, pass, holder, entry, exit: header, loops });
+                } else {
+                    if self.return_passes_required {
+                        return Err(error(iterable.span(), "内部 sema 不变式被破坏: for source 缺少 pass"));
+                    }
+                    self.tasks.push(Task::Expr { expr: iterable, entry, exit: header, replacement: None, capture_holder: None, loops });
+                }
                 self.edge(header, exit);
                 self.tasks.push(Task::Stmts {
                     stmts: body,
@@ -1156,12 +1161,12 @@ impl<'a> GraphBuilder<'a> {
                         self.action_between(
                             after_indices,
                             after_receiver,
-                            Action::Read(
+                            if self.borrowed.contains(&id) { Action::Read(
                                 id,
                                 AccessKind::Write,
                                 !matches!(recv.as_ref(), Expr::Ident(..)),
                                 span,
-                            ),
+                            ) } else { Action::ProjectedAccess(recv, AccessKind::Write, span) },
                         );
                         self.expression_sequence(
                             args.iter().map(|arg| &arg.value).collect(),
@@ -1192,7 +1197,7 @@ impl<'a> GraphBuilder<'a> {
                             self.action_between(
                                 entry,
                                 exit,
-                                Action::ProjectedRead(expr, expr.span()),
+                                Action::ProjectedAccess(expr, AccessKind::Read, expr.span()),
                             );
                         }
                     } else {
@@ -1245,7 +1250,7 @@ impl<'a> GraphBuilder<'a> {
                         self.action_between(
                             after_index,
                             exit,
-                            Action::ProjectedRead(expr, expr.span()),
+                            Action::ProjectedAccess(expr, AccessKind::Read, expr.span()),
                         );
                     }
                 } else {
@@ -1781,22 +1786,25 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                     return Err(error(span, "owner read 与 live WriteLoan 冲突"));
                 }
             }
-            Action::ProjectedRead(expr, span) => {
+            Action::ProjectedAccess(expr, access, span) => {
                 let source = super::expr_places::from_expr(expr).ok_or_else(|| {
                     error(
                         span,
-                        "内部 sema 不变式被破坏: ProjectedRead 无法恢复 resolved Place",
+                        "内部 sema 不变式被破坏: ProjectedAccess 无法恢复 resolved Place",
                     )
                 })?;
                 let root = source.root_binding_id();
                 if state.moved.contains(&root) {
                     return Err(error(span, "值已被 move，重新初始化前不能读取"));
                 }
+                if access == AccessKind::Write && graph.parameter_permissions.get(&root) == Some(&ParamEffect::ReadBorrow) {
+                    return Err(error(span, "parameter write 超出 ReadBorrow effect"));
+                }
                 if active.iter().any(|loan_id| {
                     loan_overlaps(facts, *loan_id, &source)
-                        && facts.kinds[loan_id] == BorrowKind::Write
+                        && (access == AccessKind::Write || facts.kinds[loan_id] == BorrowKind::Write)
                 }) {
-                    return Err(error(span, "owner read 与 live WriteLoan 冲突"));
+                    return Err(error(span, "owner access 与 live loan 冲突"));
                 }
             }
             Action::Borrow {
@@ -2109,16 +2117,16 @@ pub(super) fn infer_parameter_effects_for_function(
                 },
             ),
             Action::CloneRead(source, _) => (source.root_binding_id(), ParamEffect::ReadBorrow),
-            Action::ProjectedRead(expr, _) => (
+            Action::ProjectedAccess(expr, access, _) => (
                 super::expr_places::from_expr(expr)
                     .ok_or_else(|| {
                         error(
                             expr.span(),
-                            "内部 sema 不变式被破坏: ProjectedRead 无法恢复 parameter Place",
+                            "内部 sema 不变式被破坏: ProjectedAccess 无法恢复 parameter Place",
                         )
                     })?
                     .root_binding_id(),
-                ParamEffect::ReadBorrow,
+                if access == AccessKind::Write { ParamEffect::WriteBorrow } else { ParamEffect::ReadBorrow },
             ),
             Action::Borrow {
                 loan_id, source, ..
@@ -2319,16 +2327,16 @@ pub(super) fn infer_capture_kinds_for_function(
                 },
             ),
             Action::CloneRead(source, _) => (source.root_binding_id(), BorrowKind::Read),
-            Action::ProjectedRead(expr, _) => (
+            Action::ProjectedAccess(expr, access, _) => (
                 super::expr_places::from_expr(expr)
                     .ok_or_else(|| {
                         error(
                             expr.span(),
-                            "内部 sema 不变式被破坏: ProjectedRead 无法恢复 capture Place",
+                            "内部 sema 不变式被破坏: ProjectedAccess 无法恢复 capture Place",
                         )
                     })?
                     .root_binding_id(),
-                BorrowKind::Read,
+                if access == AccessKind::Write { BorrowKind::Write } else { BorrowKind::Read },
             ),
             Action::Borrow {
                 loan_id, source, ..
@@ -2604,7 +2612,12 @@ fn apply_kinds(
     let mut seen = HashSet::new();
     while let Some(node) = stack.pop() {
         match node {
-            MutNode::Stmt(stmt) => push_stmt_mut(&mut stack, stmt),
+            MutNode::Stmt(stmt) => {
+                if let Stmt::For { iterable, source_pass: Some(pass), .. } = stmt {
+                    record_argument_loan(pass, iterable.span(), kinds, &mut seen)?;
+                }
+                push_stmt_mut(&mut stack, stmt);
+            }
             MutNode::Expr(expr) => {
                 let expr_span = expr.span();
                 match expr {

@@ -445,6 +445,7 @@ fn argument_pass(
 enum PassSite {
     Argument(usize),
     Receiver(usize),
+    Iteration(usize),
 }
 
 #[derive(Default)]
@@ -454,6 +455,7 @@ struct PassMaps {
     // containers; a future HIR rewrite must introduce stable node IDs before changing that order.
     arguments: HashMap<usize, ArgumentPass>,
     receivers: HashMap<usize, ArgumentPass>,
+    iterations: HashMap<usize, ArgumentPass>,
     methods: HashMap<usize, Vec<ParamEffect>>,
 }
 
@@ -519,7 +521,14 @@ fn collect_pass_maps(
             ScopedNode::Binding(binding, current) => {
                 stack.push(ScopedNode::Expr(&binding.value, current));
             }
-            ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
+            ScopedNode::Stmt(stmt, current) => {
+                if let Stmt::For { iterable, .. } = stmt {
+                    let key = stmt as *const Stmt as usize;
+                    let mut allocate = || loan_for_site(PassSite::Iteration(key), site_loans, next_loan_id, iterable.span());
+                    maps.iterations.insert(key, argument_pass(iterable, ParamEffect::ReadBorrow, facts, &mut allocate)?);
+                }
+                push_scoped_stmt(&mut stack, stmt, current);
+            }
             ScopedNode::Expr(expr, current) => {
                 match expr {
                     Expr::Call {
@@ -615,10 +624,18 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
     let mut stack = root_mut_nodes(program);
     let mut seen_args = HashSet::new();
     let mut seen_methods = HashSet::new();
+    let mut seen_iterations = HashSet::new();
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Binding(binding) => stack.push(MutNode::Expr(&mut binding.value)),
-            MutNode::Stmt(stmt) => push_mut_stmt(&mut stack, stmt),
+            MutNode::Stmt(stmt) => {
+                let key = stmt as *const Stmt as usize;
+                if let Stmt::For { iterable, source_pass, .. } = stmt {
+                    *source_pass = Some(maps.iterations.get(&key).cloned().ok_or_else(|| invariant(iterable.span(), "for source 缺少 pass fact"))?);
+                    seen_iterations.insert(key);
+                }
+                push_mut_stmt(&mut stack, stmt);
+            }
             MutNode::Expr(expr) => {
                 let expr_key = expr as *const Expr as usize;
                 let expr_span = expr.span();
@@ -673,7 +690,7 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
             }
         }
     }
-    if seen_args.len() != maps.arguments.len() || seen_methods.len() != maps.methods.len() {
+    if seen_args.len() != maps.arguments.len() || seen_methods.len() != maps.methods.len() || seen_iterations.len() != maps.iterations.len() {
         return Err(invariant(
             Span::default(),
             "存在未写回的 call parameter-effect fact",
@@ -2303,7 +2320,13 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 }
                 stack.push(ScopedNode::Expr(&binding.value, current));
             }
-            ScopedNode::Stmt(stmt, current) => push_scoped_stmt(&mut stack, stmt, current),
+            ScopedNode::Stmt(stmt, current) => {
+                if let Stmt::For { iterable, source_pass, .. } = stmt {
+                    let pass = source_pass.as_ref().ok_or_else(|| invariant(iterable.span(), "for source 缺少 resolved pass"))?;
+                    validate_argument_pass(iterable, ParamEffect::ReadBorrow, pass, &facts)?;
+                }
+                push_scoped_stmt(&mut stack, stmt, current);
+            }
             ScopedNode::Expr(expr, current) => {
                 let expr_key = expr as *const Expr as usize;
                 if let Ty::Func { param_effects, .. } = expr.ty() {

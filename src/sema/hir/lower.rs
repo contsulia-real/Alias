@@ -315,6 +315,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
             span,
             ..
         } => Stmt::For {
+            source_pass: None,
             binding_id: take_required(&mut facts.for_ids, key, *span, "for 循环变量 BindingId")?,
             ty: facts.fors.remove(&key).ok_or_else(|| AliasError {
                 msg: "内部 sema 不变式被破坏: for 循环变量缺少静态类型".into(),
