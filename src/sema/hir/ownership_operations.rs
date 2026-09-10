@@ -44,6 +44,9 @@ fn assignment_operation(
     value: &Expr,
     relations: &HashMap<BindingId, StorageRelation>,
 ) -> AliasResult<AssignmentOperation> {
+    if !matches!(target, Place::Local { .. }) {
+        super::borrow_contract::validate_stored_value(value)?;
+    }
     let rebinds_alias = matches!(
         target,
         Place::Local { binding_id, .. }
@@ -53,6 +56,7 @@ fn assignment_operation(
 }
 
 fn container_write(value: &Expr) -> AliasResult<OwningWrite> {
+    super::borrow_contract::validate_stored_value(value)?;
     provisional_owning_write(value)?.ok_or_else(|| {
         invariant(
             value.span(),

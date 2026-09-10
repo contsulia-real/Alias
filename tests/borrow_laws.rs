@@ -5,6 +5,32 @@ fn fail(source: &str) -> AliasError {
 }
 
 #[test]
+fn iterator_source_loan_cannot_be_stored_in_an_array_element() {
+    for storage in [
+        "val array<iterator<i32>> stored = [values.iterator()]",
+        "val array<iterator<i32>> stored = []\nstored.push(values.iterator())",
+        "val iterator<i32> it = values.iterator()\nval array<iterator<i32>> stored = [move it]",
+    ] {
+        let source = format!("func i32 main = () -> {{\nval array<i32> values = [7]\n{storage}\nvalues.push(9)\nfor i32 item in stored[0] {{ println item }}\nreturn 0\n}}");
+        let error = fail(&source);
+        assert!(error.msg.contains("stored borrow"), "{}", error.msg);
+    }
+}
+
+#[test]
+fn iterator_source_loan_cannot_escape_through_other_owning_storage() {
+    for source in [
+        "val array<i32> values = [7]\nval iterator<i32> stored = values.iterator()\nfunc i32 main = () -> return 0",
+        "func i32 main = () -> { val array<i32> values = [7]\nval result<iterator<i32>, i32> stored = ok(values.iterator())\nreturn 0 }",
+        "struct holder { val iterator<i32> cursor }\nfunc i32 main = () -> { val array<i32> values = [7]\nval holder stored = holder(cursor = values.iterator())\nreturn 0 }",
+        "val array<i32> values = [7]\nstruct holder { val iterator<i32> cursor = values.iterator() }\nfunc i32 main = () -> return 0",
+    ] {
+        let error = fail(source);
+        assert!(error.msg.contains("stored borrow"), "{}\n{source}", error.msg);
+    }
+}
+
+#[test]
 fn iterator_replacement_switches_source_loans_without_retaining_old_generations() {
     for replacement in [
         "it = right.iterator()",

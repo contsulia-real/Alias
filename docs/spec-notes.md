@@ -188,7 +188,7 @@ source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化；显式 iterator 的源数组 loan 传播仍未完成。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -468,6 +468,7 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 - `pop()` 返回元素，空数组中止；
 - `iterator()` 返回 `iterator<T>`；
 - `iterator<T>` 当前不支持显式 clone/shallow；
+- iterator 虽拥有自身状态，仍携带源数组的 non-owning loan，不能写入 struct field、array element、result payload 或 global storage；整值 move 不豁免 stored borrow 禁令，local binding、参数及唯一来源返回仍允许；
 - 数组值显示为 `<array>`。
 
 当前元素 runtime 载荷槽统一为 8 字节 word；具体静态类型与 ABI 装箱/拆箱由 `abi.rs` 负责。这是当前实现事实，不覆盖 `docs/plan.md` 已冻结的未来 typed stride 目标。
@@ -482,13 +483,13 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 遍历期间集合结构已修改
 ```
 
-owned iterator return 已在函数出口检查其当前 reaching source loans：若仍依赖当前函数的动态 local owner（包括 Owned array parameter），编译失败；整值 move iterator 不会延长源数组寿命。replacement 已结束的旧来源不参与出口检查。array parameter 创建 iterator 后返回、函数间转发该返回值、以及转移 Owned iterator 参数后返回，已接入携带唯一来源的 Owned 返回签名与 caller loan holder；调用方在结果最后一次使用前的冲突修改静态拒绝，无关实参的来源 loan 不随返回值延长。容器内来源传播尚未闭合。
+owned iterator return 已在函数出口检查其当前 reaching source loans：若仍依赖当前函数的动态 local owner（包括 Owned array parameter），编译失败；整值 move iterator 不会延长源数组寿命。replacement 已结束的旧来源不参与出口检查。array parameter 创建 iterator 后返回、函数间转发该返回值、以及转移 Owned iterator 参数后返回，已接入携带唯一来源的 Owned 返回签名与 caller loan holder；调用方在结果最后一次使用前的冲突修改静态拒绝，无关实参的来源 loan 不随返回值延长。iterator 不允许进入普通持久容器。
 
 ### 8.3 `for`
 
 函数出口对已解析的 iterator 来源 loans 执行单来源检查：不同返回出口或分支汇合后的不同数组来源均静态拒绝。相同 root 与相同完整 projection 可以统一（包括不同源码位置的相同常量下标）；仅重叠、ancestor 或无法证明相同的动态下标不能据此当成同一数组。Owned iterator 参数在 callee 内携带独立的 incoming 来源身份，局部 move/replacement 保留该身份；不同路径返回不同 Owned iterator 参数同样拒绝。该 incoming 身份经返回签名映射为 caller 对应 Owned 实参携带的来源，而不是对已转移的 iterator cell 建立新借用。
 
-`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。
+`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。iterator 进入普通容器的写入按 stored borrow 禁令拒绝；完整 destruction 尚未落地。runtime fail-fast 检查保留。
 
 当前集合迭代语法：
 
@@ -500,7 +501,7 @@ for T item in iterable {
 
 - iterable 当前接受 `array<T>` 或 `iterator<T>`；
 - 循环变量为不可重新绑定的隐式 `val`；
-- 每轮循环变量是新初始化的 owning binding；动态元素副本可被借用或整值 move，同一轮 move 后不能再读，下一轮会恢复新副本的 capability，`continue` 也遵守该规则；显式 iterator 的源数组 loan 传播仍未完整落地；
+- 每轮循环变量是新初始化的 owning binding；动态元素副本可被借用或整值 move，同一轮 move 后不能再读，下一轮会恢复新副本的 capability，`continue` 也遵守该规则；显式 iterator 的来源 loan 覆盖 local/move/call/return，持久容器写入被拒绝；
 - 旧 condition-for 与 C 风格 for 均不存在；条件循环使用 `while`。
 
 ---
@@ -804,7 +805,7 @@ line / col / len
 - 标量作为 user-level shallow 根；
 - `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
-- iterator 容器内的完整源数组 loan 传播；
+- stored iterator/source-loan 对象图（v1 禁止，不作为待实现能力）；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；

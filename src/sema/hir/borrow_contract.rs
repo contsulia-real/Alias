@@ -1,6 +1,6 @@
-//! Final-HIR containment rules for borrowed values and alias slots.
+//! Final-HIR containment rules for borrowed values, alias slots, and loan-carrying iterators.
 //!
-//! Loan liveness owns conflict timing. This module owns where a BorrowedValue may be stored or
+//! Loan liveness owns conflict timing. This module owns where a loan-carrying value may be stored or
 //! passed at all, so codegen never has to guess whether a machine word is a value or an address.
 
 use super::{
@@ -20,6 +20,16 @@ fn error(span: Span, msg: impl Into<String>) -> AliasError {
         msg: msg.into(),
         span,
     }
+}
+
+pub(super) fn validate_stored_value(value: &Expr) -> AliasResult<()> {
+    // An iterator owns its cursor state, not its array. Moving the cursor into
+    // an owning object would still persist a non-owning edge, forbidden by the
+    // stored-borrow contract even when the expression is an OwnedTemporary.
+    if matches!(value.ty(), crate::sema::types::Ty::Iterator(_)) {
+        return Err(error(value.span(), "iterator 来源 loan 不能作为 stored borrow 保存进字段、容器或 global storage"));
+    }
+    Ok(())
 }
 
 fn push_place_indices<'a>(stack: &mut Vec<Node<'a>>, place: &'a Place) {
@@ -285,6 +295,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     for item in program.items.iter().rev() {
         match item {
             Item::Binding(binding) => {
+                validate_stored_value(&binding.value)?;
                 if binding.relation == Some(StorageRelation::Borrowed) {
                     return Err(error(
                         binding.span,
