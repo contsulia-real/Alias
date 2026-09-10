@@ -7,6 +7,7 @@ pub(super) mod calls;
 pub(super) mod cells;
 pub(super) mod clone;
 pub(super) mod control;
+pub(super) mod destruction;
 pub(super) mod expr;
 pub(super) mod ops;
 pub(super) mod places;

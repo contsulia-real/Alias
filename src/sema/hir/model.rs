@@ -153,6 +153,8 @@ pub(crate) enum Stmt {
         target: Place,
         value: Expr,
         operation: Option<AssignmentOperation>,
+        previous_owner: Option<PreviousOwner>,
+        destroy_plan: Option<Box<super::DestroyPlan>>,
     },
     Expr {
         expr: Expr,
@@ -383,6 +385,16 @@ pub(crate) enum OwningWrite {
 pub(crate) enum AssignmentOperation {
     Replace(OwningWrite),
     RebindBorrowedAlias,
+}
+
+/// Program-point fact for replacement. MaybeMoved needs an explicit runtime
+/// presence flag, never a test of the old payload's machine bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviousOwner {
+    Unreachable,
+    None,
+    Live,
+    MaybeMoved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

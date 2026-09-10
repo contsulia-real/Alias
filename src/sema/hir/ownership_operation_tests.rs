@@ -1,5 +1,5 @@
 use super::{
-    AssignmentOperation, BindingOperation, Body, Expr, Item, OwningWrite, Stmt,
+    AssignmentOperation, BindingOperation, Body, Expr, Item, OwningWrite, PreviousOwner, Stmt,
     validate_resolved_hir,
 };
 
@@ -15,6 +15,79 @@ func i32 main = () -> {
     return object.item.value + items.len()
 }
 "#;
+
+#[test]
+fn replacement_destruction_plan_is_resolved_and_validated() {
+    use super::destruction::DestroyNode;
+    let source = r#"
+struct bucket { var array<string> values = ['old'] }
+func i32 main = () -> {
+    var bucket value = bucket()
+    value = bucket()
+    return 0
+}
+"#;
+    let ast = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+    let mut program = crate::sema::check(ast).unwrap();
+    let Item::Binding(main) = &mut program.items[1] else { panic!("main") };
+    let Expr::FuncLit { body, .. } = &mut main.value else { panic!("function") };
+    let Body::Block(stmts) = body.as_mut() else { panic!("body") };
+    let Stmt::Assign { destroy_plan, .. } = &mut stmts[1] else { panic!("replacement") };
+    let plan = destroy_plan.as_mut().expect("resolved recipe");
+    assert_eq!(plan.nodes, vec![
+        DestroyNode::Struct { name: "bucket".into(), fields: vec![1] },
+        DestroyNode::Array { element: 2 },
+        DestroyNode::String,
+    ]);
+    plan.nodes[2] = DestroyNode::Inline;
+    let error = validate_resolved_hir(&program).expect_err("lost child destruction must fail closed");
+    assert!(error.msg.contains("destruction plan"), "{}", error.msg);
+}
+
+#[test]
+fn replacement_previous_owner_is_a_converged_cfg_fact() {
+    let source = "func i32 main = () -> { var string value = 'old'\nif true { val string moved = move value }\nvalue = 'new'\nvalue = value\nreturn value.len() }";
+    let ast = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+    let mut program = crate::sema::check(ast).unwrap();
+    let Item::Binding(main) = &mut program.items[0] else { panic!("main") };
+    let Expr::FuncLit { body, .. } = &mut main.value else { panic!("function") };
+    let Body::Block(stmts) = body.as_mut() else { panic!("body") };
+    let Stmt::Assign { previous_owner, .. } = &stmts[3] else { panic!("self assignment") };
+    assert_eq!(*previous_owner, Some(PreviousOwner::Live));
+    let Stmt::Assign { previous_owner, .. } = &mut stmts[2] else { panic!("reinitialization") };
+    assert_eq!(*previous_owner, Some(PreviousOwner::MaybeMoved));
+    *previous_owner = Some(PreviousOwner::Live);
+    let error = validate_resolved_hir(&program).expect_err("lost move predecessor must fail closed");
+    assert!(error.msg.contains("previous-owner fact"), "{}", error.msg);
+}
+
+#[test]
+fn replacement_previous_owner_includes_loop_backedges() {
+    let source = r#"
+func i32 main = () -> {
+    var string value = 'old'
+    var i32 count = 0
+    while count < 2 {
+        value = 'new'
+        val string taken = move value
+        count = count + 1
+    }
+    return count
+}
+"#;
+    let ast = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+    let mut program = crate::sema::check(ast).unwrap();
+    let Item::Binding(main) = &mut program.items[0] else { panic!("main") };
+    let Expr::FuncLit { body, .. } = &mut main.value else { panic!("function") };
+    let Body::Block(stmts) = body.as_mut() else { panic!("body") };
+    let Stmt::While { body, .. } = &mut stmts[2] else { panic!("loop") };
+    let Stmt::Assign { previous_owner, .. } = &mut body[0] else { panic!("replacement") };
+    // The entry edge owns 'old'; the backedge has transferred 'new'.
+    assert_eq!(*previous_owner, Some(PreviousOwner::MaybeMoved));
+    *previous_owner = None;
+    let error = validate_resolved_hir(&program).expect_err("missing loop fact must fail closed");
+    assert!(error.msg.contains("previous-owner fact"), "{}", error.msg);
+}
 
 fn container_initializers(program: &mut super::CheckedProgram) -> Vec<&mut Expr> {
     let mut values = Vec::new();

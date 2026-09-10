@@ -4,7 +4,10 @@ use super::arrays::{
 use super::clone::emit_deep_clone_value;
 use super::cells::{emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
-use super::places::{emit_place_addr, emit_place_value, emit_place_write};
+use super::destruction::{
+    emit_destroy_value, mark_owner_present, owner_presence, track_owner_present,
+};
+use super::places::{emit_place_addr, emit_place_value};
 use super::value::ExprValue;
 use crate::codegen::abi::{norm_store, UserReturnPassing, VTy};
 use crate::codegen::funcgen::emit_funclit_value_typed;
@@ -13,7 +16,8 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
-    AssignmentOperation, BindKind, BindingId, Body, Expr, ReturnPass, Stmt, StorageRelation,
+    AssignmentOperation, BindKind, BindingId, BindingOperation, Body, Expr, OwningWrite,
+    PreviousOwner, ReturnPass, Stmt, StorageRelation,
 };
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -114,9 +118,10 @@ pub(crate) fn emit_stmt<M: Module>(
 ) -> AliasResult<()> {
     match s {
         Stmt::Binding(b) => {
-            let relation = Some(b.operation.unwrap_or_else(|| {
+            let binding_operation = b.operation.unwrap_or_else(|| {
                 invariant_violation("binding 初始化缺少 resolved BindingOperation")
-            }).storage_relation());
+            });
+            let relation = Some(binding_operation.storage_relation());
             if b.kind == BindKind::Func {
                 let Expr::FuncLit {
                     params,
@@ -155,12 +160,19 @@ pub(crate) fn emit_stmt<M: Module>(
                 let v = emit_expr(c, bcx, frame, &b.value)?;
                 emit_local_cell(c, bcx, frame, v, vty, b.binding_id, relation)?;
             }
+            if b.kind == BindKind::Var
+                && binding_operation == BindingOperation::Initialize(OwningWrite::OwnershipTransfer)
+            {
+                track_owner_present(bcx, frame, b.binding_id);
+            }
             Ok(())
         }
         Stmt::Assign {
             target,
             value,
             operation,
+            previous_owner,
+            destroy_plan,
         } => {
             // The frozen operation owns replacement-vs-rebind semantics. Runtime order still has
             // to evaluate the complete RHS before the target projection; reversing it would make
@@ -168,7 +180,18 @@ pub(crate) fn emit_stmt<M: Module>(
             let operation = operation.unwrap_or_else(|| {
                 invariant_violation("assignment 缺少 resolved ownership operation")
             });
+            let previous_owner = previous_owner.unwrap_or_else(|| {
+                invariant_violation("assignment 缺少程序点 previous-owner fact")
+            });
+            let destroy_plan = destroy_plan.as_deref().unwrap_or_else(|| {
+                invariant_violation("assignment 缺少 resolved destruction plan")
+            });
             let value = emit_expr(c, bcx, frame, value)?;
+            // A match RHS may return from every arm. Its placeholder carrier is not a prepared
+            // owner and the current block already has a terminator, so no target work may follow.
+            if frame.terminated {
+                return Ok(());
+            }
             if operation == AssignmentOperation::RebindBorrowedAlias {
                 let crate::sema::hir::Place::Local { binding_id, .. } = target else {
                     invariant_violation("borrowed alias rebind target 必须是 local Place")
@@ -184,7 +207,37 @@ pub(crate) fn emit_stmt<M: Module>(
                 value.store(bcx, cell, 0, &cell_vty);
                 return Ok(());
             }
-            emit_place_write(c, bcx, frame, target, value)
+            // Materialize the target once after the complete RHS. Destruction can free the old
+            // value graph, so recomputing a projecting target afterwards would be invalid.
+            let (address, vty) = emit_place_addr(c, bcx, frame, target)?;
+            let destroy_old = |c: &mut Compiler<M>, bcx: &mut FunctionBuilder| {
+                let old = ExprValue::load(bcx, address, 0, &vty);
+                emit_destroy_value(c, bcx, old, vty.clone(), destroy_plan)
+            };
+            match previous_owner {
+                PreviousOwner::Live => destroy_old(c, bcx)?,
+                PreviousOwner::MaybeMoved => {
+                    let crate::sema::hir::Place::Local { binding_id, .. } = target else {
+                        invariant_violation("MaybeMoved replacement 必须指向完整 local")
+                    };
+                    let destroy = bcx.create_block();
+                    let commit = bcx.create_block();
+                    let present = owner_presence(bcx, frame, *binding_id);
+                    bcx.ins().brif(present, destroy, &[], commit, &[]);
+                    bcx.seal_block(destroy);
+                    bcx.switch_to_block(destroy);
+                    destroy_old(c, bcx)?;
+                    bcx.ins().jump(commit, &[]);
+                    bcx.seal_block(commit);
+                    bcx.switch_to_block(commit);
+                }
+                PreviousOwner::None | PreviousOwner::Unreachable => {}
+            }
+            value.store(bcx, address, 0, &vty);
+            if let crate::sema::hir::Place::Local { binding_id, .. } = target {
+                mark_owner_present(bcx, frame, *binding_id);
+            }
+            Ok(())
         }
         Stmt::Expr { expr, .. } => {
             emit_expr(c, bcx, frame, expr)?;

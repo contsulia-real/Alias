@@ -7,7 +7,7 @@
 use super::{
     place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, BindingOperation, Body, BorrowKind,
     CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwnedReturnLoan, OwningWrite, PatternBindingOperation,
-    Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt, StrPart,
+    Place, PlaceRelation, PreviousOwner, ResolvedConversion, ReturnPass, Stmt, StrPart,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -72,6 +72,7 @@ enum Action<'a> {
     Move(&'a Place, Span),
     Declare(BindingId),
     Reinitialize(BindingId, Span),
+    Replacement(&'a Place, bool, &'a Option<PreviousOwner>),
 }
 
 struct Node<'a> {
@@ -643,6 +644,8 @@ impl<'a> GraphBuilder<'a> {
                 target,
                 value,
                 operation,
+                previous_owner,
+                ..
             } => {
                 let provisional_rebind = matches!(
                     target,
@@ -656,7 +659,13 @@ impl<'a> GraphBuilder<'a> {
                     )?,
                 };
                 let after_value = self.node(Action::Nop);
+                let before_replacement = self.node(Action::Nop);
                 let after_place = self.node(Action::Nop);
+                self.action_between(before_replacement, after_place, Action::Replacement(
+                    target,
+                    operation == Some(AssignmentOperation::RebindBorrowedAlias),
+                    previous_owner,
+                ));
                 let (replacement_holder, value_entry) = if matches!(target, Place::Local { .. })
                     && matches!(target.ty(), Ty::Iterator(_))
                     && operation == Some(AssignmentOperation::Replace(OwningWrite::OwnershipTransfer))
@@ -677,7 +686,7 @@ impl<'a> GraphBuilder<'a> {
                 self.tasks.push(Task::PlaceEval {
                     place: target,
                     entry: after_value,
-                    exit: after_place,
+                    exit: before_replacement,
                     loops,
                     mode: PlaceEvalMode {
                         read_root: false,
@@ -1887,7 +1896,10 @@ fn unique_return_origin(
     Ok(result)
 }
 
-fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -> AliasResult<()> {
+fn run_dataflow(
+    graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>,
+    previous_owners: &mut HashMap<usize, PreviousOwner>, verify_declared: bool,
+) -> AliasResult<()> {
     let mut inputs: Vec<Option<OwnershipState>> = vec![None; graph.nodes.len()];
     inputs[entry] = Some(OwnershipState::default());
     let mut queue = VecDeque::from([entry]);
@@ -2099,10 +2111,26 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
                 }
                 state.initialize(id);
             }
+            Action::Replacement(..) => {}
         }
         continue_state(&mut inputs, &mut queue, graph, node_id, &state);
     }
     unique_return_origin(graph, facts)?;
+    // Inspect converged inputs, not an intermediate worklist visit: a backedge
+    // or a later predecessor can turn a Live target into a may-be-moved target.
+    for (index, node) in graph.nodes.iter().enumerate() {
+        let Action::Replacement(target, rebind, slot) = node.action else { continue };
+        let expected = match &inputs[index] {
+            None => PreviousOwner::Unreachable,
+            Some(_) if rebind || !dynamic_owner(target.ty()) => PreviousOwner::None,
+            Some(state) if matches!(target, Place::Local { binding_id, .. } if state.moved.contains(binding_id)) => PreviousOwner::MaybeMoved,
+            Some(_) => PreviousOwner::Live,
+        };
+        if verify_declared && *slot != Some(expected) {
+            return Err(error(target.span(), "内部 sema 不变式被破坏: replacement previous-owner fact 漂移"));
+        }
+        previous_owners.insert(slot as *const Option<PreviousOwner> as usize, expected);
+    }
     Ok(())
 }
 
@@ -2333,7 +2361,7 @@ pub(super) fn infer_parameter_effects_for_function(
             | Action::UseLoanHolder(_)
             | Action::EscapeLoans(_, _)
             | Action::Declare(_)
-            | Action::Reinitialize(_, _) => continue,
+            | Action::Reinitialize(_, _) | Action::Replacement(..) => continue,
         };
         let Some(index) = indices.get(&root) else {
             continue;
@@ -2373,6 +2401,7 @@ fn analyze_function<'a>(
     kinds: &mut HashMap<LoanId, BorrowKind>,
     global_owning: &HashSet<BindingId>,
     verify_declared: bool,
+    previous_owners: &mut HashMap<usize, PreviousOwner>,
 ) -> AliasResult<()> {
     let Expr::FuncLit { captures, body, .. } = function else {
         return Err(error(
@@ -2402,7 +2431,7 @@ fn analyze_function<'a>(
         loops: LoopTargets::default(),
     })?;
     let facts = derive_loan_facts(&builder, entry, &HashMap::new())?;
-    run_dataflow(&builder, entry, &facts)?;
+    run_dataflow(&builder, entry, &facts, previous_owners, verify_declared)?;
     merge_graph_kinds(&builder, &facts, kinds, verify_declared)?;
     queue.extend(builder.nested_functions);
     Ok(())
@@ -2413,6 +2442,7 @@ fn analyze_root_expr<'a>(
     queue: &mut Vec<&'a Expr>,
     kinds: &mut HashMap<LoanId, BorrowKind>,
     verify_declared: bool,
+    previous_owners: &mut HashMap<usize, PreviousOwner>,
 ) -> AliasResult<()> {
     if matches!(expr, Expr::FuncLit { .. }) {
         queue.push(expr);
@@ -2430,18 +2460,24 @@ fn analyze_root_expr<'a>(
         loops: LoopTargets::default(),
     })?;
     let facts = derive_loan_facts(&builder, entry, &HashMap::new())?;
-    run_dataflow(&builder, entry, &facts)?;
+    run_dataflow(&builder, entry, &facts, previous_owners, verify_declared)?;
     merge_graph_kinds(&builder, &facts, kinds, verify_declared)?;
     queue.extend(builder.nested_functions);
     Ok(())
 }
 
+struct ProgramFlowFacts {
+    kinds: HashMap<LoanId, BorrowKind>,
+    previous_owners: HashMap<usize, PreviousOwner>,
+}
+
 fn analyze_program(
     program: &CheckedProgram,
     verify_declared: bool,
-) -> AliasResult<HashMap<LoanId, BorrowKind>> {
+) -> AliasResult<ProgramFlowFacts> {
     let mut functions = Vec::new();
     let mut kinds = HashMap::new();
+    let mut previous_owners = HashMap::new();
     let mut global_owning = HashSet::new();
     for item in &program.items {
         if let Item::Binding(binding) = item {
@@ -2457,12 +2493,12 @@ fn analyze_program(
     for item in &program.items {
         match item {
             Item::Binding(binding) => {
-                analyze_root_expr(&binding.value, &mut functions, &mut kinds, verify_declared)?
+                analyze_root_expr(&binding.value, &mut functions, &mut kinds, verify_declared, &mut previous_owners)?
             }
             Item::StructDef(def) => {
                 for field in &def.fields {
                     if let Some(default) = &field.default {
-                        analyze_root_expr(default, &mut functions, &mut kinds, verify_declared)?;
+                        analyze_root_expr(default, &mut functions, &mut kinds, verify_declared, &mut previous_owners)?;
                     }
                 }
             }
@@ -2475,9 +2511,10 @@ fn analyze_program(
             &mut kinds,
             &global_owning,
             verify_declared,
+            &mut previous_owners,
         )?;
     }
-    Ok(kinds)
+    Ok(ProgramFlowFacts { kinds, previous_owners })
 }
 
 pub(super) fn infer_capture_kinds_for_function(
@@ -2558,7 +2595,7 @@ pub(super) fn infer_capture_kinds_for_function(
             | Action::UseLoanHolder(_)
             | Action::EscapeLoans(_, _)
             | Action::Declare(_)
-            | Action::Reinitialize(_, _) => continue,
+            | Action::Reinitialize(_, _) | Action::Replacement(..) => continue,
         };
         let Some(loan_id) = by_binding.get(&binding) else {
             continue;
@@ -2737,6 +2774,7 @@ fn push_expr_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) {
 fn apply_kinds(
     program: &mut CheckedProgram,
     kinds: &HashMap<LoanId, BorrowKind>,
+    previous_owners: &HashMap<usize, PreviousOwner>,
 ) -> AliasResult<()> {
     fn record_argument_loan(
         pass: &ArgumentPass,
@@ -2825,6 +2863,12 @@ fn apply_kinds(
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Stmt(stmt) => {
+                if let Stmt::Assign { target, previous_owner, .. } = stmt {
+                    let key = previous_owner as *const Option<PreviousOwner> as usize;
+                    *previous_owner = Some(*previous_owners.get(&key).ok_or_else(|| {
+                        error(target.span(), "内部 sema 不变式被破坏: replacement 缺少 CFG previous-owner fact")
+                    })?);
+                }
                 if let Stmt::For { iterable, source_pass: Some(pass), .. } = stmt {
                     record_argument_loan(pass, iterable.span(), kinds, &mut seen)?;
                 }
@@ -2925,8 +2969,8 @@ fn apply_kinds(
 
 pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
     super::capture::finalize_loan_kinds(program)?;
-    let kinds = analyze_program(program, false)?;
-    apply_kinds(program, &kinds)
+    let facts = analyze_program(program, false)?;
+    apply_kinds(program, &facts.kinds, &facts.previous_owners)
 }
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {

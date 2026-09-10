@@ -80,17 +80,3 @@ pub(super) fn emit_place_addr<M: Module>(
         }
     }
 }
-
-/// 当前 resolved Place 的唯一物理写入入口。调用者必须先完整求值 RHS，再进入这里；
-/// 本函数只消费已解析 Place 地址与 ABI storage type，不重新判断 target identity/type。
-pub(super) fn emit_place_write<M: Module>(
-    c: &mut Compiler<M>,
-    bcx: &mut FunctionBuilder,
-    frame: &mut Frame,
-    target: &Place,
-    value: ExprValue,
-) -> AliasResult<()> {
-    let (addr, vty) = emit_place_addr(c, bcx, frame, target)?;
-    value.store(bcx, addr, 0, &vty);
-    Ok(())
-}

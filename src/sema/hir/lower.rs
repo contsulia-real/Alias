@@ -239,6 +239,8 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 target,
                 value: lower_expr(value, facts)?,
                 operation: None,
+                previous_owner: None,
+                destroy_plan: None,
             }
         }
         crate::ast::Stmt::FieldAssign {
@@ -267,6 +269,8 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 },
                 value: lower_expr(value, facts)?,
                 operation: None,
+                previous_owner: None,
+                destroy_plan: None,
             }
         }
         crate::ast::Stmt::Expr { expr } => Stmt::Expr {

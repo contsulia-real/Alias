@@ -3,6 +3,7 @@
 mod binding_contract;
 mod borrow_contract;
 mod capture;
+mod destruction;
 mod expr_places;
 mod lower;
 mod model;
@@ -56,10 +57,11 @@ pub(crate) use model::{
     Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
     CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
     MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability, OwningWrite, Param, Pattern,
-    PatternBindingOperation, Place, PlaceInfo, ResolvedConversion, ReturnPass, ShallowClonePlan,
+    PatternBindingOperation, Place, PlaceInfo, PreviousOwner, ResolvedConversion, ReturnPass, ShallowClonePlan,
     Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
+pub(crate) use destruction::{DestroyNode, DestroyPlan};
 
 use crate::sema::types::Ty;
 use std::collections::HashMap;

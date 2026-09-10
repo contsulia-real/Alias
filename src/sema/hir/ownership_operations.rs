@@ -143,6 +143,7 @@ pub(super) fn provisional_assignment_operation_for(
 
 pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
     let relations = collect_binding_relations(program)?;
+    let structs = super::destruction::struct_fields(program);
     let mut stack = root_mut_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
@@ -161,6 +162,8 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                     target,
                     value,
                     operation,
+                    destroy_plan,
+                    ..
                 } = stmt
                 {
                     if operation.is_some() {
@@ -170,6 +173,9 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                         ));
                     }
                     *operation = Some(assignment_operation(target, value, &relations)?);
+                    *destroy_plan = Some(Box::new(assignment_destroy_plan(
+                        target, operation.unwrap(), &structs,
+                    )?));
                 }
                 push_mut_stmt_children(&mut stack, stmt);
             }
@@ -199,6 +205,7 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let relations = collect_binding_relations(program)?;
+    let structs = super::destruction::struct_fields(program);
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
@@ -216,9 +223,19 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     target,
                     value,
                     operation,
+                    destroy_plan,
+                    ..
                 } = stmt
                 {
                     let expected = assignment_operation(target, value, &relations)?;
+                    if destroy_plan.as_deref()
+                        != Some(&assignment_destroy_plan(target, expected, &structs)?)
+                    {
+                        return Err(invariant(
+                            target.span(),
+                            "Assignment destruction plan 缺失或漂移",
+                        ));
+                    }
                     if *operation != Some(expected) {
                         return Err(invariant(
                             target.span(),
@@ -249,6 +266,21 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
         }
     }
     Ok(())
+}
+
+fn assignment_destroy_plan(
+    target: &Place,
+    operation: AssignmentOperation,
+    structs: &HashMap<String, Vec<crate::sema::types::Ty>>,
+) -> AliasResult<super::DestroyPlan> {
+    if operation == AssignmentOperation::RebindBorrowedAlias {
+        // Rebinding never destroys the referent owned by another slot.
+        Ok(super::DestroyPlan {
+            nodes: vec![super::destruction::DestroyNode::Inline],
+        })
+    } else {
+        super::destruction::plan(target.ty(), target.span(), structs)
+    }
 }
 
 fn collect_binding_relations(

@@ -41,6 +41,9 @@ pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
     pub(crate) locals_relation: Vec<HashMap<BindingId, Option<StorageRelation>>>,
+    /// Separate owner state for reassignable dynamic locals. Moved cells retain stale bits, so
+    /// replacement destruction must never use the stored payload as a liveness flag.
+    pub(crate) owner_presence: HashMap<BindingId, Variable>,
     pub(crate) globals: Variable,
     pub(crate) env: Option<Variable>,
     pub(crate) caps: HashMap<BindingId, usize>,

@@ -149,7 +149,13 @@ codegen 只消费已解析 HIR，不得根据：
 
 `codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
 
-Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径；当前尚未落地的 destruction 只意味着 replacement 暂未释放旧资源，不授权丢失已经固化的 transfer responsibility。
+Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径。owning replacement 已按“完整 RHS → target projection → 销毁旧 owner → commit 新 owner”发射；初始化不运行 destruction，borrowed alias rebind 不销毁 referent。
+
+replacement destruction 必须区分目标仍持有旧 owner 与已 move 后重新初始化的程序点状态；旧 cell 的非零位模式不是 live-owner 证明。`destructive_codegen` 覆盖分支 move 后重赋值、整值 self-read 与字段 RHS self-read，防止后续释放把已转移资源或尚未求值的 RHS 提前破坏。
+
+`hir/destruction.rs` 是已接入 assignment 的 `DestroyPlan` 唯一 owner，以扁平 child index 固化 struct/array/result 的 owned children、string 清理与 iterator 自身状态清理；不借用 cloneability 判定，也不把 iterator 的源数组当作 owned child。`ownership_operations` 为 borrowed alias rebind 固化 Inline 空操作，final gate 独立复算并拒绝 recipe 缺失或漂移。`codegen/emit/destruction.rs` 只执行该 recipe：struct 逆声明顺序、array 逆索引、result active payload、children first / root last。
+
+赋值的 `previous_owner` 由 ownership CFG 在 RHS 与目标投影求值后的 replacement 节点固化为 `Unreachable / None / Live / MaybeMoved`；只有完整 worklist 收敛后的输入状态可用于该 fact，循环入口仍 live 而回边已经 moved 的赋值必须为 `MaybeMoved`。final gate 独立复算并拒绝缺失或漂移。codegen 为可重赋值 dynamic local 使用独立 SSA presence，Move 取值后清零、replacement commit 后置回；禁止检查保留旧 payload 的 cell 位模式。
 
 `codegen/emit/clone.rs` 同时执行显式 clone 与 owning-slot `ReadPlace` 的 resolved plan；`shallow.rs` 执行 resolved shallow plan。两者可以验证 plan 与既有物理布局的内部不变量，但不能自行判断静态类型是否允许对应操作。尤其 shallow-safe aggregate 当前即使以 heap pointer 表示，也必须建立新的独立 aggregate root；禁止简单 bit-copy pointer 后让两个语义 owner 指向同一 root。
 

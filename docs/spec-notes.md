@@ -184,7 +184,7 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。初始化不销毁旧值；destruction 与 raw allocation 初始化跟踪尚未完成。
+显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。owning replacement 已执行 resolved `DestroyPlan`，顺序为完整 RHS、target projection、旧 owner destruction、新 owner commit；初始化不销毁旧值。作用域/函数退出 destruction 与 raw allocation 初始化跟踪尚未完成。
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
@@ -211,7 +211,7 @@ move place
 - `Owned` parameter 是当前函数内的 owning local capability，因此允许 dynamic `move(parameter)` 并由 caller 显式 transfer；captured Place 与 global 的 dynamic move 仍等待各自 transfer source 固化，不会把缺失 effect 当 owning fallback；
 - `move(place)` 与 `move place` 使用同一 semantic resolution、resolved Place 和 ownership dataflow。
 
-sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。当前用户值的完整 destruction/deallocation 尚未实现，所以 move 的静态唯一性已经生效，但资源释放仍受第 18 节的当前实现限制。
+sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。可重赋值 dynamic local 另有显式 presence 状态，Move 取值后清除、replacement commit 后恢复；旧 cell 保留的位模式不表示 owner 仍 live。当前仅 replacement destruction 已执行，作用域/函数退出回收仍受第 18 节的当前实现限制。
 
 ### 3.6 局部 borrow 与 NLL loan
 
@@ -757,14 +757,15 @@ line / col / len
 
 ## 18. Runtime 与内存模型当前事实
 
-当前 runtime 已回收部分内部临时分配，但用户值的完整生命周期回收尚未落地：
+当前 runtime 已回收内部临时分配及 owning replacement 的旧值图，但用户值的完整生命周期回收尚未落地：
 
 - 绑定使用清零单元格；
 - 闭包环境保存捕获单元格指针；
 - 字符串拥有独立存储；插值内部累积值/字面量片段、整数与布尔输出包装器的格式化临时值已回收，用户字符串仍未在作用域退出时回收；
 - 数组扩容完成后释放旧 backing，不销毁迁移到新 backing 的元素；
-- struct/result/array/iterator 等对象也由原生 runtime/调用端分配并不回收；
-- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root，但当前仍不会在生命周期结束时回收这些 block。
+- owning replacement 按 resolved recipe 销毁 string、struct 逆序字段、array 逆序元素与 backing/header/wrapper、result active payload、iterator 自身状态；
+- struct/result/array/iterator 等仍 live 对象在作用域/函数退出时尚不回收；
+- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；被 replacement 替换时已回收，正常作用域退出时尚不回收。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 

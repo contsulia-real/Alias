@@ -107,7 +107,11 @@ fn emit_expr_value<M: Module>(
                 .map(ExprValue::scalar)
         }
         Expr::Move { source, .. } => {
-            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+            let (value, _) = emit_place_value(c, bcx, frame, source)?;
+            if let crate::sema::hir::Place::Local { binding_id, .. } = source.as_ref() {
+                super::destruction::mark_owner_moved(bcx, frame, *binding_id);
+            }
+            Ok(value)
         }
         Expr::Borrow { source, .. } => {
             emit_place_addr(c, bcx, frame, source)

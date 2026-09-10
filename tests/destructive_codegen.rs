@@ -2,6 +2,75 @@
 
 use alias::run;
 
+/// Destruction must consult ownership state, not stale cell bits after a move.
+/// Exercise both reaching states and self-read before committing replacement.
+#[test]
+fn replacement_preserves_transferred_resources_and_prepares_rhs_first() {
+    let src = r#"
+struct box { var string text = 'old' }
+func i32 main = () -> {
+    var i32 total = 0
+    for bool take in [true, false] {
+        var array<string> source = ['kept']
+        var array<string> destination = []
+        if take { destination = move source }
+        source = ['new']
+        if take {
+            while destination[0] != 'kept' { return 1 }
+        }
+        source = source
+        while source[0] != 'new' { return 2 }
+        val box object = box()
+        object.text = '${object.text} value'
+        while object.text != 'old value' { return 3 }
+        total = total + source.len()
+    }
+    var string repeated = 'old'
+    var i32 count = 0
+    while count < 2 {
+        repeated = 'step'
+        val string consumed = move repeated
+        count = count + consumed.len() / 4
+    }
+    repeated = 'final'
+    while repeated != 'final' { return 4 }
+    return total
+}
+"#;
+    assert_eq!(run(src).unwrap(), 2);
+}
+
+#[test]
+fn replacement_destroys_nested_active_payload_and_iterator_state() {
+    let src = r#"
+struct holder { var result<array<string>, string> payload = ok(['old']) }
+func i32 exits_during_rhs = () -> {
+    var string value = 'old'
+    value = match true {
+        true -> return 7
+        false -> 'unused'
+    }
+    return 0
+}
+func i32 main = () -> {
+    var holder value = holder()
+    value = holder(payload = err('error'))
+    value = holder(payload = ok(['live']))
+    val array<i32> left = [1]
+    val array<i32> right = [2]
+    var iterator<i32> cursor = left.iterator()
+    cursor = right.iterator()
+    var i32 total = 0
+    for i32 item in cursor { total = total + item }
+    return match value.payload {
+        ok(items) -> total + items[0].len() + exits_during_rhs()
+        err(message) -> message.len()
+    }
+}
+"#;
+    assert_eq!(run(src).unwrap(), 13);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]
