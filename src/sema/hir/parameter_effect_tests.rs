@@ -17,9 +17,9 @@ fn iterator_receiver_pass_is_required_and_rechecked_at_the_final_gate() {
         let Body::Block(stmts) = body.as_mut() else { panic!("main block") };
         let Stmt::Binding(binding) = &mut stmts[1] else { panic!("iterator binding") };
         let Expr::MethodCall { receiver_pass, .. } = &mut binding.value else { panic!("iterator creation") };
-        let Some(ArgumentPass::ReadBorrow { loan_id, source }) = receiver_pass.take() else { panic!("read loan") };
+        let Some(ArgumentPass::ReadBorrow { loan_id, source }) = receiver_pass.take().map(|pass| *pass) else { panic!("read loan") };
         if !missing {
-            *receiver_pass = Some(ArgumentPass::WriteBorrow { loan_id, source });
+            *receiver_pass = Some(Box::new(ArgumentPass::WriteBorrow { loan_id, source }));
         }
         assert!(validate_resolved_hir(&program).is_err());
     }

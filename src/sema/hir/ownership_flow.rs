@@ -6,7 +6,7 @@
 
 use super::{
     place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, BindingOperation, Body, BorrowKind,
-    CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwningWrite, PatternBindingOperation,
+    CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwnedReturnLoan, OwningWrite, PatternBindingOperation,
     Place, PlaceRelation, ResolvedConversion, ReturnPass, Stmt, StrPart,
 };
 use crate::sema::types::{ParamEffect, Ty};
@@ -357,6 +357,7 @@ impl<'a> GraphBuilder<'a> {
         &mut self,
         arguments: Vec<(&'a Expr, &'a ArgumentPass)>,
         holder: LoanHolder,
+        returned_argument: Option<(usize, LoanHolder)>,
         entry: usize,
         exit: usize,
         loops: LoopTargets,
@@ -372,14 +373,50 @@ impl<'a> GraphBuilder<'a> {
         }
         boundaries.push(exit);
         for (index, (value, pass)) in arguments.into_iter().enumerate().rev() {
+            // Only the selected Owned argument contributes contained loans to
+            // the result. The call holder also includes unrelated borrow args.
+            let argument_holder = returned_argument
+                .filter(|(selected, _)| *selected == index)
+                .map_or(holder, |(_, selected_holder)| selected_holder);
+            let argument_exit = if argument_holder != holder {
+                let carried = self.node(Action::Nop);
+                self.action_between(carried, boundaries[index + 1], Action::CarryLoans(argument_holder, holder));
+                carried
+            } else {
+                boundaries[index + 1]
+            };
             self.tasks.push(Task::Argument {
                 value,
                 pass,
-                holder,
+                holder: argument_holder,
                 entry: boundaries[index],
-                exit: boundaries[index + 1],
+                exit: argument_exit,
                 loops,
             });
+        }
+    }
+
+    fn call_result(
+        &mut self,
+        result: Option<&'a CallResult>,
+        holder: LoanHolder,
+        entry: usize,
+        exit: usize,
+        span: Span,
+        loops: LoopTargets,
+    ) {
+        match result {
+            Some(CallResult::Borrowed { loan_id, source, kind, .. }) => {
+                self.build_borrow(BorrowSpec { loan_id: *loan_id, source, declared_kind: *kind, span }, entry, exit, loops);
+            }
+            Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Read { loan_id, source })) => {
+                let borrowed = self.node(Action::Nop);
+                self.build_borrow(BorrowSpec { loan_id: *loan_id, source, declared_kind: Some(BorrowKind::Read), span }, entry, borrowed, loops);
+                self.action_between(borrowed, exit, Action::AddLoan(holder, *loan_id));
+            }
+            // Argument/receiver loans were evaluated directly into the result
+            // holder. They retain their origin, not a borrow of a moved cell.
+            _ => self.edge(entry, exit),
         }
     }
 
@@ -1115,6 +1152,10 @@ impl<'a> GraphBuilder<'a> {
                 }
                 if matches!(target, super::CallTarget::FunctionValue) {
                     let (holder, entry) = self.temporary_holder(entry, expr.span())?;
+                    let (result_holder, entry) = match capture_holder {
+                        Some(holder) => (holder, entry),
+                        None => self.temporary_holder(entry, expr.span())?,
+                    };
                     let after_callee = self.node(Action::Nop);
                     let before_call = self.node(Action::Nop);
                     let after_call = self.node(Action::Nop);
@@ -1127,29 +1168,13 @@ impl<'a> GraphBuilder<'a> {
                         loops,
                     });
                     let arguments = resolved_arguments(args, expr.span())?;
-                    self.argument_sequence(arguments, holder, after_callee, before_call, loops);
+                    let returned_argument = match result.as_deref() {
+                        Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Argument(index))) => Some((*index, result_holder)),
+                        _ => None,
+                    };
+                    self.argument_sequence(arguments, holder, returned_argument, after_callee, before_call, loops);
                     self.action_between(before_call, after_call, Action::UseLoanHolder(holder));
-                    if let Some(CallResult::Borrowed {
-                        loan_id,
-                        source,
-                        kind,
-                        ..
-                    }) = result.as_deref()
-                    {
-                        self.build_borrow(
-                            BorrowSpec {
-                                loan_id: *loan_id,
-                                source,
-                                declared_kind: *kind,
-                                span: expr.span(),
-                            },
-                            after_call,
-                            exit,
-                            loops,
-                        );
-                    } else {
-                        self.edge(after_call, exit);
-                    }
+                    self.call_result(result.as_deref(), result_holder, after_call, exit, expr.span(), loops);
                     return Ok(());
                 }
                 let mut expressions = Vec::with_capacity(args.len() + 1);
@@ -1178,6 +1203,10 @@ impl<'a> GraphBuilder<'a> {
                 }
                 if matches!(target, super::MethodTarget::User { .. }) {
                     let (holder, entry) = self.temporary_holder(entry, expr.span())?;
+                    let (result_holder, entry) = match capture_holder {
+                        Some(holder) => (holder, entry),
+                        None => self.temporary_holder(entry, expr.span())?,
+                    };
                     let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
                         error(
                             expr.span(),
@@ -1187,38 +1216,32 @@ impl<'a> GraphBuilder<'a> {
                     let after_receiver = self.node(Action::Nop);
                     let before_call = self.node(Action::Nop);
                     let after_call = self.node(Action::Nop);
+                    let receiver_holder = if matches!(result.as_deref(), Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Receiver))) {
+                        result_holder
+                    } else {
+                        holder
+                    };
+                    let receiver_exit = if receiver_holder != holder {
+                        let carried = self.node(Action::Nop);
+                        self.action_between(carried, after_receiver, Action::CarryLoans(receiver_holder, holder));
+                        carried
+                    } else { after_receiver };
                     self.tasks.push(Task::Argument {
                         value: recv,
                         pass: receiver_pass,
-                        holder,
+                        holder: receiver_holder,
                         entry,
-                        exit: after_receiver,
+                        exit: receiver_exit,
                         loops,
                     });
                     let arguments = resolved_arguments(args, expr.span())?;
-                    self.argument_sequence(arguments, holder, after_receiver, before_call, loops);
+                    let returned_argument = match result.as_deref() {
+                        Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Argument(index))) => Some((*index, result_holder)),
+                        _ => None,
+                    };
+                    self.argument_sequence(arguments, holder, returned_argument, after_receiver, before_call, loops);
                     self.action_between(before_call, after_call, Action::UseLoanHolder(holder));
-                    if let Some(CallResult::Borrowed {
-                        loan_id,
-                        source,
-                        kind,
-                        ..
-                    }) = result.as_deref()
-                    {
-                        self.build_borrow(
-                            BorrowSpec {
-                                loan_id: *loan_id,
-                                source,
-                                declared_kind: *kind,
-                                span: expr.span(),
-                            },
-                            after_call,
-                            exit,
-                            loops,
-                        );
-                    } else {
-                        self.edge(after_call, exit);
-                    }
+                    self.call_result(result.as_deref(), result_holder, after_call, exit, expr.span(), loops);
                     return Ok(());
                 }
                 if matches!(
@@ -1573,7 +1596,15 @@ impl<'a> GraphBuilder<'a> {
     }
 }
 
-type ReachingState = HashMap<LoanHolder, HashSet<LoanId>>;
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ReachingLoan {
+    Local(LoanId),
+    // An owned iterator parameter carries the caller's existing source loans. This is not a
+    // borrow of the parameter cell, and must survive moving that cell into another holder.
+    Incoming(BindingId),
+}
+
+type ReachingState = HashMap<LoanHolder, HashSet<ReachingLoan>>;
 
 fn join_reaching(target: &mut ReachingState, source: &ReachingState) -> bool {
     let mut changed = false;
@@ -1588,16 +1619,19 @@ fn join_reaching(target: &mut ReachingState, source: &ReachingState) -> bool {
 
 fn compute_reaching(graph: &GraphBuilder<'_>, entry: usize) -> Vec<Option<ReachingState>> {
     let mut inputs = vec![None; graph.nodes.len()];
-    inputs[entry] = Some(ReachingState::new());
+    inputs[entry] = Some(graph.parameter_permissions.iter().filter_map(|(id, effect)| {
+        (*effect == ParamEffect::Owned && graph.loan_holder_bindings.contains(id))
+            .then_some((LoanHolder::Binding(*id), HashSet::from([ReachingLoan::Incoming(*id)])))
+    }).collect::<ReachingState>());
     let mut queue = VecDeque::from([entry]);
     while let Some(node_id) = queue.pop_front() {
         let mut state = inputs[node_id].clone().unwrap_or_default();
         match graph.nodes[node_id].action {
             Action::BindLoan(binding, loan_id) => {
-                state.insert(binding, HashSet::from([loan_id]));
+                state.insert(binding, HashSet::from([ReachingLoan::Local(loan_id)]));
             }
             Action::AddLoan(binding, loan_id) => {
-                state.entry(binding).or_default().insert(loan_id);
+                state.entry(binding).or_default().insert(ReachingLoan::Local(loan_id));
             }
             Action::CarryLoans(source, destination) => {
                 let loans = state.get(&source).cloned().unwrap_or_default();
@@ -1751,6 +1785,9 @@ fn derive_loan_facts<'a>(
                         error(span, "borrowed binding 使用点缺少 reaching loan definition")
                     })?;
                 for loan_id in loans {
+                    let ReachingLoan::Local(loan_id) = loan_id else {
+                        return Err(error(span, "内部 sema 不变式被破坏: borrowed alias 携带 incoming ownership loans"));
+                    };
                     let kind = kinds.get_mut(loan_id).ok_or_else(|| {
                         error(span, "内部 sema 不变式被破坏: reaching LoanId 无 source")
                     })?;
@@ -1774,11 +1811,11 @@ fn derive_loan_facts<'a>(
     })
 }
 
-fn active_loans(
+fn active_origins(
     graph: &GraphBuilder<'_>,
     facts: &LoanFacts<'_>,
     node_id: usize,
-) -> HashSet<LoanId> {
+) -> HashSet<ReachingLoan> {
     let mut active = HashSet::new();
     let Some(reaching) = &facts.reaching[node_id] else {
         return active;
@@ -1788,8 +1825,9 @@ fn active_loans(
             active.extend(loans.iter().copied());
         }
     }
-    let mut pending: Vec<LoanId> = active.iter().copied().collect();
-    while let Some(loan_id) = pending.pop() {
+    let mut pending: Vec<ReachingLoan> = active.iter().copied().collect();
+    while let Some(origin) = pending.pop() {
+        let ReachingLoan::Local(loan_id) = origin else { continue };
         let source_holder = facts.sources[&loan_id].root_binding_id();
         if !graph.loan_holder_bindings.contains(&source_holder) {
             continue;
@@ -1813,23 +1851,56 @@ fn loan_overlaps(facts: &LoanFacts<'_>, loan_id: LoanId, place: &Place) -> bool 
         .is_some_and(|source| place_relation(source, place) != PlaceRelation::Disjoint)
 }
 
+// The source proof is a CFG result, separate from a value's ownership category. Keep its
+// unification in one place so effect inference can consume the same proof as the final gate.
+fn unique_return_origin(
+    graph: &GraphBuilder<'_>,
+    facts: &LoanFacts<'_>,
+) -> AliasResult<Option<ReachingLoan>> {
+    let mut result = None;
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        let Action::EscapeLoans(_, span) = node.action else { continue };
+        if facts.reaching[node_id].is_none() {
+            continue;
+        }
+        for source in active_origins(graph, facts, node_id) {
+            if let ReachingLoan::Local(loan) = source {
+                if graph.eligible.contains(&facts.sources[&loan].root_binding_id()) {
+                    return Err(error(span, "iterator return 的源数组 loan 依赖即将结束生命周期的 local owner"));
+                }
+            }
+            if let Some(previous) = result {
+                let same = match (previous, source) {
+                    (ReachingLoan::Local(previous), ReachingLoan::Local(source)) =>
+                        super::place_relation::same_storage(facts.sources[&previous], facts.sources[&source]),
+                    (ReachingLoan::Incoming(previous), ReachingLoan::Incoming(source)) => previous == source,
+                    _ => false,
+                };
+                if !same {
+                    return Err(error(span, "iterator return 的源数组 loan 来源不唯一"));
+                }
+            } else {
+                result = Some(source);
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -> AliasResult<()> {
     let mut inputs: Vec<Option<OwnershipState>> = vec![None; graph.nodes.len()];
     inputs[entry] = Some(OwnershipState::default());
     let mut queue = VecDeque::from([entry]);
     while let Some(node_id) = queue.pop_front() {
         let mut state = inputs[node_id].clone().unwrap_or_default();
-        let active = active_loans(graph, facts, node_id);
+        let origins = active_origins(graph, facts, node_id);
+        let active: HashSet<LoanId> = origins.iter().filter_map(|origin| match origin {
+            ReachingLoan::Local(loan) => Some(*loan),
+            ReachingLoan::Incoming(_) => None,
+        }).collect();
         match graph.nodes[node_id].action {
             Action::Nop => {}
-            Action::EscapeLoans(_, span) => {
-                // Moving iterator state does not extend the lifetime of its borrowed array.
-                // eligible roots are this function's dynamic owners (including Owned parameters),
-                // unlike borrowed parameters/globals whose storage outlives this local frame.
-                if active.iter().any(|loan| graph.eligible.contains(&facts.sources[loan].root_binding_id())) {
-                    return Err(error(span, "iterator return 的源数组 loan 依赖即将结束生命周期的 local owner"));
-                }
-            }
+            Action::EscapeLoans(_, _) => {}
             Action::Read(id, access, projected, span) => {
                 if graph.borrowed.contains(&id) {
                     if facts.reaching[node_id]
@@ -2031,6 +2102,7 @@ fn run_dataflow(graph: &GraphBuilder<'_>, entry: usize, facts: &LoanFacts<'_>) -
         }
         continue_state(&mut inputs, &mut queue, graph, node_id, &state);
     }
+    unique_return_origin(graph, facts)?;
     Ok(())
 }
 
@@ -2122,6 +2194,9 @@ fn configure_function_parameters(
     for ((id, ty), effect) in ids.into_iter().zip(parameter_types).zip(parameter_effects) {
         builder.parameter_permissions.insert(id, *effect);
         if *effect == ParamEffect::Owned {
+            if matches!(ty, Ty::Iterator(_)) {
+                builder.loan_holder_bindings.insert(id);
+            }
             builder.owning.insert(id);
             if dynamic_owner(ty) {
                 builder.eligible.insert(id);
@@ -2266,6 +2341,30 @@ pub(super) fn infer_parameter_effects_for_function(
         effects[*index] = join_parameter_effect(effects[*index], required);
     }
     Ok(effects)
+}
+
+pub(super) enum OwnedReturnOrigin {
+    Place(Place),
+    Incoming(BindingId),
+}
+
+pub(super) fn owned_return_origin(function: &Expr) -> AliasResult<Option<OwnedReturnOrigin>> {
+    let Expr::FuncLit { body, .. } = function else {
+        return Err(error(function.span(), "owned return origin 入口不是 FuncLit"));
+    };
+    // This query extracts provenance, not access permissions. Final ownership validation still
+    // checks globals, capture kinds and program-point moves through analyze_function.
+    let mut graph = GraphBuilder::new();
+    graph.return_passes_required = true;
+    configure_function_parameters(&mut graph, function)?;
+    let entry = graph.node(Action::Nop);
+    let exit = graph.node(Action::Nop);
+    graph = graph.build(Task::Body { body, entry, exit, loops: LoopTargets::default() })?;
+    let facts = derive_loan_facts(&graph, entry, &HashMap::new())?;
+    Ok(unique_return_origin(&graph, &facts)?.map(|origin| match origin {
+        ReachingLoan::Local(id) => OwnedReturnOrigin::Place(facts.sources[&id].clone()),
+        ReachingLoan::Incoming(id) => OwnedReturnOrigin::Incoming(id),
+    }))
 }
 
 fn analyze_function<'a>(
@@ -2676,6 +2775,15 @@ fn apply_kinds(
         kinds: &HashMap<LoanId, BorrowKind>,
         seen: &mut HashSet<LoanId>,
     ) -> AliasResult<()> {
+        if let Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Read { loan_id, .. })) = result.as_deref() {
+            if kinds.get(loan_id) != Some(&BorrowKind::Read) {
+                return Err(error(span, "内部 sema 不变式被破坏: owned call result 缺少 ReadLoan fact"));
+            }
+            if !seen.insert(*loan_id) {
+                return Err(error(span, "内部 sema 不变式被破坏: LoanId 在 HIR 中重复"));
+            }
+            return Ok(());
+        }
         let Some(CallResult::Borrowed { loan_id, kind, .. }) = result.as_deref_mut() else {
             return Ok(());
         };

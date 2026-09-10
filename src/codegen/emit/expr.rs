@@ -237,7 +237,7 @@ fn emit_expr_value<M: Module>(
             c,
             bcx,
             frame,
-            (recv, receiver_pass.as_ref()),
+            (recv, receiver_pass.as_deref()),
             args,
             target,
             *span,

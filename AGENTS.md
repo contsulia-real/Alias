@@ -124,6 +124,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - function effect 写回后由 `value_categories` 以 child-before-parent 的有限遍历复算 category，再刷新 capability 和 binding relation，避免仅更新 call 节点而让外层分支 merge / identity conversion 保留过期事实；
 - 当前赋值统一固化为递归 resolved `Place` 与 resolved `AssignmentOperation`；`Local` / `Field(base Place)` / `Index(base Place, index fact)` projection、target `Ty`/span、root BindingId、字段索引/可写合同和 replacement/rebind ownership operation 都必须在 final gate 中闭合验证；直接 terminal Index assignment 仍未开放并在 HIR gate fail-closed；
 - 调用使用 `CallTarget` / `MethodTarget`；
+- 方法的 receiver pass 与 call result 一样使用 boxed resolved payload，避免包含完整 Place 的 pass 扩大每个 HIR Expr 的 inline footprint；此间接存储不改变参数 effect 或调用 ABI；
 - contextual conversion 使用显式 resolved HIR 节点；
 - `typeof` 已固化静态类型名，不允许 codegen 再生成语言类型拼写；
 - value category、当前可证明的 initial capability / storage relation，以及每项 capture 的 BindingId/LoanId/root Place/final ReadLoan|WriteLoan 都在最终 HIR validation 前写回；
@@ -154,11 +155,17 @@ Assignment 发射必须直接消费 resolved operation。后端不得再把 `Bor
 
 若 codegen 需要新增语言层判断，优先判断 HIR 是否缺少 resolved payload，而不是把 sema predicate 复制到后端或放进共享 helper 让两层共同决定。
 
-`for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，source_pass 复用 parameter_effects 的 argument-pass owner 并在 final gate 独立复核，loop header 的 UseLoanHolder 保持回边上的 NLL region。显式 ArrayIterator receiver_pass 同样复用该 owner；局部 iterator binding 是 loan holder，move 到新 binding 通过 CarryLoans 保留原 source loans，而不是重新借用已经 moved 的 iterator cell。局部 owning iterator replacement 先以独立 RHS holder 求值，通过 Reinitialize 的冲突检查后再用 SetLoans 提交新来源集合；SetLoans 同时是 reaching-definition 的替换边界和 backward liveness 的 kill 边界。临时 holder 分配统一经 ownership CFG 的 temporary_holder，开始求值前清空上一执行轮次的 loans；不得在 for 的内部回边上清空仍需使用的来源。跨函数返回与容器内 loan 传播仍未闭合。
+`for` 的 element owning binding 由 ownership CFG 在进入 body 的边上执行 `Declare`，每轮恢复新副本的 capability；不能只在循环前初始化，也不能把 header 的零次迭代退出边视为生成 owner。循环 binding 与普通 local 共用 move/loan 验证，source_pass 复用 parameter_effects 的 argument-pass owner 并在 final gate 独立复核，loop header 的 UseLoanHolder 保持回边上的 NLL region。显式 ArrayIterator receiver_pass 同样复用该 owner；局部 iterator binding 是 loan holder，move 到新 binding 通过 CarryLoans 保留原 source loans，而不是重新借用已经 moved 的 iterator cell。局部 owning iterator replacement 先以独立 RHS holder 求值，通过 Reinitialize 的冲突检查后再用 SetLoans 提交新来源集合；SetLoans 同时是 reaching-definition 的替换边界和 backward liveness 的 kill 边界。临时 holder 分配统一经 ownership CFG 的 temporary_holder，开始求值前清空上一执行轮次的 loans；不得在 for 的内部回边上清空仍需使用的来源。容器内 loan 传播仍未闭合。
 
-owned iterator return 在 ownership CFG 中通过 EscapeLoans 消费返回 holder 的 reaching loans；依赖当前函数 eligible dynamic owner 的来源不能越过函数出口。显式 Move 与隐式 ReturnPass::OwnedTransfer 都保留 iterator 的来源集合，replacement 已结束的来源不能被旧 AST 形状重新恢复。caller 侧跨函数来源传播仍独立待完成。
+owned iterator return 在 ownership CFG 中通过 EscapeLoans 消费返回 holder 的 reaching loans；依赖当前函数 eligible dynamic owner 的来源不能越过函数出口。同一函数已解析的出口来源必须唯一，分支汇合与多个出口共用该检查；完整 storage identity 由 place_relation::same_storage 复用 canonical projection/index relation 证明，不能把 Overlap 直接等同于同一数组。显式 Move 与隐式 ReturnPass::OwnedTransfer 都保留 iterator 的来源集合，replacement 已结束的来源不能被旧 AST 形状重新恢复。caller 侧通过 OwnedBorrowing 签名消费该来源证明。
 
 borrow containment 收集 owning local 时必须包含 `for` 与 Pattern 的隐式 binding；ownership CFG 同样登记 inline Pattern 的 owning storage，但不为它制造 dynamic capability。Pattern 的 copy/clone/transfer 分类仍仅由 `pattern_bindings.rs` 决定。
+
+ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与 Owned iterator 参数带入的 Incoming(BindingId)。两者共用 CarryLoans/SetLoans 和 CFG join；Incoming 不是对参数 cell 新建的 borrow，不能制造 LoanId 或参与本函数 Place 写冲突查询。出口单来源检查必须比较 incoming 身份，不能把缺少本地 LoanId 解释成没有来源。caller 通过 OwnedReturnLoan::Argument/Receiver 传递相应实参 holder 的内部来源。
+
+出口来源的 lifetime 与单来源证明由 ownership_flow::unique_return_origin 统一求得，忽略不可达出口；程序点 move/write 验证成功后再消费该证明。parameter_effects 的签名写回与 final validation 共用 refine_owned_return_effects，将该 CFG 结果投影到 parameter/self/global 来源；无法表示的来源必须拒绝，不得降级成普通 Owned。不得另按返回表达式或 binding initializer 建立来源推断路径。来源迭代中尚未统一的函数值候选不贡献来源 loan，也不沿用上一轮来源；收敛后才冻结函数值表达式的完整签名并严格重建全部 caller plans，最终不一致必须拒绝。
+
+`ReturnEffect::OwnedBorrowing(source)` 表达 Owned 返回值携带来源 loan 的静态签名，不能按 `Borrowed(source)` 的 referent-address ABI 发射；它仍返回 owning value。return pass 只核对其 Owned transfer 合同，来源仍须由 CFG 证明及 caller result 合同独立验证，不能在完整签名比较中抹除。CFG 消费 `OwnedReturnLoan::Read` 为结果 holder 建立 ReadLoan；Argument/Receiver 只传递指定实参携带的 loans，不延长其它实参的 call loans。来源签名按函数数量有界迭代，每轮消费上一轮 caller plans，并从固定 LoanId 边界重建返回 plans；最终校验独立复算来源。函数值选择只在来源 fixed-point 收敛后核对完整签名，未统一的来源不得进入 codegen。
 
 ## 5. ABI、物理布局与 runtime 契约
 
@@ -239,6 +246,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 - HIR value-category / initial-capability / storage-relation / Place-relation / capture / validation 等遍历避免对不可信嵌套使用宿主递归；
 - 公开 build/run 管线在显式配置的编译器工作线程栈上执行仍含有的有界递归下降，不能依赖调用者线程栈承载合法输入；
 - 用户输入超限必须产生 `AliasError`，不能 panic；
+- 三元表达式 lowering 以显式 child-before-parent 栈消费原 AST fact identity，不为每层分支叠加大型 lowering frame；合法的 256 层边界由安全回归验证；
 - internal invariant panic 只用于 sema 成功后理论上不可达的编译器内部状态。
 
 `docs/plan.md` 新增的数据流、Place overlap、loan、effect、raw-init validation 等分析若处理用户可控嵌套/规模，同样必须服从已有输入健壮性政策；不能因为它们是“新分析”就重新引入无界宿主递归或用户输入触发 panic。

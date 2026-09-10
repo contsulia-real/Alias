@@ -55,7 +55,7 @@ pub(crate) use model::{
     ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOperation, BindingOwner,
     Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
     CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
-    MethodId, MethodTarget, OwnershipCapability, OwningWrite, Param, Pattern,
+    MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability, OwningWrite, Param, Pattern,
     PatternBindingOperation, Place, PlaceInfo, ResolvedConversion, ReturnPass, ShallowClonePlan,
     Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };

@@ -1,5 +1,5 @@
 use super::{
-    validate_resolved_hir, Body, CallResult, Expr, Item, ReturnPass, Stmt, StorageRelation,
+    validate_resolved_hir, Body, CallResult, Expr, Item, OwnedReturnLoan, ReturnPass, Stmt, StorageRelation,
 };
 use crate::sema::types::{ReturnBorrowSource, ReturnEffect, Ty};
 
@@ -118,4 +118,27 @@ fn final_gate_rejects_borrowed_result_permission_drift() {
     *source_writable = true;
     let error = validate_resolved_hir(&program).expect_err("permission drift must fail closed");
     assert!(error.msg.contains("call result plan"), "{}", error.msg);
+}
+
+#[test]
+fn final_gate_rejects_lost_or_retargeted_owned_result_loans() {
+    for replacement in [
+        CallResult::Owned,
+        CallResult::OwnedBorrowing(OwnedReturnLoan::Argument(1)),
+    ] {
+        let mut program = checked(
+            "func iterator<i32> make = (array<i32> values) -> return values.iterator()\nfunc i32 main = () -> {\nval array<i32> values = [7]\nval iterator<i32> it = make(values)\nfor i32 item in it { println item }\nreturn 0\n}",
+        );
+        let main = top_binding(&mut program, "main");
+        let Expr::FuncLit { body, .. } = &mut main.value else { panic!("main function") };
+        let Body::Block(stmts) = body.as_mut() else { panic!("main block") };
+        let Stmt::Binding(iterator) = &mut stmts[1] else { panic!("iterator binding") };
+        let Expr::Call { result, .. } = &mut iterator.value else { panic!("iterator call") };
+        *result = Some(Box::new(replacement));
+        let error = validate_resolved_hir(&program).expect_err("owned result loan drift must fail closed");
+        assert!(
+            error.msg.contains("call result") || error.msg.contains("owned return loan plan"),
+            "{}", error.msg
+        );
+    }
 }

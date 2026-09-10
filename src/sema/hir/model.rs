@@ -212,12 +212,22 @@ pub(crate) struct CallArg {
 pub(crate) enum CallResult {
     Inline,
     Owned,
+    OwnedBorrowing(OwnedReturnLoan),
     Borrowed {
         loan_id: LoanId,
         source: Place,
         source_writable: bool,
         kind: Option<BorrowKind>,
     },
+}
+
+/// Resolved source of the loans carried by a newly owned call result. Transferred iterator
+/// arguments carry their existing loans; they must not be reborrowed through a moved cell.
+#[derive(Debug, Clone)]
+pub(crate) enum OwnedReturnLoan {
+    Read { loan_id: LoanId, source: Place },
+    Argument(usize),
+    Receiver,
 }
 
 #[derive(Debug, Clone)]
@@ -500,7 +510,9 @@ pub(crate) enum Expr {
     },
     MethodCall {
         recv: Box<Expr>,
-        receiver_pass: Option<ArgumentPass>,
+        // A resolved pass can contain a full Place. Keep it out of every Expr's
+        // inline footprint, just as the call result plan is boxed below.
+        receiver_pass: Option<Box<ArgumentPass>>,
         args: Vec<CallArg>,
         result: Option<Box<CallResult>>,
         target: MethodTarget,

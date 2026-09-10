@@ -1,6 +1,113 @@
 use alias::{run, AliasError};
 
 #[test]
+fn iterator_return_preserves_one_incoming_source_through_local_moves() {
+    let source = r#"
+func iterator<i32> forward = (iterator<i32> it, bool flag) -> {
+    val iterator<i32> moved = move it
+    if flag { return move moved }
+    return moved
+}
+func i32 main = () -> {
+    val array<i32> values = [7]
+    var i32 total = 0
+    for bool flag in [true, false] {
+        val iterator<i32> it = forward(values.iterator(), flag)
+        for i32 item in it { total = total + item }
+    }
+    return total
+}
+"#;
+    assert_eq!(run(source).unwrap(), 14);
+}
+
+#[test]
+fn iterator_return_distinguishes_incoming_owned_parameter_sources() {
+    let source = r#"
+func iterator<i32> choose = (iterator<i32> left, iterator<i32> right, bool flag) -> {
+    if flag { return move left }
+    return move right
+}
+func i32 main = () -> return 0
+"#;
+    let error = fail(source);
+    assert!(error.msg.contains("源数组 loan 来源不唯一"), "{}", error.msg);
+}
+
+#[test]
+fn iterator_return_rejects_different_reaching_array_sources() {
+    for body in [
+        "if flag { return left.iterator() }\nreturn right.iterator()",
+        "var iterator<i32> it = left.iterator()\nif flag { it = right.iterator() }\nreturn it",
+    ] {
+        let source = format!("func iterator<i32> choose = (array<i32> left, array<i32> right, bool flag) -> {{\n{body}\n}}\nfunc i32 main = () -> return 0");
+        let error = fail(&source);
+        assert!(error.msg.contains("源数组 loan 来源不唯一"), "{}", error.msg);
+    }
+}
+
+#[test]
+fn iterator_return_accepts_the_same_constant_projection_across_exits() {
+    let source = r#"
+func iterator<i32> choose = (array<array<i32>> values, bool flag) -> {
+    if flag { return values[0].iterator() }
+    return values[0].iterator()
+}
+func i32 main = () -> {
+    val array<array<i32>> values = [[7]]
+    val iterator<i32> it = choose(values, true)
+    var i32 total = 0
+    for i32 item in it { total = total + item }
+    return total
+}
+"#;
+    assert_eq!(run(source).unwrap(), 7);
+}
+
+#[test]
+fn returned_iterator_does_not_hold_unrelated_arguments_or_outlive_its_last_use() {
+    for (declarations, call) in [
+        ("func iterator<i32> make = (array<i32> values, array<i32> other) -> { val i32 size = other.len()\nreturn values.iterator() }", "make(values, other)"),
+        ("func iterator<i32> forward = (iterator<i32> it, array<i32> other) -> { val i32 size = other.len()\nreturn move it }", "forward(values.iterator(), other)"),
+        ("func iterator<i32> make = (array<i32> values, array<i32> other) -> { val i32 size = other.len()\nreturn values.iterator() }\nfunc iterator<i32> forward = (array<i32> values, array<i32> other) -> return make(values, other)", "(true ? make : forward)(values, other)"),
+    ] {
+        let source = format!(r#"
+{declarations}
+func i32 main = () -> {{
+    val array<i32> values = [1, 2]
+    val array<i32> other = []
+    val iterator<i32> it = {call}
+    other.push(9)
+    var i32 total = 0
+    for i32 item in it {{ total = total + item }}
+    values.push(3)
+    return total + values.len() + other.len()
+}}
+"#);
+        assert_eq!(run(&source).unwrap(), 7);
+    }
+}
+
+#[test]
+fn returned_iterator_keeps_its_array_loan_in_the_caller() {
+    let mut missed = Vec::new();
+    for (name, declarations, call) in [
+        ("parameter source", "func iterator<i32> make = (array<i32> values) -> return values.iterator()", "make(values)"),
+        ("forwarded return", "func iterator<i32> make = (array<i32> values) -> return values.iterator()\nfunc iterator<i32> forward = (array<i32> values) -> return make(values)", "forward(values)"),
+        ("owned iterator argument", "func iterator<i32> forward = (iterator<i32> it) -> return move it", "forward(values.iterator())"),
+        ("recursive return", "func iterator<i32> walk = (array<i32> values, i32 depth) -> { if depth == 0 { return values.iterator() }\nreturn walk(values, depth - 1) }", "walk(values, 2)"),
+    ] {
+        let source = format!("{declarations}\nfunc i32 main = () -> {{\nval array<i32> values = [1, 2]\nval iterator<i32> it = {call}\nvalues.push(3)\nfor i32 item in it {{ println item }}\nreturn 0\n}}");
+        // A native fail-fast exit is not the static rejection required by the source-loan law.
+        match run(&source) {
+            Err(error) if error.msg.contains("loan") || error.msg.contains("Loan") => {}
+            result => missed.push(format!("{name}: {result:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "missing caller source loans:\n{}", missed.join("\n"));
+}
+
+#[test]
 fn iterator_return_cannot_outlive_its_local_array_source() {
     for returned in [
         "return values.iterator()",
@@ -12,6 +119,14 @@ fn iterator_return_cannot_outlive_its_local_array_source() {
         let error = fail(&source);
         assert!(error.msg.contains("源数组 loan") && error.msg.contains("local owner"), "{}", error.msg);
     }
+}
+
+#[test]
+fn function_value_merge_rejects_different_owned_iterator_sources() {
+    let error = fail(
+        "func iterator<i32> left = (array<i32> a, array<i32> b) -> { val i32 size = b.len()\nreturn a.iterator() }\nfunc iterator<i32> right = (array<i32> a, array<i32> b) -> { val i32 size = a.len()\nreturn b.iterator() }\nfunc i32 main = () -> { val array<i32> a = [1]\nval array<i32> b = [2]\nval iterator<i32> it = (true ? left : right)(a, b)\nfor i32 item in it { println item }\nreturn 0 }",
+    );
+    assert!(error.msg.contains("return effect / borrow source"), "{}", error.msg);
 }
 
 #[test]

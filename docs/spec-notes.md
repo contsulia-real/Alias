@@ -482,11 +482,13 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 遍历期间集合结构已修改
 ```
 
-owned iterator return 已在函数出口检查其当前 reaching source loans：若仍依赖当前函数的动态 local owner（包括 Owned parameter），编译失败；整值 move iterator 不会延长源数组寿命。replacement 已结束的旧来源不参与出口检查。此检查不等于 caller 侧跨函数来源传播已完成。
+owned iterator return 已在函数出口检查其当前 reaching source loans：若仍依赖当前函数的动态 local owner（包括 Owned array parameter），编译失败；整值 move iterator 不会延长源数组寿命。replacement 已结束的旧来源不参与出口检查。array parameter 创建 iterator 后返回、函数间转发该返回值、以及转移 Owned iterator 参数后返回，已接入携带唯一来源的 Owned 返回签名与 caller loan holder；调用方在结果最后一次使用前的冲突修改静态拒绝，无关实参的来源 loan 不随返回值延长。容器内来源传播尚未闭合。
 
 ### 8.3 `for`
 
-`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。跨函数返回及容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。
+函数出口对已解析的 iterator 来源 loans 执行单来源检查：不同返回出口或分支汇合后的不同数组来源均静态拒绝。相同 root 与相同完整 projection 可以统一（包括不同源码位置的相同常量下标）；仅重叠、ancestor 或无法证明相同的动态下标不能据此当成同一数组。Owned iterator 参数在 callee 内携带独立的 incoming 来源身份，局部 move/replacement 保留该身份；不同路径返回不同 Owned iterator 参数同样拒绝。该 incoming 身份经返回签名映射为 caller 对应 Owned 实参携带的来源，而不是对已转移的 iterator cell 建立新借用。
+
+`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。容器内传播尚未闭合，不能把此项当作完整 iterator 生命周期已完成。runtime fail-fast 检查保留。
 
 当前集合迭代语法：
 
@@ -802,7 +804,7 @@ line / col / len
 - 标量作为 user-level shallow 根；
 - `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
-- iterator 跨函数返回及容器内的完整源数组 loan 传播；
+- iterator 容器内的完整源数组 loan 传播；
 - 完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；

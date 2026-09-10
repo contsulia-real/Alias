@@ -76,6 +76,9 @@ pub(crate) enum ReturnBorrowSource {
 pub(crate) enum ReturnEffect {
     Inline,
     Owned,
+    /// The returned state is owned, but retains one source loan. This must remain distinct from
+    /// Borrowed: the machine return carries the value, not the address of another value's cell.
+    OwnedBorrowing(ReturnBorrowSource),
     Borrowed(ReturnBorrowSource),
 }
 

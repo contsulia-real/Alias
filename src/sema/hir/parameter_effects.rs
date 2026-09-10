@@ -9,7 +9,7 @@
 use super::{
     ArgumentPass, ArmBody, Binding, BindingId, BindingOwner, Body, BorrowKind, CallArg, CallResult,
     CallTarget, CheckedProgram, Expr, FunctionId, Item, LoanId, MethodId,
-    MethodTarget, OwnershipCapability, Place, PlaceInfo, ResolvedConversion, ReturnPass, Stmt,
+    MethodTarget, OwnedReturnLoan, OwnershipCapability, Place, PlaceInfo, ResolvedConversion, ReturnPass, Stmt,
     StorageRelation, StrPart, ValueCategory,
 };
 use crate::sema::types::{ParamEffect, ReturnBorrowSource, ReturnEffect, Ty};
@@ -670,9 +670,9 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
                         ..
                     } => {
                         *receiver_pass =
-                            Some(maps.receivers.get(&expr_key).cloned().ok_or_else(|| {
+                            Some(Box::new(maps.receivers.get(&expr_key).cloned().ok_or_else(|| {
                                 invariant(expr_span, "user method receiver 缺少 pass fact")
-                            })?);
+                            })?));
                         *param_effects =
                             Some(maps.methods.get(&expr_key).cloned().ok_or_else(|| {
                                 invariant(expr_span, "user method target 缺少 effect fact")
@@ -694,7 +694,7 @@ fn apply_pass_maps(program: &mut CheckedProgram, maps: &PassMaps) -> AliasResult
                     _ => {}
                 }
                 if let Expr::MethodCall { receiver_pass, target: MethodTarget::ArrayIterator, .. } = expr {
-                    *receiver_pass = Some(maps.receivers.get(&expr_key).cloned().ok_or_else(|| invariant(expr_span, "iterator receiver 缺少 pass fact"))?);
+                    *receiver_pass = Some(Box::new(maps.receivers.get(&expr_key).cloned().ok_or_else(|| invariant(expr_span, "iterator receiver 缺少 pass fact"))?));
                     seen_receivers.insert(expr_key);
                 }
                 push_mut_expr(&mut stack, expr);
@@ -1122,6 +1122,16 @@ fn resolved_callee_return_effect(
     facts: &ProgramFacts<'_>,
     effects: &HashMap<FunctionId, ReturnEffect>,
 ) -> AliasResult<Option<ReturnEffect>> {
+    callee_return_effect(callee, current_function, facts, effects, true)
+}
+
+fn callee_return_effect(
+    callee: &Expr,
+    current_function: Option<FunctionId>,
+    facts: &ProgramFacts<'_>,
+    effects: &HashMap<FunctionId, ReturnEffect>,
+    require_complete: bool,
+) -> AliasResult<Option<ReturnEffect>> {
     let ids = resolve_expr_function_ids(callee, current_function, facts)?;
     let mut merged = None;
     for id in ids {
@@ -1130,6 +1140,9 @@ fn resolved_callee_return_effect(
         };
         if let Some(existing) = merged {
             if existing != candidate {
+                if !require_complete {
+                    return Ok(None);
+                }
                 return Err(AliasError {
                     msg: "函数值分支的 return effect / borrow source 不一致".into(),
                     span: callee.span(),
@@ -1173,7 +1186,7 @@ fn classify_return_expr(
             };
             match effect {
                 ReturnEffect::Inline => Ok(Some(ReturnDraft::Inline)),
-                ReturnEffect::Owned => Ok(Some(ReturnDraft::OwnedValue)),
+                ReturnEffect::Owned | ReturnEffect::OwnedBorrowing(_) => Ok(Some(ReturnDraft::OwnedValue)),
                 ReturnEffect::Borrowed(source) => {
                     let (_, origin) = map_call_borrow_source(
                         source,
@@ -1207,7 +1220,7 @@ fn classify_return_expr(
             };
             match effect {
                 ReturnEffect::Inline => Ok(Some(ReturnDraft::Inline)),
-                ReturnEffect::Owned => Ok(Some(ReturnDraft::OwnedValue)),
+                ReturnEffect::Owned | ReturnEffect::OwnedBorrowing(_) => Ok(Some(ReturnDraft::OwnedValue)),
                 ReturnEffect::Borrowed(source) => {
                     let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
                         invariant(value.span(), "user method receiver 缺少 pass fact")
@@ -1573,6 +1586,37 @@ fn place_terminal_writable(place: &Place, facts: &ProgramFacts<'_>) -> AliasResu
     }
 }
 
+fn owned_return_loan(
+    origin: ReturnBorrowSource,
+    receiver: Option<(&Expr, &ArgumentPass)>,
+    args: &[CallArg],
+    facts: &ProgramFacts<'_>,
+    next_loan_id: &mut u32,
+    span: Span,
+) -> AliasResult<OwnedReturnLoan> {
+    let source = match origin {
+        ReturnBorrowSource::Global(id) => global_place(id, facts)?,
+        ReturnBorrowSource::Parameter(index) => {
+            let arg = args.get(index).ok_or_else(|| invariant(span, "owned return source argument 越界"))?;
+            let pass = arg.pass.as_ref().ok_or_else(|| invariant(span, "owned return source 缺少 argument pass"))?;
+            if matches!(pass, ArgumentPass::Owned) && matches!(arg.value.ty(), Ty::Iterator(_)) {
+                return Ok(OwnedReturnLoan::Argument(index));
+            }
+            return_source_from_pass(pass, span)?.ok_or_else(|| invariant(span, "owned return 缺少 source Place"))?
+        }
+        ReturnBorrowSource::SelfValue => {
+            let (value, pass) = receiver.ok_or_else(|| invariant(span, "owned return Self 缺少 receiver"))?;
+            if matches!(pass, ArgumentPass::Owned) && matches!(value.ty(), Ty::Iterator(_)) {
+                return Ok(OwnedReturnLoan::Receiver);
+            }
+            return_source_from_pass(pass, span)?.ok_or_else(|| invariant(span, "owned return 缺少 receiver Place"))?
+        }
+    };
+    let loan_id = LoanId(*next_loan_id);
+    *next_loan_id = next_loan_id.checked_add(1).ok_or_else(|| invariant(span, "owned return loan 数量超限"))?;
+    Ok(OwnedReturnLoan::Read { loan_id, source })
+}
+
 fn call_result_for_effect(
     effect: ReturnEffect,
     receiver: Option<(&Expr, &ArgumentPass)>,
@@ -1585,6 +1629,12 @@ fn call_result_for_effect(
     match effect {
         ReturnEffect::Inline => Ok(CallResult::Inline),
         ReturnEffect::Owned => Ok(CallResult::Owned),
+        ReturnEffect::OwnedBorrowing(origin) => {
+            if current_function.is_none() {
+                return Err(AliasError { msg: "携带 loan 的 owned result 不能存入 top-level/global storage".into(), span });
+            }
+            owned_return_loan(origin, receiver, args, facts, next_loan_id, span).map(CallResult::OwnedBorrowing)
+        }
         ReturnEffect::Borrowed(source) => {
             let current_function = current_function.ok_or_else(|| AliasError {
                 msg: "borrowed function result 不能存入 top-level/global storage".into(),
@@ -1614,22 +1664,38 @@ fn collect_return_maps(
     parameter_effects: &HashMap<FunctionId, Vec<ParamEffect>>,
     return_effects: &HashMap<FunctionId, ReturnEffect>,
     next_loan_id: &mut u32,
+    require_complete: bool,
 ) -> AliasResult<ReturnMaps> {
     let mut maps = ReturnMaps::default();
+    // ReturnPass owns the value transfer, not the carried-loan signature.
+    // Function-value source equality is checked separately after convergence.
+    let ownership_effects = return_effects.iter().map(|(id, effect)| {
+        (*id, match effect {
+            ReturnEffect::OwnedBorrowing(_) => ReturnEffect::Owned,
+            effect => *effect,
+        })
+    }).collect();
     for function_id in &facts.function_order {
         for value in function_return_values(facts.functions[function_id])? {
             let draft = classify_return_expr(
                 value,
                 *function_id,
                 parameter_effects,
-                return_effects,
+                &ownership_effects,
                 facts,
             )?
             .ok_or_else(|| {
                 invariant(value.span(), "final return draft 仍依赖 unresolved effect")
             })?;
             let expected = return_effects[function_id];
-            if draft.effect() != expected {
+            // A contained loan changes the semantic signature, not the value's
+            // ownership transfer. Its source is checked separately by the CFG
+            // proof and caller result contract; do not turn it into BorrowPlace.
+            let ownership_effect = match expected {
+                ReturnEffect::OwnedBorrowing(_) => ReturnEffect::Owned,
+                effect => effect,
+            };
+            if draft.effect() != ownership_effect {
                 return Err(invariant(
                     value.span(),
                     "return pass 与 final return effect 漂移",
@@ -1672,11 +1738,17 @@ fn collect_return_maps(
                         target: CallTarget::FunctionValue,
                         ..
                     } => {
-                        let effect =
-                            resolved_callee_return_effect(callee, current, facts, return_effects)?
-                                .ok_or_else(|| {
-                                    invariant(expr.span(), "final call 缺少 resolved return effect")
-                                })?;
+                        let effect = callee_return_effect(callee, current, facts, return_effects, require_complete)?;
+                        let Some(effect) = effect else {
+                            if require_complete {
+                                return Err(invariant(expr.span(), "final call 缺少 resolved return effect"));
+                            }
+                            // A provisional selection contributes no source until all
+                            // candidates agree. Never carry last round's stale loan.
+                            maps.call_results.insert(expr as *const Expr as usize, CallResult::Owned);
+                            push_scoped_expr(&mut stack, expr, current);
+                            continue;
+                        };
                         let result = call_result_for_effect(
                             effect,
                             None,
@@ -1927,6 +1999,7 @@ pub(super) fn finalize(program: &mut CheckedProgram, next_loan_id: &mut u32) -> 
             &effects,
             &return_effects,
             &mut final_next_loan_id,
+            true,
         )?;
         (
             return_effects,
@@ -1947,7 +2020,80 @@ pub(super) fn finalize(program: &mut CheckedProgram, next_loan_id: &mut u32) -> 
     )?;
     apply_return_maps(program, &return_maps)?;
     refresh_binding_relations(program)?;
+    let mut sourced_effects = return_effects.clone();
     *next_loan_id = final_next_loan_id;
+    // Each round consumes call plans from the previous round. Reallocate from
+    // the same boundary so discarded provisional plans do not burn LoanIds.
+    for _ in 0..=sourced_effects.len() {
+        let mut refined_effects = return_effects.clone();
+        let (binding_returns, expr_returns, sourced_maps, sourced_next_loan_id) = {
+            let facts = collect_facts(program)?;
+            refine_owned_return_effects(&facts, &mut refined_effects)?;
+            if refined_effects == sourced_effects {
+                let expr_returns = expression_return_effect_map(program, &facts, &refined_effects)?;
+                let binding_returns = facts.function_bindings.iter()
+                    .map(|(binding, function)| (*binding, refined_effects[function])).collect();
+                let mut next = final_next_loan_id;
+                let maps = collect_return_maps(program, &facts, &effects, &refined_effects, &mut next, true)?;
+                apply_signatures(program, &effects, &refined_effects, &binding_effects, &binding_returns, &expr_effects, &expr_returns)?;
+                apply_return_maps(program, &maps)?;
+                refresh_binding_relations(program)?;
+                *next_loan_id = next;
+                return Ok(());
+            }
+            let binding_returns = facts.function_bindings.iter()
+                .map(|(binding, function)| (*binding, refined_effects[function])).collect();
+            let expr_returns = HashMap::new();
+            let mut next = final_next_loan_id;
+            let maps = collect_return_maps(program, &facts, &effects, &refined_effects, &mut next, false)?;
+            (binding_returns, expr_returns, maps, next)
+        };
+        sourced_effects = refined_effects;
+        apply_signatures(program, &effects, &sourced_effects, &binding_effects, &binding_returns, &expr_effects, &expr_returns)?;
+        apply_return_maps(program, &sourced_maps)?;
+        refresh_binding_relations(program)?;
+        *next_loan_id = sourced_next_loan_id;
+    }
+    Err(invariant(Span::default(), "owned return source fixed-point 未收敛"))
+}
+
+// This is a signature projection of the canonical CFG proof, not another
+// return-expression analysis. Inference and final validation must map the same
+// reaching origin; an unrepresentable origin cannot silently become plain Owned.
+fn refine_owned_return_effects(
+    facts: &ProgramFacts<'_>,
+    effects: &mut HashMap<FunctionId, ReturnEffect>,
+) -> AliasResult<()> {
+    for function_id in &facts.function_order {
+        if effects[function_id] != ReturnEffect::Owned {
+            continue;
+        }
+        let function = facts.functions[function_id];
+        let Some(origin) = super::ownership_flow::owned_return_origin(function)? else {
+            continue;
+        };
+        let source = match origin {
+            super::ownership_flow::OwnedReturnOrigin::Place(place) => {
+                place_origin(&place, *function_id, facts)?
+            }
+            super::ownership_flow::OwnedReturnOrigin::Incoming(id) => {
+                let meta = &facts.function_meta[function_id];
+                if meta.self_id == Some(id) {
+                    Some(ReturnBorrowSource::SelfValue)
+                } else {
+                    meta.parameter_ids[meta.implicit_count..]
+                        .iter()
+                        .position(|candidate| *candidate == id)
+                        .map(ReturnBorrowSource::Parameter)
+                }
+            }
+        }
+        .ok_or_else(|| AliasError {
+            msg: "owned return 的来源无法表示为 parameter/self/global".into(),
+            span: function.span(),
+        })?;
+        effects.insert(*function_id, ReturnEffect::OwnedBorrowing(source));
+    }
     Ok(())
 }
 
@@ -1983,12 +2129,22 @@ fn validate_call_result(
     expected_effect: ReturnEffect,
     expected_source: Option<&Place>,
     expected_source_writable: Option<bool>,
+    expected_owned: Option<&OwnedReturnLoan>,
     span: Span,
     seen_loans: &mut HashSet<LoanId>,
 ) -> AliasResult<()> {
     match (expected_effect, actual.as_deref()) {
         (ReturnEffect::Inline, Some(CallResult::Inline))
         | (ReturnEffect::Owned, Some(CallResult::Owned)) => Ok(()),
+        (ReturnEffect::OwnedBorrowing(_), Some(CallResult::OwnedBorrowing(actual))) => {
+            match (expected_owned, actual) {
+                (Some(OwnedReturnLoan::Argument(expected)), OwnedReturnLoan::Argument(actual)) if expected == actual => Ok(()),
+                (Some(OwnedReturnLoan::Receiver), OwnedReturnLoan::Receiver) => Ok(()),
+                (Some(OwnedReturnLoan::Read { source: expected, .. }), OwnedReturnLoan::Read { loan_id, source })
+                    if super::expr_places::same_source(expected, source) && seen_loans.insert(*loan_id) => Ok(()),
+                _ => Err(invariant(span, "owned return loan plan 与 source effect 漂移")),
+            }
+        }
         (
             ReturnEffect::Borrowed(_),
             Some(CallResult::Borrowed {
@@ -2032,7 +2188,8 @@ fn validate_return_effects(
         };
         frozen.insert(*function_id, *effect);
     }
-    let inferred = infer_return_effects(facts, parameter_effects)?;
+    let mut inferred = infer_return_effects(facts, parameter_effects)?;
+    refine_owned_return_effects(facts, &mut inferred)?;
     validate_main_return_effect(program, facts, &inferred)?;
     if inferred != frozen {
         let function_id = facts
@@ -2139,17 +2296,21 @@ fn validate_return_effects(
                                     .0,
                                 )
                             }
-                            ReturnEffect::Inline | ReturnEffect::Owned => None,
+                            ReturnEffect::Inline | ReturnEffect::Owned | ReturnEffect::OwnedBorrowing(_) => None,
                         };
                         let source_writable = source
                             .as_ref()
                             .map(|source| place_terminal_writable(source, facts))
                             .transpose()?;
+                        let expected_owned = if let ReturnEffect::OwnedBorrowing(origin) = effect {
+                            Some(owned_return_loan(origin, None, args, facts, &mut 0, expr.span())?)
+                        } else { None };
                         validate_call_result(
                             result,
                             effect,
                             source.as_ref(),
                             source_writable,
+                            expected_owned.as_ref(),
                             expr.span(),
                             &mut seen_return_loans,
                         )?;
@@ -2197,17 +2358,22 @@ fn validate_return_effects(
                                     .0,
                                 )
                             }
-                            ReturnEffect::Inline | ReturnEffect::Owned => None,
+                            ReturnEffect::Inline | ReturnEffect::Owned | ReturnEffect::OwnedBorrowing(_) => None,
                         };
                         let source_writable = source
                             .as_ref()
                             .map(|source| place_terminal_writable(source, facts))
                             .transpose()?;
+                        let expected_owned = if let ReturnEffect::OwnedBorrowing(origin) = effect {
+                            let pass = receiver_pass.as_ref().ok_or_else(|| invariant(expr.span(), "owned return 缺少 receiver pass"))?;
+                            Some(owned_return_loan(origin, Some((recv, pass)), args, facts, &mut 0, expr.span())?)
+                        } else { None };
                         validate_call_result(
                             result,
                             effect,
                             source.as_ref(),
                             source_writable,
+                            expected_owned.as_ref(),
                             expr.span(),
                             &mut seen_return_loans,
                         )?;

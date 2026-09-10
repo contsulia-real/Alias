@@ -64,7 +64,7 @@ fn produces_owned_temporary(
             CallTarget::Builtin(BuiltinCall::DeepClone(plan)) => deep_clone_creates_owner(plan),
             CallTarget::Builtin(BuiltinCall::ShallowClone(_)) => true,
             CallTarget::FunctionValue => {
-                matches!(result.as_deref(), Some(CallResult::Owned))
+                matches!(result.as_deref(), Some(CallResult::Owned | CallResult::OwnedBorrowing(_)))
             }
             CallTarget::Builtin(_) => false,
         },
@@ -83,7 +83,7 @@ fn produces_owned_temporary(
             | MethodTarget::ArrayLen
             | MethodTarget::ArrayPush => false,
             MethodTarget::User { .. } => {
-                matches!(result.as_deref(), Some(CallResult::Owned))
+                matches!(result.as_deref(), Some(CallResult::Owned | CallResult::OwnedBorrowing(_)))
             }
         },
         Expr::Binary { .. } => matches!(expr.ty(), Ty::Str),

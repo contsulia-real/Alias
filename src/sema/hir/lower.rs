@@ -346,6 +346,39 @@ fn finalize_expr(mut expr: Expr) -> AliasResult<Expr> {
 }
 
 fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Expr> {
+    if !matches!(expr, crate::ast::Expr::Ternary { .. }) {
+        return lower_expr_node(expr, facts, None);
+    }
+    // Ternaries have their own 256-level input budget. Do not spend one large
+    // lowering frame per branch level; HIR payload growth must not lower that
+    // accepted boundary. Keep original AST addresses as fact identities.
+    let mut pending = vec![(expr, false)];
+    let mut values = Vec::new();
+    while let Some((node, ready)) = pending.pop() {
+        if let crate::ast::Expr::Ternary { cond, then_expr, else_expr, .. } = node {
+            if !ready {
+                pending.push((node, true));
+                pending.push((else_expr, false));
+                pending.push((then_expr, false));
+                pending.push((cond, false));
+                continue;
+            }
+            let otherwise = values.pop().expect("lowered ternary else");
+            let then = values.pop().expect("lowered ternary then");
+            let condition = values.pop().expect("lowered ternary condition");
+            values.push(Box::new(lower_expr_node(node, facts, Some([condition, then, otherwise]))?));
+        } else {
+            values.push(Box::new(lower_expr_node(node, facts, None)?));
+        }
+    }
+    Ok(*values.pop().expect("lowered expression"))
+}
+
+fn lower_expr_node(
+    expr: &crate::ast::Expr,
+    facts: &mut LowerFacts,
+    ternary: Option<[Box<Expr>; 3]>,
+) -> AliasResult<Expr> {
     // 指针 key 只是 phase 内 identity，不是持久 NodeId。check() 针对这份 Program 的
     // 精确 allocation 记录 fact，并立即把同一对象交给 lower()；中间移动、clone 或替换
     // 任一 AST 节点都会让下方 lookup 全部失效。未来若引入 AST rewrite，必须先改为稳定
@@ -477,17 +510,9 @@ fn lower_expr(expr: &crate::ast::Expr, facts: &mut LowerFacts) -> AliasResult<Ex
             span: *span,
             info,
         },
-        crate::ast::Expr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-            span,
-        } => Expr::Ternary {
-            cond: Box::new(lower_expr(cond, facts)?),
-            then_expr: Box::new(lower_expr(then_expr, facts)?),
-            else_expr: Box::new(lower_expr(else_expr, facts)?),
-            span: *span,
-            info,
+        crate::ast::Expr::Ternary { span, .. } => {
+            let [cond, then_expr, else_expr] = ternary.expect("ternary children lowered before parent");
+            Expr::Ternary { cond, then_expr, else_expr, span: *span, info }
         },
         crate::ast::Expr::Call { callee, args, span } => {
             let target = call_target.take().ok_or_else(|| AliasError {

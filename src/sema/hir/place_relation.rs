@@ -84,6 +84,21 @@ fn index_relation(left: &Expr, right: &Expr) -> PlaceRelation {
     }
 }
 
+/// Prove one complete storage projection, not merely overlapping regions. Return-loan source
+/// unification must not treat an ancestor or an unresolved dynamic index as the same array.
+pub(super) fn same_storage(left: &Place, right: &Place) -> bool {
+    let (left_root, left_path) = decompose(left);
+    let (right_root, right_path) = decompose(right);
+    left.ty() == right.ty()
+        && left_root == right_root
+        && left_path.len() == right_path.len()
+        && left_path.iter().zip(&right_path).all(|(left, right)| match (*left, *right) {
+            (Projection::Field(left), Projection::Field(right)) => left == right,
+            (Projection::Index(left), Projection::Index(right)) => index_relation(left, right) == PlaceRelation::Overlap,
+            _ => false,
+        })
+}
+
 /// Canonical Place overlap owner。
 ///
 /// 规则完全基于 resolved semantic identity：不同 Local root 可证明 disjoint；不同字段或
