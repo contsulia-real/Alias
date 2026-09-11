@@ -202,6 +202,22 @@ func i32 main = () -> return nested_length(bundle(values = ok(['temporary']))) +
     assert_eq!(run(src).unwrap(), 0);
 }
 
+#[test]
+fn for_loop_temporaries_end_on_continue_and_return() {
+    let src = r#"
+func i32 find = () -> {
+    for string item in ['skip', 'found', 'unused'] {
+        if item.len() == 4 { continue }
+        if item.len() == 5 { return item.len() }
+        break
+    }
+    return 0
+}
+func i32 main = () -> return find() - 5
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

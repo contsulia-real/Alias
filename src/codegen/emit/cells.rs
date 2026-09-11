@@ -173,7 +173,9 @@ pub(crate) fn pop_scope(frame: &mut Frame) {
         invariant_violation("cleanup scope 栈非空")
     });
     for cleanup in cleanups {
-        frame.owner_presence.remove(&cleanup.binding);
+        if let Some(binding) = cleanup.binding {
+            frame.owner_presence.remove(&binding);
+        }
     }
     frame.scopes.pop();
     frame.locals_vty.pop();

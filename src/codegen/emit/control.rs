@@ -2,11 +2,11 @@ use super::arrays::{
     array_element_addr, array_len, array_raw, array_version, emit_iterator_abort, make_iterator,
 };
 use super::clone::emit_deep_clone_value;
-use super::cells::{emit_local_cell, ensure_current, pop_scope, push_scope};
+use super::cells::{emit_local_cell, emit_temporary_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::destruction::{
     emit_cleanup_to_depth, emit_destroy_value, mark_owner_present, owner_presence,
-    register_local_cleanup,
+    register_local_cleanup, register_temporary_cleanup,
 };
 use super::places::{emit_place_addr, emit_place_value};
 use super::value::ExprValue;
@@ -504,17 +504,45 @@ fn emit_for<M: Module>(
         ret_block,
     ) = input;
     ensure_current(bcx, frame);
+    let loop_cleanup_depth = frame.cleanup_scopes.len();
+    push_scope(frame);
     let source_vty = c.vty(iterable.ty());
-    let source = match source_pass {
-        crate::sema::hir::ArgumentPass::ReadBorrow { source, .. } => emit_place_value(c, bcx, frame, source)?.0,
+    let (source, source_destroy_plan) = match source_pass {
+        crate::sema::hir::ArgumentPass::ReadBorrow { source, .. } => {
+            (emit_place_value(c, bcx, frame, source)?.0, None)
+        }
         crate::sema::hir::ArgumentPass::BorrowTemporary {
             kind: crate::sema::hir::BorrowKind::Read,
-            ..
-        } => emit_expr(c, bcx, frame, iterable)?,
+            destroy_plan,
+        } => (
+            emit_expr(c, bcx, frame, iterable)?,
+            Some(destroy_plan.as_ref().clone()),
+        ),
         _ => invariant_violation("for source 必须是 resolved ReadBorrow"),
-    }.into_scalar("for iterable 尚未支持 multi-lane source");
-    let iter = match source_vty {
-        VTy::Array(_) => make_iterator(c, bcx, source)?,
+    };
+    let source = source.into_scalar("for iterable 尚未支持 multi-lane source");
+    if let Some(plan) = source_destroy_plan {
+        let cell = emit_temporary_cell(
+            c,
+            bcx,
+            ExprValue::scalar(source),
+            &source_vty,
+        )?;
+        register_temporary_cleanup(bcx, frame, cell, source_vty.clone(), Some(plan));
+    }
+    let iter = match &source_vty {
+        VTy::Array(element) => {
+            let iter = make_iterator(c, bcx, source)?;
+            let iterator_vty = VTy::Iterator(element.clone());
+            let cell = emit_temporary_cell(
+                c,
+                bcx,
+                ExprValue::scalar(iter),
+                &iterator_vty,
+            )?;
+            register_temporary_cleanup(bcx, frame, cell, iterator_vty, None);
+            iter
+        }
         VTy::Iterator(_) => source,
         _ => invariant_violation("for 主语为 array/iterator (sema 已校验)"),
     };
@@ -615,5 +643,7 @@ fn emit_for<M: Module>(
     bcx.seal_block(end_b);
     bcx.switch_to_block(end_b);
     frame.terminated = false;
+    emit_cleanup_to_depth(c, bcx, frame, loop_cleanup_depth)?;
+    pop_scope(frame);
     Ok(())
 }

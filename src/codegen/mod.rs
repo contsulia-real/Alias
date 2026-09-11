@@ -37,12 +37,18 @@ pub(crate) enum Slot {
 }
 
 #[derive(Clone)]
-pub(crate) struct LocalCleanup {
-    pub(crate) binding: BindingId,
+pub(crate) enum ScopeCleanupAction {
+    None,
+    Destroy(DestroyPlan),
+    FreeScalarValue,
+}
+
+#[derive(Clone)]
+pub(crate) struct ScopeCleanup {
+    pub(crate) binding: Option<BindingId>,
     pub(crate) cell: Variable,
     pub(crate) vty: VTy,
-    pub(crate) relation: StorageRelation,
-    pub(crate) plan: DestroyPlan,
+    pub(crate) action: ScopeCleanupAction,
     pub(crate) presence: Option<Variable>,
 }
 
@@ -55,7 +61,7 @@ pub(crate) struct Frame {
     /// scope-exit destruction must never use the stored payload as a liveness flag.
     pub(crate) owner_presence: HashMap<BindingId, Variable>,
     /// Lexical cleanup stack. Entries retain declaration order; exits consume them in reverse.
-    pub(crate) cleanup_scopes: Vec<Vec<LocalCleanup>>,
+    pub(crate) cleanup_scopes: Vec<Vec<ScopeCleanup>>,
     pub(crate) globals: Variable,
     pub(crate) env: Option<Variable>,
     pub(crate) caps: HashMap<BindingId, usize>,

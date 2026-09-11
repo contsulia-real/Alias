@@ -188,7 +188,7 @@ source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，parameter/self、显式 local、`for` element 与 Pattern binding 的作用域退出 destruction 已落地；其余完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化，temporary source 在正常穷尽、`break` 或函数 `return` 时执行 pass 携带的 resolved destruction，array source 对应的内部 iterator cursor 同时释放，`continue` 则保持二者进入下一轮；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，parameter/self、显式 local、`for` element、Pattern binding、borrowed call temporary 与直接 for-source temporary 的对应生命周期 destruction 已落地；其余完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -767,7 +767,7 @@ line / col / len
 - owning replacement 按 resolved recipe 销毁 string、struct 逆序字段、array 逆序元素与 backing/header/wrapper、result active payload、iterator 自身状态；
 - 显式 local Binding 在正常词法 fallthrough、函数 fallthrough、`return`、`break`、`continue` 上逆声明顺序销毁 owning value 并释放 cell；move 已转移的 owner 不重复销毁，borrowed alias 只释放 alias cell；
 - closure local 在退出时先释放 capture env，再释放 closure root；逆声明顺序保证它先于所捕获的更早 local 结束；
-- parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；用户函数/方法的 borrowed temporary receiver/argument 在调用返回后执行 resolved destruction 并释放 caller cell，纯机器 `IndirectByValue`/sret storage 在值完成转移或装载后释放；`main` 正常返回后，顶层 owning Binding 按源码逆序销毁所持值并释放 global slab；其它表达式临时值尚未在对应生命周期出口完整回收；
+- parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；用户函数/方法的 borrowed temporary receiver/argument 在调用返回后执行 resolved destruction 并释放 caller cell，纯机器 `IndirectByValue`/sret storage 在值完成转移或装载后释放；直接作为 `for` source 的 temporary 在正常穷尽、`break` 与函数 `return` 上清理，array source 对应的内部 iterator cursor 同步释放，`continue` 保持两者；`main` 正常返回后，顶层 owning Binding 按源码逆序销毁所持值并释放 global slab；其它表达式临时值尚未在对应生命周期出口完整回收；
 - 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式或顶层 Binding、被 replacement 替换，或者由其它 owning destination 接管时按对应 owner 生命周期回收，其余未被接管的表达式临时路径仍未完整回收。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。

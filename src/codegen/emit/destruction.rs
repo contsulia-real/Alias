@@ -6,7 +6,7 @@ use crate::codegen::abi::VTy;
 use crate::codegen::layout::{
     result_layout, ARRAY_DATA_OFFSET, CLOSURE_ENV_OFFSET, RESULT_OK_TAG, RESULT_TAG_OFFSET,
 };
-use crate::codegen::{invariant_violation, Compiler, Frame, LocalCleanup};
+use crate::codegen::{invariant_violation, Compiler, Frame, ScopeCleanup, ScopeCleanupAction};
 use crate::sema::hir::{BindingId, DestroyNode, DestroyPlan, StorageRelation};
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -40,13 +40,41 @@ pub(in crate::codegen) fn register_local_cleanup(
         .cleanup_scopes
         .last_mut()
         .unwrap_or_else(|| invariant_violation("cleanup scope 栈非空"))
-        .push(LocalCleanup {
-            binding,
+        .push(ScopeCleanup {
+            binding: Some(binding),
             cell,
             vty,
-            relation,
-            plan,
+            action: if relation == StorageRelation::Owning {
+                ScopeCleanupAction::Destroy(plan)
+            } else {
+                ScopeCleanupAction::None
+            },
             presence,
+        });
+}
+
+pub(in crate::codegen) fn register_temporary_cleanup(
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    cell: Value,
+    vty: VTy,
+    plan: Option<DestroyPlan>,
+) {
+    let cell_var = bcx.declare_var(types::I64);
+    bcx.def_var(cell_var, cell);
+    frame
+        .cleanup_scopes
+        .last_mut()
+        .unwrap_or_else(|| invariant_violation("cleanup scope 栈非空"))
+        .push(ScopeCleanup {
+            binding: None,
+            cell: cell_var,
+            vty,
+            action: match plan {
+                Some(plan) => ScopeCleanupAction::Destroy(plan),
+                None => ScopeCleanupAction::FreeScalarValue,
+            },
+            presence: None,
         });
 }
 
@@ -67,25 +95,33 @@ pub(in crate::codegen) fn emit_cleanup_to_depth<M: Module>(
         .collect::<Vec<_>>();
     for cleanup in cleanups {
         let cell = bcx.use_var(cleanup.cell);
-        if cleanup.relation == StorageRelation::Owning {
-            if let Some(presence) = cleanup.presence {
-                let destroy = bcx.create_block();
-                let done = bcx.create_block();
-                let present = bcx.use_var(presence);
-                bcx.ins().brif(present, destroy, &[], done, &[]);
-                bcx.seal_block(destroy);
-                bcx.switch_to_block(destroy);
-                let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
-                emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &cleanup.plan)?;
-                bcx.ins().jump(done, &[]);
-                bcx.seal_block(done);
-                bcx.switch_to_block(done);
-                let no = bcx.ins().iconst(types::I8, 0);
-                bcx.def_var(presence, no);
-            } else {
-                let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
-                emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &cleanup.plan)?;
+        match cleanup.action {
+            ScopeCleanupAction::Destroy(plan) => {
+                if let Some(presence) = cleanup.presence {
+                    let destroy = bcx.create_block();
+                    let done = bcx.create_block();
+                    let present = bcx.use_var(presence);
+                    bcx.ins().brif(present, destroy, &[], done, &[]);
+                    bcx.seal_block(destroy);
+                    bcx.switch_to_block(destroy);
+                    let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
+                    emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &plan)?;
+                    bcx.ins().jump(done, &[]);
+                    bcx.seal_block(done);
+                    bcx.switch_to_block(done);
+                    let no = bcx.ins().iconst(types::I8, 0);
+                    bcx.def_var(presence, no);
+                } else {
+                    let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
+                    emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &plan)?;
+                }
             }
+            ScopeCleanupAction::FreeScalarValue => {
+                let value = ExprValue::load(bcx, cell, 0, &cleanup.vty)
+                    .into_scalar("内部 runtime temporary 必须是 scalar allocation");
+                c.call_rt_void(bcx, "rt.heap.free", &[value])?;
+            }
+            ScopeCleanupAction::None => {}
         }
         c.call_rt_void(bcx, "rt.heap.free", &[cell])?;
     }
