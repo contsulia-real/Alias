@@ -131,6 +131,7 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
             method_id,
             self_id,
             receiver,
+            self_destroy_plan: None,
         },
         _ => {
             return Err(AliasError {
@@ -671,6 +672,7 @@ fn lower_expr_node(
                             span: param.span,
                         })?,
                         effect: None,
+                        destroy_plan: None,
                     })
                 })
                 .collect::<AliasResult<Vec<_>>>()?,

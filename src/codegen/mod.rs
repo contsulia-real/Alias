@@ -290,6 +290,7 @@ fn compile_program<M: Module>(
         let BindingOwner::Method {
             self_id,
             receiver: recv,
+            self_destroy_plan,
             ..
         } = &b.owner
         else {
@@ -309,6 +310,7 @@ fn compile_program<M: Module>(
             binding_id: *self_id,
             ty: recv.clone(),
             effect: Some(self_effect),
+            destroy_plan: self_destroy_plan.clone(),
         };
         let mut all_params = Vec::with_capacity(params.len() + 1);
         all_params.push(self_param);

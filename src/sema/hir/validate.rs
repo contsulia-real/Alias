@@ -313,6 +313,7 @@ fn collect_user_methods(
             method_id,
             self_id,
             receiver,
+            self_destroy_plan: _, // independently verified by ownership_operations
         } = &binding.owner
         else {
             continue;

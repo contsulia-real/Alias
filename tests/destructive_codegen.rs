@@ -137,6 +137,40 @@ func i32 main = () -> {
     assert_eq!(run(src).unwrap(), 25);
 }
 
+#[test]
+fn parameters_release_owned_values_and_preserve_borrowed_referents() {
+    let src = r#"
+func string choose = (string value, bool take) -> {
+    if take { return move value }
+    return 'fallback'
+}
+func string string.select = (bool take) -> {
+    if take { return move(self) }
+    return 'fallback'
+}
+func i32 length = (string value) -> return value.len()
+func i32 main = () -> {
+    val string moved = choose('owned', true)
+    while moved != 'owned' { return 1 }
+    val string self_moved = 'self'.select(true)
+    while self_moved != 'self' { return 2 }
+    val string self_fallback = 'discard'.select(false)
+    while self_fallback != 'fallback' { return 3 }
+    var i32 i = 0
+    while i < 64 {
+        val string fallback = choose('discard', false)
+        while fallback != 'fallback' { return 4 }
+        i = i + 1
+    }
+    val string source = 'source'
+    val i32 size = length(source)
+    while source != 'source' { return 5 }
+    return size - 6
+}
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

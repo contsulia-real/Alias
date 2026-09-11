@@ -5,9 +5,9 @@
 //! independently reconstructing transfer/rebind behavior from expression or target shape.
 
 use super::{
-    ArmBody, AssignmentOperation, Binding, BindingId, BindingOperation, Body, CallTarget,
-    CheckedProgram, Expr, ExprCategory, Item, MethodTarget, OwnershipCapability, OwningWrite,
-    Place, Stmt, StorageRelation, StrPart, ValueCategory,
+    ArmBody, AssignmentOperation, Binding, BindingId, BindingOperation, BindingOwner, Body,
+    CallTarget, CheckedProgram, Expr, ExprCategory, Item, MethodTarget, OwnershipCapability,
+    OwningWrite, Place, Stmt, StorageRelation, StrPart, ValueCategory,
 };
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -148,6 +148,24 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Binding(binding) => {
+                if let BindingOwner::Method {
+                    receiver,
+                    self_destroy_plan,
+                    ..
+                } = &mut binding.owner
+                {
+                    if self_destroy_plan.is_some() {
+                        return Err(invariant(
+                            binding.span,
+                            "self parameter destruction 被重复 finalization",
+                        ));
+                    }
+                    *self_destroy_plan = Some(Box::new(super::destruction::plan(
+                        receiver,
+                        binding.span,
+                        &structs,
+                    )?));
+                }
                 if binding.operation.is_some() || binding.destroy_plan.is_some() {
                     return Err(invariant(
                         binding.span,
@@ -200,6 +218,22 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                 push_mut_stmt_children(&mut stack, stmt);
             }
             MutNode::Expr(expr) => {
+                let expr_span = expr.span();
+                if let Expr::FuncLit { params, .. } = expr {
+                    for param in params {
+                        if param.destroy_plan.is_some() {
+                            return Err(invariant(
+                                expr_span,
+                                "parameter destruction 被重复 finalization",
+                            ));
+                        }
+                        param.destroy_plan = Some(Box::new(super::destruction::plan(
+                            &param.ty,
+                            expr_span,
+                            &structs,
+                        )?));
+                    }
+                }
                 if expr.info().container_write.is_some() {
                     return Err(invariant(
                         expr.span(),
@@ -230,6 +264,25 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             Node::Binding(binding) => {
+                if let BindingOwner::Method {
+                    receiver,
+                    self_destroy_plan,
+                    ..
+                } = &binding.owner
+                {
+                    if self_destroy_plan.as_deref()
+                        != Some(&super::destruction::plan(
+                            receiver,
+                            binding.span,
+                            &structs,
+                        )?)
+                    {
+                        return Err(invariant(
+                            binding.span,
+                            "self parameter destruction plan 缺失或漂移",
+                        ));
+                    }
+                }
                 let operation = binding_operation(binding)?;
                 if binding.operation != Some(operation) {
                     return Err(invariant(
@@ -291,6 +344,22 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 push_stmt_children(&mut stack, stmt);
             }
             Node::Expr(expr) => {
+                if let Expr::FuncLit { params, .. } = expr {
+                    for param in params {
+                        if param.destroy_plan.as_deref()
+                            != Some(&super::destruction::plan(
+                                &param.ty,
+                                expr.span(),
+                                &structs,
+                            )?)
+                        {
+                            return Err(invariant(
+                                expr.span(),
+                                "parameter destruction plan 缺失或漂移",
+                            ));
+                        }
+                    }
+                }
                 if expr.info().container_write.is_some() {
                     return Err(invariant(
                         expr.span(),

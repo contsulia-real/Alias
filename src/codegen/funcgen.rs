@@ -4,7 +4,7 @@ use crate::codegen::abi::{
 };
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
-use crate::codegen::emit::destruction::emit_cleanup_to_depth;
+use crate::codegen::emit::destruction::{emit_cleanup_to_depth, register_local_cleanup};
 use crate::codegen::emit::expr::emit_expr;
 use crate::codegen::emit::value::ExprValue;
 use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
@@ -132,15 +132,27 @@ impl<'m, M: Module> Compiler<'m, M> {
                     StorageRelation::Owning,
                 ),
             };
-            emit_local_cell(
+            let cell = emit_local_cell(
                 self,
                 &mut bcx,
                 &mut frame,
                 value,
-                vty,
+                vty.clone(),
                 p.binding_id,
                 Some(relation),
             )?;
+            let destroy_plan = p.destroy_plan.as_deref().unwrap_or_else(|| {
+                invariant_violation("用户函数参数缺少 resolved destruction plan")
+            });
+            register_local_cleanup(
+                &mut bcx,
+                &mut frame,
+                p.binding_id,
+                cell,
+                vty,
+                relation,
+                destroy_plan.clone(),
+            );
         }
 
         let ret_block = bcx.create_block();

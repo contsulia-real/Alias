@@ -14,7 +14,7 @@ use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-pub(super) fn register_local_cleanup(
+pub(in crate::codegen) fn register_local_cleanup(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     binding: BindingId,

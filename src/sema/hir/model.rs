@@ -61,6 +61,7 @@ pub(crate) enum BindingOwner {
         method_id: MethodId,
         self_id: BindingId,
         receiver: Ty,
+        self_destroy_plan: Option<Box<super::DestroyPlan>>,
     },
 }
 
@@ -81,6 +82,7 @@ pub(crate) struct Param {
     pub(crate) binding_id: BindingId,
     pub(crate) ty: Ty,
     pub(crate) effect: Option<ParamEffect>,
+    pub(crate) destroy_plan: Option<Box<super::DestroyPlan>>,
 }
 
 /// 闭包环境保存 binding cell，但捕获对 referent 的静态权限必须独立固化为普通 loan。

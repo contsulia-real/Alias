@@ -1,4 +1,6 @@
-use super::{validate_resolved_hir, ArgumentPass, Body, Expr, Item, Stmt};
+use super::{
+    validate_resolved_hir, ArgumentPass, BindingOwner, Body, DestroyNode, Expr, Item, Stmt,
+};
 use crate::sema::types::{ParamEffect, Ty};
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -78,6 +80,14 @@ fn parameter_effects_freeze_signature_param_and_caller_pass() {
         panic!("length function literal")
     };
     assert_eq!(params[0].effect, Some(ParamEffect::ReadBorrow));
+    assert_eq!(
+        params[0]
+            .destroy_plan
+            .as_deref()
+            .expect("parameter destruction plan")
+            .nodes,
+        vec![DestroyNode::String]
+    );
 
     let main = top_binding(&mut program, "main");
     let Expr::FuncLit { body, .. } = &main.value else {
@@ -96,6 +106,73 @@ fn parameter_effects_freeze_signature_param_and_caller_pass() {
         args[0].pass,
         Some(ArgumentPass::ReadBorrow { .. })
     ));
+}
+
+#[test]
+fn parameter_and_self_destruction_plans_are_fail_closed() {
+    let mut program = checked(
+        "func i32 string.size = () -> return self.len()\n\
+func i32 length = (string value) -> return value.len()\n\
+func i32 main = () -> return 'x'.size() + length('y')\n",
+    );
+    let method = top_binding(&mut program, "size");
+    let BindingOwner::Method {
+        self_destroy_plan, ..
+    } = &method.owner
+    else {
+        panic!("size method owner")
+    };
+    assert_eq!(
+        self_destroy_plan
+            .as_deref()
+            .expect("self destruction plan")
+            .nodes,
+        vec![DestroyNode::String]
+    );
+
+    let length = top_binding(&mut program, "length");
+    let Expr::FuncLit { params, .. } = &mut length.value else {
+        panic!("length function literal")
+    };
+    params[0]
+        .destroy_plan
+        .as_deref_mut()
+        .expect("parameter destruction plan")
+        .nodes[0] = DestroyNode::Inline;
+
+    let error = validate_resolved_hir(&program).expect_err("parameter plan drift must fail closed");
+    assert!(
+        error.msg.contains("parameter destruction plan"),
+        "{}",
+        error.msg
+    );
+
+    let length = top_binding(&mut program, "length");
+    let Expr::FuncLit { params, .. } = &mut length.value else {
+        panic!("length function literal")
+    };
+    params[0]
+        .destroy_plan
+        .as_deref_mut()
+        .expect("parameter destruction plan")
+        .nodes[0] = DestroyNode::String;
+    let method = top_binding(&mut program, "size");
+    let BindingOwner::Method {
+        self_destroy_plan, ..
+    } = &mut method.owner
+    else {
+        panic!("size method owner")
+    };
+    self_destroy_plan
+        .as_deref_mut()
+        .expect("self destruction plan")
+        .nodes[0] = DestroyNode::Inline;
+    let error = validate_resolved_hir(&program).expect_err("self plan drift must fail closed");
+    assert!(
+        error.msg.contains("self parameter destruction plan"),
+        "{}",
+        error.msg
+    );
 }
 
 #[test]
