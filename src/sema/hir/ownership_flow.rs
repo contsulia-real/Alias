@@ -1517,7 +1517,7 @@ impl<'a> GraphBuilder<'a> {
                 capture_holder: Some(holder),
                 loops,
             }),
-            ArgumentPass::BorrowTemporary { kind } => {
+            ArgumentPass::BorrowTemporary { kind, .. } => {
                 // The temporary has no external Place to protect, but a function temporary may
                 // itself hold capture loans until the call consumes this holder.
                 let _borrow_kind = *kind;

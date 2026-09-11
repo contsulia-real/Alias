@@ -199,6 +199,39 @@ fn final_gate_rejects_argument_pass_drift() {
 }
 
 #[test]
+fn borrowed_temporary_argument_destruction_is_frozen_and_rechecked() {
+    let mut program = checked(
+        "func i32 length = (string value) -> return value.len()\nfunc i32 main = () -> { return length('temporary') }\n",
+    );
+    let main = top_binding(&mut program, "main");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main function literal")
+    };
+    let Body::Block(stmts) = body.as_mut() else {
+        panic!("main block")
+    };
+    let Some(Stmt::Return {
+        value: Some(Expr::Call { args, .. }),
+    }) = stmts.last_mut()
+    else {
+        panic!("main return call")
+    };
+    let Some(ArgumentPass::BorrowTemporary { destroy_plan, .. }) = &mut args[0].pass else {
+        panic!("borrowed temporary pass")
+    };
+    assert_eq!(destroy_plan.nodes, vec![DestroyNode::String]);
+    destroy_plan.nodes[0] = DestroyNode::Inline;
+
+    let error = validate_resolved_hir(&program)
+        .expect_err("temporary argument destruction drift must fail closed");
+    assert!(
+        error.msg.contains("temporary argument destruction plan"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
 fn final_gate_recomputes_parameter_effects_from_the_body() {
     let mut program = checked(
         "func i32 length = (string value) -> return value.len()\nfunc i32 main = () -> return 0\n",

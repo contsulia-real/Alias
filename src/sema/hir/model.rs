@@ -261,7 +261,10 @@ pub(crate) enum ArgumentPass {
     Inline,
     ReadBorrow { loan_id: LoanId, source: Place },
     WriteBorrow { loan_id: LoanId, source: Place },
-    BorrowTemporary { kind: BorrowKind },
+    BorrowTemporary {
+        kind: BorrowKind,
+        destroy_plan: Box<super::DestroyPlan>,
+    },
     Owned,
 }
 

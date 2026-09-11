@@ -507,7 +507,10 @@ fn emit_for<M: Module>(
     let source_vty = c.vty(iterable.ty());
     let source = match source_pass {
         crate::sema::hir::ArgumentPass::ReadBorrow { source, .. } => emit_place_value(c, bcx, frame, source)?.0,
-        crate::sema::hir::ArgumentPass::BorrowTemporary { kind: crate::sema::hir::BorrowKind::Read } => emit_expr(c, bcx, frame, iterable)?,
+        crate::sema::hir::ArgumentPass::BorrowTemporary {
+            kind: crate::sema::hir::BorrowKind::Read,
+            ..
+        } => emit_expr(c, bcx, frame, iterable)?,
         _ => invariant_violation("for source 必须是 resolved ReadBorrow"),
     }.into_scalar("for iterable 尚未支持 multi-lane source");
     let iter = match source_vty {

@@ -188,6 +188,20 @@ func i32 main = () -> {
     assert_eq!(run(src).unwrap(), 0);
 }
 
+#[test]
+fn borrowed_call_temporaries_end_after_the_call() {
+    let src = r#"
+struct bundle { val result<array<string>, string> values = err('') }
+func i32 string.measured = () -> return self.len()
+func i32 nested_length = (bundle value) -> return match value.values {
+    ok(items) -> items[0].len()
+    err(message) -> message.len()
+}
+func i32 main = () -> return nested_length(bundle(values = ok(['temporary']))) + 'receiver'.measured() - 17
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

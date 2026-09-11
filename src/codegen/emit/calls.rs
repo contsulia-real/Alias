@@ -3,6 +3,7 @@ use super::cells::{
     allocate_value_cell, binding_storage_addr, emit_temporary_cell, first_result,
 };
 use super::clone::emit_deep_clone;
+use super::destruction::emit_destroy_value;
 use super::expr::{emit_container_value, emit_expr};
 use super::ops::{emit_abort_branch, emit_binary_values};
 use super::places::{emit_place_addr, emit_place_value};
@@ -18,7 +19,8 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{
-    ArgumentPass, BinOp, BorrowKind, BuiltinCall, CallArg, CallTarget, CtorKind, Expr, MethodTarget,
+    ArgumentPass, BinOp, BorrowKind, BuiltinCall, CallArg, CallTarget, CtorKind, DestroyPlan, Expr,
+    MethodTarget,
 };
 use crate::sema::types::{FloatW, IntW, UIntW};
 use crate::{AliasResult, Span};
@@ -103,6 +105,7 @@ fn call_closure<M: Module>(
     let (param_vtys, param_effects, ret_vty) = signature;
     let abi = user_function_abi(c.cc, param_vtys, param_effects, ret_vty);
     let (mut words, sret) = begin_user_call(c, bcx, frame, &abi, ret_vty)?;
+    let mut temporaries = Vec::new();
     if args.len() != param_vtys.len() {
         invariant_violation("user call argument 数量与 function ABI 漂移")
     }
@@ -115,7 +118,7 @@ fn call_closure<M: Module>(
         if machine_index != words.len() {
             invariant_violation("user call explicit parameter machine index 漂移")
         }
-        words.push(emit_user_argument(
+        let (word, temporary) = emit_user_argument(
             c,
             bcx,
             frame,
@@ -123,7 +126,11 @@ fn call_closure<M: Module>(
             pass,
             pt,
             passing,
-        )?);
+        )?;
+        words.push(word);
+        if let Some(temporary) = temporary {
+            temporaries.push(temporary);
+        }
     }
     let code = bcx
         .ins()
@@ -137,7 +144,9 @@ fn call_closure<M: Module>(
     words[abi.env_index()] = env;
     let sig_ref = bcx.func.import_signature(abi.signature().clone());
     let inst = bcx.ins().call_indirect(sig_ref, code, &words);
-    finish_user_call(bcx, inst, &abi, ret_vty, sret)
+    let result = finish_user_call(c, bcx, inst, &abi, ret_vty, sret)?;
+    cleanup_call_temporaries(c, bcx, temporaries)?;
+    Ok(result)
 }
 
 fn begin_user_call<M: Module>(
@@ -171,7 +180,8 @@ fn begin_user_call<M: Module>(
     Ok((words, sret))
 }
 
-fn finish_user_call(
+fn finish_user_call<M: Module>(
+    c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     inst: cranelift_codegen::ir::Inst,
     abi: &UserFunctionAbi,
@@ -188,32 +198,63 @@ fn finish_user_call(
             let area = sret.unwrap_or_else(|| {
                 invariant_violation("ExplicitSRet call 缺少 caller-owned return area")
             });
-            Ok(ExprValue::load(bcx, area, 0, ret_vty))
+            let value = ExprValue::load(bcx, area, 0, ret_vty);
+            c.call_rt_void(bcx, "rt.heap.free", &[area])?;
+            Ok(value)
         }
     }
 }
 
-fn emit_user_argument<M: Module>(
+struct CallTemporary<'a> {
+    cell: Value,
+    vty: VTy,
+    destroy_plan: Option<&'a DestroyPlan>,
+}
+
+fn cleanup_call_temporaries<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    temporaries: Vec<CallTemporary<'_>>,
+) -> AliasResult<()> {
+    for temporary in temporaries.into_iter().rev() {
+        if let Some(plan) = temporary.destroy_plan {
+            let value = ExprValue::load(bcx, temporary.cell, 0, &temporary.vty);
+            emit_destroy_value(c, bcx, value, temporary.vty, plan)?;
+        }
+        c.call_rt_void(bcx, "rt.heap.free", &[temporary.cell])?;
+    }
+    Ok(())
+}
+
+fn emit_user_argument<'a, M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     value: &Expr,
-    pass: &ArgumentPass,
+    pass: &'a ArgumentPass,
     vty: &VTy,
     passing: UserParameterPassing,
-) -> AliasResult<Value> {
+) -> AliasResult<(Value, Option<CallTemporary<'a>>)> {
     match (pass, passing) {
         (ArgumentPass::Inline | ArgumentPass::Owned, UserParameterPassing::Direct(_)) => {
             let value = emit_expr(c, bcx, frame, value)?;
             let value = value.into_scalar("direct user argument 必须是单 lane value");
-            Ok(norm_store(bcx, value, vty))
+            Ok((norm_store(bcx, value, vty), None))
         }
         (
             ArgumentPass::Inline | ArgumentPass::Owned,
             UserParameterPassing::IndirectByValue,
         ) => {
             let value = emit_expr(c, bcx, frame, value)?;
-            emit_temporary_cell(c, bcx, value, vty)
+            let cell = emit_temporary_cell(c, bcx, value, vty)?;
+            Ok((
+                cell,
+                Some(CallTemporary {
+                    cell,
+                    vty: vty.clone(),
+                    destroy_plan: None,
+                }),
+            ))
         }
         (
             ArgumentPass::ReadBorrow { source, .. }
@@ -224,15 +265,23 @@ fn emit_user_argument<M: Module>(
             if source_vty != *vty {
                 invariant_violation("borrow argument source ABI 与 parameter ABI 漂移")
             }
-            Ok(address)
+            Ok((address, None))
         }
         (
-            ArgumentPass::BorrowTemporary { kind },
+            ArgumentPass::BorrowTemporary { kind, destroy_plan },
             UserParameterPassing::BorrowedAddress,
         ) => {
             let _ = kind;
             let value = emit_expr(c, bcx, frame, value)?;
-            emit_temporary_cell(c, bcx, value, vty)
+            let cell = emit_temporary_cell(c, bcx, value, vty)?;
+            Ok((
+                cell,
+                Some(CallTemporary {
+                    cell,
+                    vty: vty.clone(),
+                    destroy_plan: Some(destroy_plan),
+                }),
+            ))
         }
         _ => invariant_violation("resolved argument pass 与 canonical function ABI 漂移"),
     }
@@ -336,7 +385,10 @@ pub(crate) fn emit_method_call<M: Module>(
             Some(ArgumentPass::ReadBorrow { source, .. }) => {
                 emit_place_value(c, bcx, frame, source)?.0
             }
-            Some(ArgumentPass::BorrowTemporary { kind: BorrowKind::Read }) => emit_expr(c, bcx, frame, recv)?,
+            Some(ArgumentPass::BorrowTemporary {
+                kind: BorrowKind::Read,
+                ..
+            }) => emit_expr(c, bcx, frame, recv)?,
             _ => invariant_violation("iterator receiver 缺少 resolved read pass"),
         };
         let array = value.into_scalar("iterator receiver 必须是 array root");
@@ -436,12 +488,13 @@ fn emit_user_method_call<M: Module>(
     }
     let abi = user_function_abi(c.cc, &param_vtys, &param_effects, &ret_vty);
     let (mut words, sret) = begin_user_call(c, bcx, frame, &abi, &ret_vty)?;
+    let mut temporaries = Vec::new();
 
     let (receiver_index, receiver_passing) = abi.parameter(0);
     if receiver_index != words.len() {
         invariant_violation("user method receiver machine index 漂移")
     }
-    words.push(emit_user_argument(
+    let (receiver_word, receiver_temporary) = emit_user_argument(
         c,
         bcx,
         frame,
@@ -449,7 +502,11 @@ fn emit_user_method_call<M: Module>(
         receiver_pass,
         &param_vtys[0],
         receiver_passing,
-    )?);
+    )?;
+    words.push(receiver_word);
+    if let Some(temporary) = receiver_temporary {
+        temporaries.push(temporary);
+    }
     for (offset, (arg, param)) in args.iter().zip(param_vtys.iter().skip(1)).enumerate() {
         let index = offset + 1;
         let pass = arg
@@ -460,7 +517,7 @@ fn emit_user_method_call<M: Module>(
         if machine_index != words.len() {
             invariant_violation("user method argument machine index 漂移")
         }
-        words.push(emit_user_argument(
+        let (word, temporary) = emit_user_argument(
             c,
             bcx,
             frame,
@@ -468,7 +525,11 @@ fn emit_user_method_call<M: Module>(
             pass,
             param,
             passing,
-        )?);
+        )?;
+        words.push(word);
+        if let Some(temporary) = temporary {
+            temporaries.push(temporary);
+        }
     }
     let fid = *c
         .methods
@@ -476,7 +537,9 @@ fn emit_user_method_call<M: Module>(
         .unwrap_or_else(|| invariant_violation("MethodId 必须存在函数 ID"));
     let fref = c.module.declare_func_in_func(fid, bcx.func);
     let inst = bcx.ins().call(fref, &words);
-    finish_user_call(bcx, inst, &abi, &ret_vty, sret)
+    let result = finish_user_call(c, bcx, inst, &abi, &ret_vty, sret)?;
+    cleanup_call_temporaries(c, bcx, temporaries)?;
+    Ok(result)
 }
 
 fn emit_incdec<M: Module>(

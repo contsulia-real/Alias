@@ -44,6 +44,7 @@ struct ProgramFacts<'a> {
     global_bindings: HashSet<BindingId>,
     binding_meta: HashMap<BindingId, BindingMeta>,
     struct_fields: HashMap<String, Vec<bool>>,
+    destruction_fields: HashMap<String, Vec<Ty>>,
 }
 
 enum Node<'a> {
@@ -98,6 +99,7 @@ fn collect_facts(program: &CheckedProgram) -> AliasResult<ProgramFacts<'_>> {
         global_bindings: HashSet::new(),
         binding_meta: HashMap::new(),
         struct_fields: HashMap::new(),
+        destruction_fields: super::destruction::struct_fields(program),
     };
     let mut stack = Vec::new();
     for item in program.items.iter().rev() {
@@ -430,6 +432,11 @@ fn argument_pass(
                     } else {
                         BorrowKind::Write
                     },
+                    destroy_plan: Box::new(super::destruction::plan(
+                        value.ty(),
+                        value.span(),
+                        &facts.destruction_fields,
+                    )?),
                 })
             } else {
                 Err(AliasError {
@@ -1529,13 +1536,27 @@ fn validate_argument_pass(
                 } else {
                     BorrowKind::Write
                 };
-                if !matches!(
-                    pass,
-                    ArgumentPass::BorrowTemporary { kind } if *kind == expected_kind
-                ) {
+                let ArgumentPass::BorrowTemporary { kind, destroy_plan } = pass else {
                     return Err(invariant(
                         value.span(),
                         "temporary argument pass 与 parameter effect 漂移",
+                    ));
+                };
+                if *kind != expected_kind {
+                    return Err(invariant(
+                        value.span(),
+                        "temporary argument pass 与 parameter effect 漂移",
+                    ));
+                }
+                let expected_plan = super::destruction::plan(
+                    value.ty(),
+                    value.span(),
+                    &facts.destruction_fields,
+                )?;
+                if **destroy_plan != expected_plan {
+                    return Err(invariant(
+                        value.span(),
+                        "temporary argument destruction plan 与实参类型漂移",
                     ));
                 }
             } else {
