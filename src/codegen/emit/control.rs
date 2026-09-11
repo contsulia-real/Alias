@@ -5,7 +5,8 @@ use super::clone::emit_deep_clone_value;
 use super::cells::{emit_local_cell, ensure_current, pop_scope, push_scope};
 use super::expr::emit_expr;
 use super::destruction::{
-    emit_destroy_value, mark_owner_present, owner_presence, track_owner_present,
+    emit_cleanup_to_depth, emit_destroy_value, mark_owner_present, owner_presence,
+    register_local_cleanup,
 };
 use super::places::{emit_place_addr, emit_place_value};
 use super::value::ExprValue;
@@ -16,8 +17,8 @@ use crate::codegen::layout::{
 };
 use crate::codegen::{invariant_violation, native_err, Compiler, Frame};
 use crate::sema::hir::{
-    AssignmentOperation, BindKind, BindingId, BindingOperation, Body, Expr, OwningWrite,
-    PreviousOwner, ReturnPass, Stmt, StorageRelation,
+    AssignmentOperation, BindKind, BindingId, Body, Expr, PreviousOwner, ReturnPass, Stmt,
+    StorageRelation,
 };
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -63,7 +64,11 @@ pub(super) fn emit_return_value<M: Module>(
             emit_expr(c, bcx, frame, value)
         }
         ReturnPass::OwnedTransfer { source } => {
-            emit_place_value(c, bcx, frame, source).map(|(value, _)| value)
+            let (value, _) = emit_place_value(c, bcx, frame, source)?;
+            if let crate::sema::hir::Place::Local { binding_id, .. } = source {
+                super::destruction::mark_owner_moved(bcx, frame, *binding_id);
+            }
+            Ok(value)
         }
         ReturnPass::BorrowPlace { source, origin } => {
             let _ = origin;
@@ -73,17 +78,19 @@ pub(super) fn emit_return_value<M: Module>(
     }
 }
 
-pub(super) fn emit_return_jump(
+pub(super) fn emit_return_jump<M: Module>(
+    c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     value: ExprValue,
     ret_block: Block,
-) {
+) -> AliasResult<()> {
     // The operand may already have returned through every match arm. Its placeholder carrier is
     // not a return value: do not normalize/store it or append a second terminator to that block.
     if frame.terminated {
-        return;
+        return Ok(());
     }
+    emit_cleanup_to_depth(c, bcx, frame, 0)?;
     let ret_vty = frame
         .ret_vty
         .as_ref()
@@ -107,6 +114,7 @@ pub(super) fn emit_return_jump(
         }
     }
     frame.terminated = true;
+    Ok(())
 }
 
 pub(crate) fn emit_stmt<M: Module>(
@@ -122,7 +130,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 invariant_violation("binding 初始化缺少 resolved BindingOperation")
             });
             let relation = Some(binding_operation.storage_relation());
-            if b.kind == BindKind::Func {
+            let (cell, vty) = if b.kind == BindKind::Func {
                 let Expr::FuncLit {
                     params,
                     body,
@@ -146,7 +154,7 @@ pub(crate) fn emit_stmt<M: Module>(
                     captures,
                     ret_vty.clone(),
                 )?;
-                emit_local_cell(
+                let cell = emit_local_cell(
                     c,
                     bcx,
                     frame,
@@ -155,16 +163,25 @@ pub(crate) fn emit_stmt<M: Module>(
                     b.binding_id,
                     relation,
                 )?;
+                (cell, c.vty(&b.ty))
             } else {
                 let vty = c.vty(&b.ty);
                 let v = emit_expr(c, bcx, frame, &b.value)?;
-                emit_local_cell(c, bcx, frame, v, vty, b.binding_id, relation)?;
-            }
-            if b.kind == BindKind::Var
-                && binding_operation == BindingOperation::Initialize(OwningWrite::OwnershipTransfer)
-            {
-                track_owner_present(bcx, frame, b.binding_id);
-            }
+                let cell = emit_local_cell(c, bcx, frame, v, vty.clone(), b.binding_id, relation)?;
+                (cell, vty)
+            };
+            let plan = b.destroy_plan.as_deref().unwrap_or_else(|| {
+                invariant_violation("binding 缺少 resolved destruction plan")
+            });
+            register_local_cleanup(
+                bcx,
+                frame,
+                b.binding_id,
+                cell,
+                vty,
+                binding_operation.storage_relation(),
+                plan.clone(),
+            );
             Ok(())
         }
         Stmt::Assign {
@@ -252,6 +269,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 if expected != VTy::Unit {
                     invariant_violation("unit return passing 与返回 VTy 漂移")
                 }
+                emit_cleanup_to_depth(c, bcx, frame, 0)?;
                 bcx.ins().jump(ret_block, &[]);
                 frame.terminated = true;
                 return Ok(());
@@ -263,7 +281,7 @@ pub(crate) fn emit_stmt<M: Module>(
                 ));
             };
             let v = emit_return_value(c, bcx, frame, value)?;
-            emit_return_jump(bcx, frame, v, ret_block);
+            emit_return_jump(c, bcx, frame, v, ret_block)?;
             Ok(())
         }
         Stmt::If {
@@ -300,17 +318,19 @@ pub(crate) fn emit_stmt<M: Module>(
             )
         }
         Stmt::Break => {
-            let Some((break_b, _)) = frame.loop_targets.last().copied() else {
+            let Some((break_b, _, cleanup_depth, _)) = frame.loop_targets.last().copied() else {
                 return Err(native_err(Span::default(), "break 缺少循环目标"));
             };
+            emit_cleanup_to_depth(c, bcx, frame, cleanup_depth)?;
             bcx.ins().jump(break_b, &[]);
             frame.terminated = true;
             Ok(())
         }
         Stmt::Continue => {
-            let Some((_, continue_b)) = frame.loop_targets.last().copied() else {
+            let Some((_, continue_b, _, cleanup_depth)) = frame.loop_targets.last().copied() else {
                 return Err(native_err(Span::default(), "continue 缺少循环目标"));
             };
+            emit_cleanup_to_depth(c, bcx, frame, cleanup_depth)?;
             bcx.ins().jump(continue_b, &[]);
             frame.terminated = true;
             Ok(())
@@ -325,10 +345,14 @@ fn emit_scoped_stmts<M: Module>(
     body: &[Stmt],
     ret_block: Block,
 ) -> AliasResult<()> {
+    let cleanup_depth = frame.cleanup_scopes.len();
     push_scope(frame);
     for s in body {
         ensure_current(bcx, frame);
         emit_stmt(c, bcx, frame, s, ret_block)?;
+    }
+    if !frame.terminated {
+        emit_cleanup_to_depth(c, bcx, frame, cleanup_depth)?;
     }
     pop_scope(frame);
     Ok(())
@@ -430,7 +454,10 @@ fn emit_while<M: Module>(
 
     bcx.switch_to_block(body_b);
     frame.terminated = false;
-    frame.loop_targets.push((end_b, header));
+    let cleanup_depth = frame.cleanup_scopes.len();
+    frame
+        .loop_targets
+        .push((end_b, header, cleanup_depth, cleanup_depth));
     emit_scoped_stmts(c, bcx, frame, body, ret_block)?;
     frame.loop_targets.pop();
     if !frame.terminated {
@@ -529,6 +556,7 @@ fn emit_for<M: Module>(
     bcx.ins()
         .store(MemFlagsData::new(), next, iter, ITERATOR_INDEX_OFFSET);
 
+    let cleanup_depth = frame.cleanup_scopes.len();
     push_scope(frame);
     emit_local_cell(
         c,
@@ -539,12 +567,17 @@ fn emit_for<M: Module>(
         binding_id,
         Some(StorageRelation::Owning),
     )?;
-    frame.loop_targets.push((end_b, header));
+    frame
+        .loop_targets
+        .push((end_b, header, cleanup_depth, cleanup_depth));
     for s in body {
         ensure_current(bcx, frame);
         emit_stmt(c, bcx, frame, s, ret_block)?;
     }
     frame.loop_targets.pop();
+    if !frame.terminated {
+        emit_cleanup_to_depth(c, bcx, frame, cleanup_depth)?;
+    }
     pop_scope(frame);
     if !frame.terminated {
         bcx.ins().jump(header, &[]);

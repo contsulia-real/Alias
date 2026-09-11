@@ -3,26 +3,93 @@
 use super::arrays::{array_element_addr, array_len, array_raw};
 use super::value::ExprValue;
 use crate::codegen::abi::VTy;
-use crate::codegen::layout::{result_layout, ARRAY_DATA_OFFSET, RESULT_OK_TAG, RESULT_TAG_OFFSET};
-use crate::codegen::{invariant_violation, Compiler, Frame};
-use crate::sema::hir::{BindingId, DestroyNode, DestroyPlan};
+use crate::codegen::layout::{
+    result_layout, ARRAY_DATA_OFFSET, CLOSURE_ENV_OFFSET, RESULT_OK_TAG, RESULT_TAG_OFFSET,
+};
+use crate::codegen::{invariant_violation, Compiler, Frame, LocalCleanup};
+use crate::sema::hir::{BindingId, DestroyNode, DestroyPlan, StorageRelation};
 use crate::AliasResult;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-pub(super) fn track_owner_present(
+pub(super) fn register_local_cleanup(
     bcx: &mut FunctionBuilder,
     frame: &mut Frame,
     binding: BindingId,
+    cell: cranelift_frontend::Variable,
+    vty: VTy,
+    relation: StorageRelation,
+    plan: DestroyPlan,
 ) {
-    let presence = bcx.declare_var(types::I8);
-    let yes = bcx.ins().iconst(types::I8, 1);
-    bcx.def_var(presence, yes);
-    if frame.owner_presence.insert(binding, presence).is_some() {
-        invariant_violation("同一 reassignable owner 被重复登记")
+    let presence = if relation == StorageRelation::Owning
+        && !matches!(plan.nodes.first(), Some(DestroyNode::Inline))
+    {
+        let presence = bcx.declare_var(types::I8);
+        let yes = bcx.ins().iconst(types::I8, 1);
+        bcx.def_var(presence, yes);
+        if frame.owner_presence.insert(binding, presence).is_some() {
+            invariant_violation("同一 local owner 被重复登记")
+        }
+        Some(presence)
+    } else {
+        None
+    };
+    frame
+        .cleanup_scopes
+        .last_mut()
+        .unwrap_or_else(|| invariant_violation("cleanup scope 栈非空"))
+        .push(LocalCleanup {
+            binding,
+            cell,
+            vty,
+            relation,
+            plan,
+            presence,
+        });
+}
+
+pub(in crate::codegen) fn emit_cleanup_to_depth<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    depth: usize,
+) -> AliasResult<()> {
+    if depth > frame.cleanup_scopes.len() {
+        invariant_violation("cleanup depth 超出词法 scope 栈")
     }
+    let cleanups = frame.cleanup_scopes[depth..]
+        .iter()
+        .rev()
+        .flat_map(|scope| scope.iter().rev())
+        .cloned()
+        .collect::<Vec<_>>();
+    for cleanup in cleanups {
+        let cell = bcx.use_var(cleanup.cell);
+        if cleanup.relation == StorageRelation::Owning {
+            if let Some(presence) = cleanup.presence {
+                let destroy = bcx.create_block();
+                let done = bcx.create_block();
+                let present = bcx.use_var(presence);
+                bcx.ins().brif(present, destroy, &[], done, &[]);
+                bcx.seal_block(destroy);
+                bcx.switch_to_block(destroy);
+                let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
+                emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &cleanup.plan)?;
+                bcx.ins().jump(done, &[]);
+                bcx.seal_block(done);
+                bcx.switch_to_block(done);
+                let no = bcx.ins().iconst(types::I8, 0);
+                bcx.def_var(presence, no);
+            } else {
+                let value = ExprValue::load(bcx, cell, 0, &cleanup.vty);
+                emit_destroy_value(c, bcx, value, cleanup.vty.clone(), &cleanup.plan)?;
+            }
+        }
+        c.call_rt_void(bcx, "rt.heap.free", &[cell])?;
+    }
+    Ok(())
 }
 
 pub(super) fn mark_owner_moved(bcx: &mut FunctionBuilder, frame: &mut Frame, binding: BindingId) {
@@ -148,6 +215,19 @@ pub(super) fn emit_destroy_value<M: Module>(
                     if !matches!(vty, VTy::Iterator(_)) {
                         invariant_violation("Iterator destruction 与物理类型不一致")
                     }
+                    c.call_rt_void(bcx, "rt.heap.free", &[value])?;
+                }
+                DestroyNode::Closure => {
+                    if !matches!(vty, VTy::Func { .. }) {
+                        invariant_violation("Closure destruction 与物理类型不一致")
+                    }
+                    let env = bcx.ins().load(
+                        types::I64,
+                        MemFlagsData::new(),
+                        value,
+                        CLOSURE_ENV_OFFSET,
+                    );
+                    c.call_rt_void(bcx, "rt.heap.free", &[env])?;
                     c.call_rt_void(bcx, "rt.heap.free", &[value])?;
                 }
                 DestroyNode::Struct { name, fields } => {

@@ -159,6 +159,7 @@ fn lower_binding(binding: &crate::ast::Binding, facts: &mut LowerFacts) -> Alias
         kind: binding.kind,
         relation,
         operation: None,
+        destroy_plan: None,
         ty,
         name: binding.name.clone(),
         value,

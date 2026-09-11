@@ -4,6 +4,7 @@ use crate::codegen::abi::{
 };
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
+use crate::codegen::emit::destruction::emit_cleanup_to_depth;
 use crate::codegen::emit::expr::emit_expr;
 use crate::codegen::emit::value::ExprValue;
 use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
@@ -95,6 +96,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             locals_vty: vec![HashMap::new()],
             locals_relation: vec![HashMap::new()],
             owner_presence: HashMap::new(),
+            cleanup_scopes: vec![Vec::new()],
             globals: globals_v,
             env: Some(env_v),
             caps: caps_map,
@@ -152,6 +154,7 @@ impl<'m, M: Module> Compiler<'m, M> {
         emit_body(self, &mut bcx, &mut frame, body, ret_block)?;
         if !frame.terminated {
             if abi.result() == UserReturnPassing::Unit {
+                emit_cleanup_to_depth(self, &mut bcx, &mut frame, 0)?;
                 bcx.ins().jump(ret_block, &[]);
             } else {
                 return Err(native_err(
@@ -208,6 +211,7 @@ impl<'m, M: Module> Compiler<'m, M> {
             locals_vty: vec![HashMap::new()],
             locals_relation: vec![HashMap::new()],
             owner_presence: HashMap::new(),
+            cleanup_scopes: vec![Vec::new()],
             globals: globals_v,
             env: None,
             caps: HashMap::new(),

@@ -47,6 +47,7 @@ pub(crate) struct Binding {
     pub(crate) kind: BindKind,
     pub(crate) relation: Option<StorageRelation>,
     pub(crate) operation: Option<BindingOperation>,
+    pub(crate) destroy_plan: Option<Box<super::DestroyPlan>>,
     pub(crate) ty: Ty,
     pub(crate) name: String,
     pub(crate) value: Expr,

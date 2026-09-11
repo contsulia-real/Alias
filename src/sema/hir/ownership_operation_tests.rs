@@ -253,6 +253,32 @@ fn final_hir_gate_rejects_missing_or_drifted_binding_operation() {
     }
 }
 
+#[test]
+fn binding_destruction_plan_is_frozen_and_fail_closed() {
+    use super::destruction::DestroyNode;
+
+    let mut program = checked(
+        "func i32 main = () -> {\nval string value = 'live'\nreturn value.len()\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let Stmt::Binding(binding) = &mut stmts[0] else {
+        panic!("fixture starts with binding")
+    };
+    let plan = binding.destroy_plan.as_mut().expect("resolved destruction plan");
+    assert_eq!(plan.nodes, [DestroyNode::String]);
+    plan.nodes[0] = DestroyNode::Inline;
+
+    let error =
+        validate_resolved_hir(&program).expect_err("binding destruction drift must fail closed");
+    assert!(
+        error.msg.contains("Binding destruction plan"),
+        "{}",
+        error.msg
+    );
+}
+
 fn checked(source: &str) -> super::CheckedProgram {
     let tokens = crate::lexer::lex(source).unwrap();
     let program = crate::parser::parse(tokens).unwrap();

@@ -148,13 +148,17 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Binding(binding) => {
-                if binding.operation.is_some() {
+                if binding.operation.is_some() || binding.destroy_plan.is_some() {
                     return Err(invariant(
                         binding.span,
-                        "Binding operation 被重复 finalization",
+                        "Binding operation/destruction 被重复 finalization",
                     ));
                 }
-                binding.operation = Some(binding_operation(binding)?);
+                let operation = binding_operation(binding)?;
+                binding.operation = Some(operation);
+                binding.destroy_plan = Some(Box::new(binding_destroy_plan(
+                    binding, operation, &structs,
+                )?));
                 stack.push(MutNode::Expr(&mut binding.value));
             }
             MutNode::Stmt(stmt) => {
@@ -210,10 +214,19 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     while let Some(node) = stack.pop() {
         match node {
             Node::Binding(binding) => {
-                if binding.operation != Some(binding_operation(binding)?) {
+                let operation = binding_operation(binding)?;
+                if binding.operation != Some(operation) {
                     return Err(invariant(
                         binding.span,
                         "Binding operation 与 resolved value operation 漂移",
+                    ));
+                }
+                if binding.destroy_plan.as_deref()
+                    != Some(&binding_destroy_plan(binding, operation, &structs)?)
+                {
+                    return Err(invariant(
+                        binding.span,
+                        "Binding destruction plan 缺失或漂移",
                     ));
                 }
                 stack.push(Node::Expr(&binding.value));
@@ -280,6 +293,20 @@ fn assignment_destroy_plan(
         })
     } else {
         super::destruction::plan(target.ty(), target.span(), structs)
+    }
+}
+
+fn binding_destroy_plan(
+    binding: &Binding,
+    operation: BindingOperation,
+    structs: &HashMap<String, Vec<crate::sema::types::Ty>>,
+) -> AliasResult<super::DestroyPlan> {
+    if operation == BindingOperation::BindBorrowedAlias {
+        Ok(super::DestroyPlan {
+            nodes: vec![super::destruction::DestroyNode::Inline],
+        })
+    } else {
+        super::destruction::plan(&binding.ty, binding.span, structs)
     }
 }
 

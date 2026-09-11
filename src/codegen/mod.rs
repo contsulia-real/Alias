@@ -10,8 +10,8 @@ mod native_runtime;
 mod runtime;
 
 use crate::sema::hir::{
-    BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, Expr, Item, MethodId, Param,
-    StorageRelation,
+    BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, DestroyPlan, Expr, Item,
+    MethodId, Param, StorageRelation,
 };
 use crate::sema::types::Ty;
 use crate::target::TARGET_TRIPLE;
@@ -37,13 +37,25 @@ pub(crate) enum Slot {
 }
 
 #[derive(Clone)]
+pub(crate) struct LocalCleanup {
+    pub(crate) binding: BindingId,
+    pub(crate) cell: Variable,
+    pub(crate) vty: VTy,
+    pub(crate) relation: StorageRelation,
+    pub(crate) plan: DestroyPlan,
+    pub(crate) presence: Option<Variable>,
+}
+
+#[derive(Clone)]
 pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
     pub(crate) locals_relation: Vec<HashMap<BindingId, Option<StorageRelation>>>,
-    /// Separate owner state for reassignable dynamic locals. Moved cells retain stale bits, so
-    /// replacement destruction must never use the stored payload as a liveness flag.
+    /// Separate owner state for dynamic locals. Moved cells retain stale bits, so replacement and
+    /// scope-exit destruction must never use the stored payload as a liveness flag.
     pub(crate) owner_presence: HashMap<BindingId, Variable>,
+    /// Lexical cleanup stack. Entries retain declaration order; exits consume them in reverse.
+    pub(crate) cleanup_scopes: Vec<Vec<LocalCleanup>>,
     pub(crate) globals: Variable,
     pub(crate) env: Option<Variable>,
     pub(crate) caps: HashMap<BindingId, usize>,
@@ -53,7 +65,8 @@ pub(crate) struct Frame {
     pub(crate) terminated: bool,
     /// 当前函数内由内向外的循环目标：(break 目标, continue 目标)。
     /// 创建新函数帧时永远从空栈开始，禁止跨函数 break/continue。
-    pub(crate) loop_targets: Vec<(Block, Block)>,
+    /// (break block, continue block, scopes retained by break, scopes retained by continue).
+    pub(crate) loop_targets: Vec<(Block, Block, usize, usize)>,
     init_ctx: bool,
     ret_block: Option<Block>,
     ret_vty: Option<VTy>,

@@ -184,11 +184,11 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。owning replacement 已执行 resolved `DestroyPlan`，顺序为完整 RHS、target projection、旧 owner destruction、新 owner commit；初始化不销毁旧值。作用域/函数退出 destruction 与 raw allocation 初始化跟踪尚未完成。
+显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。owning replacement 已执行 resolved `DestroyPlan`，顺序为完整 RHS、target projection、旧 owner destruction、新 owner commit；初始化不销毁旧值。显式 local Binding 另有经 final-HIR gate 复核的 `DestroyPlan`，在正常词法 fallthrough、函数 fallthrough、`return`、`break`、`continue` 时逆声明顺序清理；parameter、for/Pattern 隐式 binding、临时值、global 与 raw allocation 初始化跟踪仍未完成。
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，但完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为，函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，显式 local Binding 的作用域退出 destruction 已落地；其余完整 destruction / free 仍未落地。
 
 ### 3.5 显式 move
 
@@ -211,7 +211,7 @@ move place
 - `Owned` parameter 是当前函数内的 owning local capability，因此允许 dynamic `move(parameter)` 并由 caller 显式 transfer；captured Place 与 global 的 dynamic move 仍等待各自 transfer source 固化，不会把缺失 effect 当 owning fallback；
 - `move(place)` 与 `move place` 使用同一 semantic resolution、resolved Place 和 ownership dataflow。
 
-sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。可重赋值 dynamic local 另有显式 presence 状态，Move 取值后清除、replacement commit 后恢复；旧 cell 保留的位模式不表示 owner 仍 live。当前仅 replacement destruction 已执行，作用域/函数退出回收仍受第 18 节的当前实现限制。
+sema 把操作固化为携带 resolved `Place` 的专用 Move HIR；显式 CFG/worklist ownership analysis 决定程序点 capability，codegen 只读取该 Place 的既有物理值。dynamic local 另有显式 presence 状态，Move 取值后清除、replacement commit 后恢复；旧 cell 保留的位模式不表示 owner 仍 live，显式 local Binding 的作用域退出也只在 presence 为真时销毁 owner。其余生命周期限制见第 18 节。
 
 ### 3.6 局部 borrow 与 NLL loan
 
@@ -489,7 +489,7 @@ owned iterator return 已在函数出口检查其当前 reaching source loans：
 
 函数出口对已解析的 iterator 来源 loans 执行单来源检查：不同返回出口或分支汇合后的不同数组来源均静态拒绝。相同 root 与相同完整 projection 可以统一（包括不同源码位置的相同常量下标）；仅重叠、ancestor 或无法证明相同的动态下标不能据此当成同一数组。Owned iterator 参数在 callee 内携带独立的 incoming 来源身份，局部 move/replacement 保留该身份；不同路径返回不同 Owned iterator 参数同样拒绝。该 incoming 身份经返回签名映射为 caller 对应 Owned 实参携带的来源，而不是对已转移的 iterator cell 建立新借用。
 
-`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。iterator 进入普通容器的写入按 stored borrow 禁令拒绝；完整 destruction 尚未落地。runtime fail-fast 检查保留。
+`for` 的稳定来源 Place 通过 resolved `ReadBorrow` pass 建立 loop loan；临时来源通过 `BorrowTemporary(Read)` 求值。直接遍历数组时，live loan 内的重叠写、结构修改、replacement 和 move 在编译期拒绝，不相交 Place 的修改不受影响；循环最后一次来源使用之后结束 loan。显式 `.iterator()` 同样固化 receiver read pass；局部 iterator 初始化及整值 move 到新 binding 已将源数组 loan 保留在 iterator holder 中，后续遍历通过 holder dependency 保持该 loan，最后一次消费后允许修改原数组。局部 owning iterator replacement 在 RHS 完整求值并通过目标冲突检查后替换 holder 的 loan 集合：后续使用只保持新来源；条件分支汇合保留所有可能到达的来源。循环中重新执行初始化、调用或 `for` 不会把临时 holder 的上一轮 loan 延长到新一轮。iterator 进入普通容器的写入按 stored borrow 禁令拒绝；`for` 隐式 element binding 的 destruction 尚未落地。runtime fail-fast 检查保留。
 
 当前集合迭代语法：
 
@@ -757,15 +757,17 @@ line / col / len
 
 ## 18. Runtime 与内存模型当前事实
 
-当前 runtime 已回收内部临时分配及 owning replacement 的旧值图，但用户值的完整生命周期回收尚未落地：
+当前 runtime 已回收部分内部临时分配、owning replacement 的旧值图及显式 local Binding，但用户值的完整生命周期回收尚未落地：
 
 - 绑定使用清零单元格；
 - 闭包环境保存捕获单元格指针；
-- 字符串拥有独立存储；插值内部累积值/字面量片段、整数与布尔输出包装器的格式化临时值已回收，用户字符串仍未在作用域退出时回收；
+- 字符串拥有独立存储；插值内部累积值/字面量片段、整数与布尔输出包装器的格式化临时值已回收，显式 local string Binding 在各类作用域出口回收；
 - 数组扩容完成后释放旧 backing，不销毁迁移到新 backing 的元素；
 - owning replacement 按 resolved recipe 销毁 string、struct 逆序字段、array 逆序元素与 backing/header/wrapper、result active payload、iterator 自身状态；
-- struct/result/array/iterator 等仍 live 对象在作用域/函数退出时尚不回收；
-- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；被 replacement 替换时已回收，正常作用域退出时尚不回收。
+- 显式 local Binding 在正常词法 fallthrough、函数 fallthrough、`return`、`break`、`continue` 上逆声明顺序销毁 owning value 并释放 cell；move 已转移的 owner 不重复销毁，borrowed alias 只释放 alias cell；
+- closure local 在退出时先释放 capture env，再释放 closure root；逆声明顺序保证它先于所捕获的更早 local 结束；
+- parameter、`for`/Pattern 隐式 binding、表达式临时值、global 所持有的 struct/result/array/iterator 等仍 live 对象尚未在对应生命周期出口回收；
+- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式 local Binding 或被 replacement 替换时已回收，其余临时/global 路径仍未回收。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 

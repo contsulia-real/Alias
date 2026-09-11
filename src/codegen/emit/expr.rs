@@ -302,7 +302,7 @@ fn emit_expr_value<M: Module>(
             let rb = frame
                 .ret_block
                 .unwrap_or_else(|| invariant_violation("? 仅在函数体内可达 (sema 已校验)"));
-            super::control::emit_return_jump(bcx, frame, ExprValue::scalar(subj), rb);
+            super::control::emit_return_jump(c, bcx, frame, ExprValue::scalar(subj), rb)?;
 
             bcx.switch_to_block(ok_b);
             frame.terminated = false;
@@ -591,6 +591,12 @@ pub(crate) fn emit_match_arm<M: Module>(
                 // A nested match may return on every path; no value reaches this arm's join.
                 false
             } else {
+                super::destruction::emit_cleanup_to_depth(
+                    c,
+                    bcx,
+                    frame,
+                    frame.cleanup_scopes.len() - 1,
+                )?;
                 if *result_vty == VTy::Unit {
                     bcx.ins().jump(join_b, &[]);
                 } else {
@@ -611,7 +617,7 @@ pub(crate) fn emit_match_arm<M: Module>(
             let rb = frame
                 .ret_block
                 .unwrap_or_else(|| invariant_violation("never 臂仅在函数体内可达 (sema 已校验)"));
-            super::control::emit_return_jump(bcx, frame, v, rb);
+            super::control::emit_return_jump(c, bcx, frame, v, rb)?;
             false
         }
         ArmBody::Block(stmts) => {
@@ -633,6 +639,12 @@ pub(crate) fn emit_match_arm<M: Module>(
             if frame.terminated {
                 false
             } else {
+                super::destruction::emit_cleanup_to_depth(
+                    c,
+                    bcx,
+                    frame,
+                    frame.cleanup_scopes.len() - 1,
+                )?;
                 if *result_vty == VTy::Unit {
                     bcx.ins().jump(join_b, &[]);
                 } else {

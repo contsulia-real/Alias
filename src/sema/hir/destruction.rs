@@ -18,6 +18,7 @@ pub(crate) enum DestroyNode {
     Inline,
     String,
     Iterator,
+    Closure,
     Struct { name: String, fields: Vec<usize> },
     Array { element: usize },
     Result { ok: usize, err: usize },
@@ -93,7 +94,8 @@ pub(super) fn plan(
                 tasks.push(Task::Value(*ok_ty, ok));
                 DestroyNode::Result { ok, err }
             }
-            Ty::Unit | Ty::Unknown | Ty::FuncPoly | Ty::Func { .. } => return Err(invalid()),
+            Ty::Func { .. } => DestroyNode::Closure,
+            Ty::Unit | Ty::Unknown | Ty::FuncPoly => return Err(invalid()),
         };
     }
     Ok(DestroyPlan { nodes })

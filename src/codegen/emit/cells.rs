@@ -165,9 +165,16 @@ pub(crate) fn push_scope(frame: &mut Frame) {
     frame.scopes.push(HashMap::new());
     frame.locals_vty.push(HashMap::new());
     frame.locals_relation.push(HashMap::new());
+    frame.cleanup_scopes.push(Vec::new());
 }
 
 pub(crate) fn pop_scope(frame: &mut Frame) {
+    let cleanups = frame.cleanup_scopes.pop().unwrap_or_else(|| {
+        invariant_violation("cleanup scope 栈非空")
+    });
+    for cleanup in cleanups {
+        frame.owner_presence.remove(&cleanup.binding);
+    }
     frame.scopes.pop();
     frame.locals_vty.pop();
     frame.locals_relation.pop();

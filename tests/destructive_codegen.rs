@@ -71,6 +71,43 @@ func i32 main = () -> {
     assert_eq!(run(src).unwrap(), 13);
 }
 
+#[test]
+fn explicit_local_bindings_are_destroyed_on_every_scope_exit() {
+    let src = r#"
+func string pass = () -> {
+    val string value = 'kept'
+    return move value
+}
+func unit discard = () -> {
+    val string value = 'drop'
+}
+func i32 main = () -> {
+    var i32 total = 0
+    var i32 i = 0
+    while i < 4 {
+        val string local = 'x'
+        i = i + 1
+        if i < 3 { continue }
+        total = total + local.len()
+        if i == 3 { break }
+    }
+    if true {
+        val string scoped = 'zz'
+        total = total + scoped.len()
+    }
+    val string captured = 'abc'
+    func i32 length = () -> return captured.len()
+    total = total + length()
+    val string output = pass()
+    while output != 'kept' { return 7 }
+    discard()
+    discard()
+    return total
+}
+"#;
+    assert_eq!(run(src).unwrap(), 6);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]
