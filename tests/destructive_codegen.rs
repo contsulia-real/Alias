@@ -171,6 +171,23 @@ func i32 main = () -> {
     assert_eq!(run(src).unwrap(), 0);
 }
 
+#[test]
+fn process_exit_destroys_global_owner_trees() {
+    let src = r#"
+struct bundle { val array<string> values = [] }
+val bundle global_bundle = bundle(values = ['a', 'bb'])
+val result<array<string>, string> global_result = ok(['ccc'])
+func i32 main = () -> {
+    val i32 payload = match global_result {
+        ok(values) -> values[0].len()
+        err(message) -> message.len()
+    }
+    return global_bundle.values[1].len() + payload - 5
+}
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

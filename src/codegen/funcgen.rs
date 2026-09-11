@@ -4,7 +4,9 @@ use crate::codegen::abi::{
 };
 use crate::codegen::emit::cells::{emit_local_cell, first_result};
 use crate::codegen::emit::control::emit_body;
-use crate::codegen::emit::destruction::{emit_cleanup_to_depth, register_local_cleanup};
+use crate::codegen::emit::destruction::{
+    emit_cleanup_to_depth, emit_destroy_value, register_local_cleanup,
+};
 use crate::codegen::emit::expr::emit_expr;
 use crate::codegen::emit::value::ExprValue;
 use crate::codegen::layout::{CLOSURE_CODE_OFFSET, CLOSURE_ENV_OFFSET};
@@ -315,6 +317,37 @@ impl<'m, M: Module> Compiler<'m, M> {
         let raw = first_result(&bcx, icall);
         let code_word = norm_load(&mut bcx, raw, &main_ret);
         let exit_code = bcx.ins().ireduce(types::I32, code_word);
+
+        let globals = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Binding(binding) if !binding.is_method() => Some(binding.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (binding_index, binding) in globals.into_iter().enumerate().rev() {
+            let relation = binding
+                .operation
+                .unwrap_or_else(|| {
+                    invariant_violation("global cleanup 缺少 resolved BindingOperation")
+                })
+                .storage_relation();
+            if relation == StorageRelation::Owning {
+                let vty = self.vty(&binding.ty);
+                let value = ExprValue::load(
+                    &mut bcx,
+                    gword,
+                    self.top_slots[binding_index] as i32,
+                    &vty,
+                );
+                let plan = binding.destroy_plan.as_deref().unwrap_or_else(|| {
+                    invariant_violation("global cleanup 缺少 resolved destruction plan")
+                });
+                emit_destroy_value(self, &mut bcx, value, vty, plan)?;
+            }
+        }
+        self.call_rt_void(&mut bcx, "rt.heap.free", &[gword])?;
+
         let ep = self.import_external("ExitProcess", &[types::I32], None)?;
         let epr = self.module.declare_func_in_func(ep, bcx.func);
         bcx.ins().call(epr, &[exit_code]);

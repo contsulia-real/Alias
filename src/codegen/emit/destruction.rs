@@ -145,7 +145,7 @@ enum Task {
     Free(Value),
 }
 
-pub(super) fn emit_destroy_value<M: Module>(
+pub(crate) fn emit_destroy_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     value: ExprValue,

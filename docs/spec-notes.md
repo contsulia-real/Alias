@@ -184,7 +184,7 @@ read stable Place
 
 source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 重新验证 Place/type/plan 一致性，后端只执行已解析计划。动态 DeepCloneable 值得到独立 owner；inline 标量仍是普通值复制。若类型不满足 3.2 的 `DeepCloneable(T)`，这些 owning-slot 普通读取会静态拒绝，不退回引用 bit-copy。
 
-显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。owning replacement 已执行 resolved `DestroyPlan`，顺序为完整 RHS、target projection、旧 owner destruction、新 owner commit；初始化不销毁旧值。parameter/self、显式 local Binding、每轮 `for` element 与命中的 Pattern binding 均携带经 final-HIR gate 复核的 `DestroyPlan`，在对应正常 fallthrough、函数退出、`break`、`continue` 时按词法层级逆序清理；临时值、global 与 raw allocation 初始化跟踪仍未完成。
+显式 Binding 初始化与 local/field assignment 都具有已解析的 destination-side ownership operation：初始化区分 `Initialize(InlineCopy|OwnershipTransfer)` 与 `BindBorrowedAlias`；owning Place replacement 区分 `InlineCopy` 与 `OwnershipTransfer`；直接赋值给 `var` borrowed alias 为 `RebindBorrowedAlias`。struct 字段默认值/构造实参、array literal 元素/`push` 实参与 result payload 同样固化 `InlineCopy|OwnershipTransfer`，不是借用参数传递。ownership CFG、final-HIR gate 与 codegen 共同执行这些合同，不能把未解析的初始化默认为 owning，也不能通过机器位模式重新猜 replacement / rebind。owning replacement 已执行 resolved `DestroyPlan`，顺序为完整 RHS、target projection、旧 owner destruction、新 owner commit；初始化不销毁旧值。parameter/self、顶层与局部显式 Binding、每轮 `for` element 与命中的 Pattern binding 均携带经 final-HIR gate 复核的 `DestroyPlan`；局部生命周期在对应正常 fallthrough、函数退出、`break`、`continue` 时按词法层级逆序清理，顶层 owning Binding 在 `main` 正常返回后按源码逆序清理。临时值与 raw allocation 初始化跟踪仍未完成。
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
@@ -705,6 +705,7 @@ println fact 0
 - `main` 必须零参数；
 - `main` 唯一合法返回类型为 `i32`；
 - 顶层绑定按源码顺序初始化，并在 `main` 之前执行；
+- `main` 正常返回后，顶层 owning Binding 按源码逆序执行 resolved destruction，随后释放 global slab；运行时错误仍直接以 1 终止进程；
 - CLI 把最终进程退出码 clamp 到 `0..=255`。
 
 缺少 main 使用 `Span::default()`，诊断只输出：
@@ -766,8 +767,8 @@ line / col / len
 - owning replacement 按 resolved recipe 销毁 string、struct 逆序字段、array 逆序元素与 backing/header/wrapper、result active payload、iterator 自身状态；
 - 显式 local Binding 在正常词法 fallthrough、函数 fallthrough、`return`、`break`、`continue` 上逆声明顺序销毁 owning value 并释放 cell；move 已转移的 owner 不重复销毁，borrowed alias 只释放 alias cell；
 - closure local 在退出时先释放 capture env，再释放 closure root；逆声明顺序保证它先于所捕获的更早 local 结束；
-- parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；表达式临时值、global 所持有的 struct/result/array/iterator 等仍 live 对象尚未在对应生命周期出口回收；
-- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式 local Binding 或被 replacement 替换时已回收，其余临时/global 路径仍未回收。
+- parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；`main` 正常返回后，顶层 owning Binding 按源码逆序销毁所持值并释放 global slab；表达式临时值尚未在对应生命周期出口完整回收；
+- 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式或顶层 Binding、被 replacement 替换，或者由其它 owning destination 接管时按对应 owner 生命周期回收，其余未被接管的表达式临时路径仍未完整回收。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 
