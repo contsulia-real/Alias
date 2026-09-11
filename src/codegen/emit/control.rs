@@ -294,6 +294,7 @@ pub(crate) fn emit_stmt<M: Module>(
             binding_id,
             ty,
             element_plan,
+            element_destroy_plan,
             iterable,
             source_pass,
             body,
@@ -312,6 +313,9 @@ pub(crate) fn emit_stmt<M: Module>(
                     body,
                     &elem_vty,
                     element_plan,
+                    element_destroy_plan.as_deref().unwrap_or_else(|| {
+                        invariant_violation("for element 缺少 resolved destruction plan")
+                    }),
                     *span,
                     ret_block,
                 ),
@@ -483,11 +487,22 @@ fn emit_for<M: Module>(
         &[Stmt],
         &VTy,
         &crate::sema::hir::DeepClonePlan,
+        &crate::sema::hir::DestroyPlan,
         Span,
         Block,
     ),
 ) -> AliasResult<()> {
-    let (iterable, source_pass, binding_id, body, elem_vty, element_plan, span, ret_block) = input;
+    let (
+        iterable,
+        source_pass,
+        binding_id,
+        body,
+        elem_vty,
+        element_plan,
+        element_destroy_plan,
+        span,
+        ret_block,
+    ) = input;
     ensure_current(bcx, frame);
     let source_vty = c.vty(iterable.ty());
     let source = match source_pass {
@@ -558,7 +573,7 @@ fn emit_for<M: Module>(
 
     let cleanup_depth = frame.cleanup_scopes.len();
     push_scope(frame);
-    emit_local_cell(
+    let cell = emit_local_cell(
         c,
         bcx,
         frame,
@@ -567,6 +582,15 @@ fn emit_for<M: Module>(
         binding_id,
         Some(StorageRelation::Owning),
     )?;
+    register_local_cleanup(
+        bcx,
+        frame,
+        binding_id,
+        cell,
+        elem_vty.clone(),
+        StorageRelation::Owning,
+        element_destroy_plan.clone(),
+    );
     frame
         .loop_targets
         .push((end_b, header, cleanup_depth, cleanup_depth));

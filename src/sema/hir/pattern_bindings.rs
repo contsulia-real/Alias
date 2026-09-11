@@ -32,20 +32,6 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-fn struct_fields(program: &CheckedProgram) -> HashMap<String, Vec<Ty>> {
-    program
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::StructDef(def) => Some((
-                def.name.clone(),
-                def.fields.iter().map(|field| field.ty.clone()).collect(),
-            )),
-            Item::Binding(_) => None,
-        })
-        .collect()
-}
-
 fn clone_operation(
     ty: &Ty,
     span: Span,
@@ -59,12 +45,12 @@ fn clone_operation(
     })
 }
 
-fn expected_operation(
+fn expected_binding(
     subject: &Expr,
     pattern: &Pattern,
     has_binding_id: bool,
     fields: &HashMap<String, Vec<Ty>>,
-) -> AliasResult<Option<PatternBindingOperation>> {
+) -> AliasResult<(Option<PatternBindingOperation>, Option<super::DestroyPlan>)> {
     let binding_ty = pattern_binding_ty(subject.ty(), pattern)?;
     if binding_ty.is_some() != has_binding_id {
         return Err(invariant(
@@ -73,62 +59,69 @@ fn expected_operation(
         ));
     }
     let Some(binding_ty) = binding_ty else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
-    if matches!(pattern, Pattern::Constructor { .. }) {
-        return clone_operation(&binding_ty, pattern.span(), fields).map(Some);
-    }
-    if !matches!(pattern, Pattern::Binding { .. }) {
-        return Err(invariant(pattern.span(), "未知的 Pattern binding 形态"));
-    }
-    if matches!(
-        binding_ty,
-        Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool
-    ) {
-        return Ok(Some(PatternBindingOperation::InlineCopy));
-    }
-
-    match (subject.category(), subject.ownership_capability()) {
-        (
-            Some(ExprCategory::Value(ValueCategory::OwnedTemporary)),
-            Some(OwnershipCapability::Available),
-        ) => Ok(Some(PatternBindingOperation::OwnershipTransfer)),
-        (Some(ExprCategory::Place), None)
-        | (
-            Some(ExprCategory::Value(ValueCategory::BorrowedValue)),
-            Some(OwnershipCapability::None),
-        ) => clone_operation(&binding_ty, pattern.span(), fields).map(Some),
-        _ => Err(AliasError {
-            msg: format!(
-                "Pattern binding 无法确定 {} 的 copy/clone/transfer ownership effect",
-                binding_ty.name()
-            ),
-            span: pattern.span(),
-        }),
-    }
+    let operation = if matches!(pattern, Pattern::Constructor { .. }) {
+        clone_operation(&binding_ty, pattern.span(), fields)?
+    } else {
+        if !matches!(pattern, Pattern::Binding { .. }) {
+            return Err(invariant(pattern.span(), "未知的 Pattern binding 形态"));
+        }
+        if matches!(
+            binding_ty,
+            Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool
+        ) {
+            PatternBindingOperation::InlineCopy
+        } else {
+            match (subject.category(), subject.ownership_capability()) {
+                (
+                    Some(ExprCategory::Value(ValueCategory::OwnedTemporary)),
+                    Some(OwnershipCapability::Available),
+                ) => PatternBindingOperation::OwnershipTransfer,
+                (Some(ExprCategory::Place), None)
+                | (
+                    Some(ExprCategory::Value(ValueCategory::BorrowedValue)),
+                    Some(OwnershipCapability::None),
+                ) => clone_operation(&binding_ty, pattern.span(), fields)?,
+                _ => {
+                    return Err(AliasError {
+                        msg: format!(
+                            "Pattern binding 无法确定 {} 的 copy/clone/transfer ownership effect",
+                            binding_ty.name()
+                        ),
+                        span: pattern.span(),
+                    });
+                }
+            }
+        }
+    };
+    let destroy_plan = super::destruction::plan(&binding_ty, pattern.span(), fields)?;
+    Ok((Some(operation), Some(destroy_plan)))
 }
 
 pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
-    let fields = struct_fields(program);
+    let fields = super::destruction::struct_fields(program);
     let mut stack = root_mut_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
             MutNode::Expr(expr) => {
                 if let Expr::Match { subject, arms, .. } = expr {
                     for arm in arms.iter_mut() {
-                        if arm.binding_operation.is_some() {
+                        if arm.binding_operation.is_some() || arm.binding_destroy_plan.is_some() {
                             return Err(invariant(
                                 arm.pattern.span(),
-                                "Pattern binding operation 被重复 finalization",
+                                "Pattern binding operation/destruction 被重复 finalization",
                             ));
                         }
-                        arm.binding_operation = expected_operation(
+                        let (operation, destroy_plan) = expected_binding(
                             subject,
                             &arm.pattern,
                             arm.binding_id.is_some(),
                             &fields,
                         )?;
+                        arm.binding_operation = operation;
+                        arm.binding_destroy_plan = destroy_plan.map(Box::new);
                     }
                 }
                 push_mut_expr_children(&mut stack, expr);
@@ -140,23 +133,31 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
 }
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
-    let fields = struct_fields(program);
+    let fields = super::destruction::struct_fields(program);
     let mut stack = root_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
             Node::Expr(expr) => {
                 if let Expr::Match { subject, arms, .. } = expr {
                     for arm in arms {
-                        let expected = expected_operation(
+                        let (expected_operation, expected_destroy_plan) = expected_binding(
                             subject,
                             &arm.pattern,
                             arm.binding_id.is_some(),
                             &fields,
                         )?;
-                        if arm.binding_operation != expected {
+                        if arm.binding_operation != expected_operation {
                             return Err(invariant(
                                 arm.pattern.span(),
                                 "Pattern binding operation 与 resolved source 不一致",
+                            ));
+                        }
+                        if arm.binding_destroy_plan.as_deref()
+                            != expected_destroy_plan.as_ref()
+                        {
+                            return Err(invariant(
+                                arm.pattern.span(),
+                                "Pattern binding destruction plan 缺失或漂移",
                             ));
                         }
                     }

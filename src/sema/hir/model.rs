@@ -175,6 +175,7 @@ pub(crate) enum Stmt {
         binding_id: BindingId,
         ty: Ty,
         element_plan: DeepClonePlan,
+        element_destroy_plan: Option<Box<super::DestroyPlan>>,
         iterable: Expr,
         source_pass: Option<ArgumentPass>,
         body: Vec<Stmt>,
@@ -202,6 +203,7 @@ pub(crate) struct MatchArm {
     pub(crate) pattern: Pattern,
     pub(crate) binding_id: Option<BindingId>,
     pub(crate) binding_operation: Option<PatternBindingOperation>,
+    pub(crate) binding_destroy_plan: Option<Box<super::DestroyPlan>>,
     pub(crate) body: ArmBody,
 }
 

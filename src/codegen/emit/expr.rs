@@ -533,7 +533,7 @@ pub(crate) fn emit_match_arm<M: Module>(
                 invariant_violation("Pattern binding 缺少 resolved ownership operation")
             });
             let value = emit_pattern_binding_value(c, bcx, subj, subject_vty, operation)?;
-            emit_local_cell(
+            let cell = emit_local_cell(
                 c,
                 bcx,
                 frame,
@@ -542,6 +542,18 @@ pub(crate) fn emit_match_arm<M: Module>(
                 binding_id,
                 Some(crate::sema::hir::StorageRelation::Owning),
             )?;
+            let plan = arm.binding_destroy_plan.as_deref().unwrap_or_else(|| {
+                invariant_violation("Pattern binding 缺少 resolved destruction plan")
+            });
+            super::destruction::register_local_cleanup(
+                bcx,
+                frame,
+                binding_id,
+                cell,
+                subject_vty.clone(),
+                crate::sema::hir::StorageRelation::Owning,
+                plan.clone(),
+            );
         }
         (
             Pattern::Constructor {
@@ -563,15 +575,27 @@ pub(crate) fn emit_match_arm<M: Module>(
                 invariant_violation("result Pattern binding 缺少 resolved ownership operation")
             });
             let payload = emit_pattern_binding_value(c, bcx, payload, &bind_vty, operation)?;
-            emit_local_cell(
+            let cell = emit_local_cell(
                 c,
                 bcx,
                 frame,
                 ExprValue::scalar(payload),
-                bind_vty,
+                bind_vty.clone(),
                 binding_id,
                 Some(crate::sema::hir::StorageRelation::Owning),
             )?;
+            let plan = arm.binding_destroy_plan.as_deref().unwrap_or_else(|| {
+                invariant_violation("result Pattern binding 缺少 resolved destruction plan")
+            });
+            super::destruction::register_local_cleanup(
+                bcx,
+                frame,
+                binding_id,
+                cell,
+                bind_vty,
+                crate::sema::hir::StorageRelation::Owning,
+                plan.clone(),
+            );
         }
         (Pattern::Binding { .. }, _, None)
         | (

@@ -181,6 +181,22 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                         target, operation.unwrap(), &structs,
                     )?));
                 }
+                if let Stmt::For {
+                    ty,
+                    element_destroy_plan,
+                    span,
+                    ..
+                } = stmt
+                {
+                    if element_destroy_plan.is_some() {
+                        return Err(invariant(
+                            *span,
+                            "for element destruction 被重复 finalization",
+                        ));
+                    }
+                    *element_destroy_plan =
+                        Some(Box::new(super::destruction::plan(ty, *span, &structs)?));
+                }
                 push_mut_stmt_children(&mut stack, stmt);
             }
             MutNode::Expr(expr) => {
@@ -253,6 +269,22 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         return Err(invariant(
                             target.span(),
                             "Assignment operation 与 resolved value operation 漂移",
+                        ));
+                    }
+                }
+                if let Stmt::For {
+                    ty,
+                    element_destroy_plan,
+                    span,
+                    ..
+                } = stmt
+                {
+                    if element_destroy_plan.as_deref()
+                        != Some(&super::destruction::plan(ty, *span, &structs)?)
+                    {
+                        return Err(invariant(
+                            *span,
+                            "for element destruction plan 缺失或漂移",
                         ));
                     }
                 }

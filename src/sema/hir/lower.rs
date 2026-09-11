@@ -332,6 +332,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
                 *span,
                 "for 元素 DeepClone plan",
             )?,
+            element_destroy_plan: None,
             iterable: lower_expr(iterable, facts)?,
             body: body
                 .iter()
@@ -933,6 +934,7 @@ fn lower_match_arm(arm: &crate::ast::MatchArm, facts: &mut LowerFacts) -> AliasR
         pattern: arm.pattern.clone(),
         binding_id: facts.match_binding_ids.remove(&key),
         binding_operation: None,
+        binding_destroy_plan: None,
         body: match &arm.body {
             crate::ast::ArmBody::Block(stmts) => ArmBody::Block(
                 stmts

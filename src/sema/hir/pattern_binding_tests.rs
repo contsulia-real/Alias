@@ -1,5 +1,6 @@
 use super::{
-    validate_resolved_hir, Body, DeepClonePlan, Expr, Item, PatternBindingOperation, Stmt,
+    validate_resolved_hir, Body, DeepClonePlan, DestroyNode, Expr, Item,
+    PatternBindingOperation, Stmt,
 };
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -65,6 +66,20 @@ func i32 main = () -> {
             fields: vec![DeepClonePlan::Inline],
         }))
     );
+    assert_eq!(
+        arms[0]
+            .binding_destroy_plan
+            .as_deref()
+            .expect("cloned binding destruction plan")
+            .nodes,
+        vec![
+            DestroyNode::Struct {
+                name: "cell".into(),
+                fields: vec![1],
+            },
+            DestroyNode::Inline,
+        ]
+    );
 
     let Expr::Match { arms, .. } = match_expr(stmts, "transferred") else {
         panic!("transferred must be a match expression")
@@ -73,6 +88,7 @@ func i32 main = () -> {
         arms[0].binding_operation,
         Some(PatternBindingOperation::OwnershipTransfer)
     );
+    assert!(arms[0].binding_destroy_plan.is_some());
 
     let Expr::Match { arms, .. } = match_expr(stmts, "payload") else {
         panic!("payload must be a match expression")
@@ -85,6 +101,7 @@ func i32 main = () -> {
         }))
     );
     assert_eq!(arms[1].binding_operation, None);
+    assert!(arms[1].binding_destroy_plan.is_none());
 }
 
 #[test]
@@ -107,6 +124,35 @@ fn final_hir_gate_rejects_pattern_binding_operation_drift() {
     let error = validate_resolved_hir(&program).expect_err("operation drift must fail closed");
     assert!(
         error.msg.contains("Pattern binding operation"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_pattern_binding_destruction_drift() {
+    let mut program = checked(
+        "func i32 main = () -> {\n\
+    val string source = 'x'\n\
+    val i32 length = match source { text -> text.len() }\n\
+    return length\n\
+}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let Expr::Match { arms, .. } = match_expr(stmts, "length") else {
+        panic!("length must be a match expression")
+    };
+    arms[0]
+        .binding_destroy_plan
+        .as_deref_mut()
+        .expect("binding destruction plan")
+        .nodes[0] = DestroyNode::Inline;
+
+    let error = validate_resolved_hir(&program).expect_err("destruction drift must fail closed");
+    assert!(
+        error.msg.contains("Pattern binding destruction plan"),
         "{}",
         error.msg
     );

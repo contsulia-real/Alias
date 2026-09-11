@@ -108,6 +108,35 @@ func i32 main = () -> {
     assert_eq!(run(src).unwrap(), 6);
 }
 
+#[test]
+fn for_and_pattern_bindings_destroy_or_transfer_their_owners() {
+    let src = r#"
+func i32 main = () -> {
+    val array<string> values = ['a', 'bb', 'ccc']
+    var array<string> kept = []
+    var i32 total = 0
+    var i32 i = 0
+    for string item in values {
+        i = i + 1
+        total = total + i
+        if i == 2 { continue }
+        if i == 3 { break }
+        kept.push(move item)
+    }
+    val string source = 'source'
+    val i32 cloned = match source { text -> text.len() }
+    val result<string, i32> wrapped = ok('payload')
+    val i32 payload = match wrapped {
+        ok(text) -> text.len()
+        err(_) -> 0
+    }
+    val string moved = match 'owned' { text -> move text }
+    return total + kept[0].len() + cloned + payload + moved.len()
+}
+"#;
+    assert_eq!(run(src).unwrap(), 25);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

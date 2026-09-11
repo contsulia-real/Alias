@@ -1,6 +1,6 @@
 use super::{
-    Body, BuiltinCall, CallTarget, DeepClonePlan, Expr, ExprCategory, Item, OwnershipCapability,
-    Stmt, StorageRelation, ValueCategory,
+    Body, BuiltinCall, CallTarget, DeepClonePlan, DestroyNode, Expr, ExprCategory, Item,
+    OwnershipCapability, Stmt, StorageRelation, ValueCategory,
 };
 
 fn checked(source: &str) -> super::CheckedProgram {
@@ -204,10 +204,14 @@ func i32 main = () -> {\n\
     let Body::Block(stmts) = main_body(&mut program) else {
         panic!("fixture main must use block body")
     };
-    let plan = stmts
+    let (plan, destroy_plan) = stmts
         .iter()
         .find_map(|stmt| match stmt {
-            Stmt::For { element_plan, .. } => Some(element_plan),
+            Stmt::For {
+                element_plan,
+                element_destroy_plan,
+                ..
+            } => Some((element_plan, element_destroy_plan.as_deref())),
             _ => None,
         })
         .expect("for statement");
@@ -217,6 +221,16 @@ func i32 main = () -> {\n\
             name: "cell".into(),
             fields: vec![DeepClonePlan::Inline],
         }
+    );
+    assert_eq!(
+        destroy_plan.expect("for element destruction plan").nodes,
+        vec![
+            DestroyNode::Struct {
+                name: "cell".into(),
+                fields: vec![1],
+            },
+            DestroyNode::Inline,
+        ]
     );
 }
 
@@ -245,6 +259,39 @@ fn final_hir_gate_rejects_for_element_plan_drift() {
         .expect_err("mutated for element plan must fail final HIR gate");
     assert!(
         error.msg.contains("for 元素 DeepClone plan 与循环变量类型不一致"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn final_hir_gate_rejects_for_element_destruction_drift() {
+    let mut program = checked(
+        "func i32 main = () -> {\n\
+    val array<string> values = ['a']\n\
+    for string value in values { println value }\n\
+    return 0\n\
+}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let plan = stmts
+        .iter_mut()
+        .find_map(|stmt| match stmt {
+            Stmt::For {
+                element_destroy_plan,
+                ..
+            } => element_destroy_plan.as_deref_mut(),
+            _ => None,
+        })
+        .expect("for element destruction plan");
+    plan.nodes[0] = DestroyNode::Inline;
+
+    let error = super::validate_resolved_hir(&program)
+        .expect_err("mutated for element destruction plan must fail final HIR gate");
+    assert!(
+        error.msg.contains("for element destruction plan"),
         "实际: {}",
         error.msg
     );

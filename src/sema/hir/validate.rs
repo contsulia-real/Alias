@@ -1202,6 +1202,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     binding_id,
                     ty,
                     element_plan,
+                    element_destroy_plan: _, // independently verified by ownership_operations
                     source_pass: _, // independently verified by parameter_effects and loan flow
                     iterable,
                     body,
