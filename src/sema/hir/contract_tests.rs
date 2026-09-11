@@ -278,6 +278,7 @@ fn final_hir_gate_rejects_increase_retargeted_to_val_binding() {
                         target: CallTarget::Builtin(BuiltinCall::Increase),
                         ..
                     },
+                ..
             } => args.first_mut(),
             _ => None,
         })

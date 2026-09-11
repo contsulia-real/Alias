@@ -256,8 +256,17 @@ pub(crate) fn emit_stmt<M: Module>(
             }
             Ok(())
         }
-        Stmt::Expr { expr, .. } => {
-            emit_expr(c, bcx, frame, expr)?;
+        Stmt::Expr {
+            expr,
+            discard_destroy_plan,
+        } => {
+            let value = emit_expr(c, bcx, frame, expr)?;
+            if frame.terminated {
+                return Ok(());
+            }
+            if let Some(plan) = discard_destroy_plan.as_deref() {
+                emit_destroy_value(c, bcx, value, c.vty(expr.ty()), plan)?;
+            }
             Ok(())
         }
         Stmt::Return { value, .. } => {

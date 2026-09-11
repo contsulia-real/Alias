@@ -60,7 +60,7 @@ impl CheckedProgram {
                         visit_place(target, visit, &mut stack);
                         stack.push(TypeNode::Expr(value));
                     }
-                    Stmt::Expr { expr } => stack.push(TypeNode::Expr(expr)),
+                    Stmt::Expr { expr, .. } => stack.push(TypeNode::Expr(expr)),
                     Stmt::Return { value } => {
                         if let Some(value) = value {
                             stack.push(TypeNode::Expr(value));

@@ -161,6 +161,7 @@ pub(crate) enum Stmt {
     },
     Expr {
         expr: Expr,
+        discard_destroy_plan: Option<Box<super::DestroyPlan>>,
     },
     Return {
         value: Option<Expr>,

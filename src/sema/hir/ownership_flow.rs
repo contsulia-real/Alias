@@ -742,7 +742,7 @@ impl<'a> GraphBuilder<'a> {
                 }
                 self.edge(after_write, exit);
             }
-            Stmt::Expr { expr } => self.tasks.push(Task::Expr {
+            Stmt::Expr { expr, .. } => self.tasks.push(Task::Expr {
                 expr,
                 entry,
                 exit,
@@ -2654,7 +2654,7 @@ fn push_stmt_mut<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
             stack.push(MutNode::Expr(value));
             push_place_expr_children_mut(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(MutNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(MutNode::Expr(value));

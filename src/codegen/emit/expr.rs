@@ -653,7 +653,7 @@ pub(crate) fn emit_match_arm<M: Module>(
             for (i, s) in stmts.iter().enumerate() {
                 ensure_current(bcx, frame);
                 if i + 1 == n {
-                    if let Stmt::Expr { expr } = s {
+                    if let Stmt::Expr { expr, .. } = s {
                         tail = Some(emit_expr(c, bcx, frame, expr)?);
                         continue;
                     }

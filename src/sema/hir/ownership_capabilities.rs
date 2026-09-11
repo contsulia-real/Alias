@@ -107,7 +107,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
             stack.push(Node::Expr(value));
             push_place_expr_children(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(Node::Expr(value));

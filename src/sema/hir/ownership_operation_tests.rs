@@ -110,7 +110,7 @@ fn container_initializers(program: &mut super::CheckedProgram) -> Vec<&mut Expr>
                 for stmt in stmts {
                     let value = match stmt {
                         Stmt::Binding(binding) => &mut binding.value,
-                        Stmt::Expr { expr } => expr,
+                        Stmt::Expr { expr, .. } => expr,
                         _ => continue,
                     };
                     match value {
@@ -274,6 +274,41 @@ fn binding_destruction_plan_is_frozen_and_fail_closed() {
         validate_resolved_hir(&program).expect_err("binding destruction drift must fail closed");
     assert!(
         error.msg.contains("Binding destruction plan"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
+fn discarded_owned_expression_destruction_is_frozen_and_fail_closed() {
+    use super::destruction::DestroyNode;
+
+    let mut program = checked(
+        "func i32 main = () -> {\n['discarded']\nreturn 0\n}\n",
+    );
+    let Body::Block(stmts) = main_body(&mut program) else {
+        panic!("fixture main must use block body")
+    };
+    let Stmt::Expr {
+        discard_destroy_plan,
+        ..
+    } = &mut stmts[0]
+    else {
+        panic!("fixture starts with expression statement")
+    };
+    let plan = discard_destroy_plan
+        .as_deref_mut()
+        .expect("discarded owner destruction plan");
+    assert_eq!(
+        plan.nodes,
+        [DestroyNode::Array { element: 1 }, DestroyNode::String]
+    );
+    plan.nodes[1] = DestroyNode::Inline;
+
+    let error = validate_resolved_hir(&program)
+        .expect_err("discarded expression destruction drift must fail closed");
+    assert!(
+        error.msg.contains("discarded expression destruction plan"),
         "{}",
         error.msg
     );

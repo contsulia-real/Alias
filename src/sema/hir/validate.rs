@@ -164,7 +164,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, stmt: &'a Stmt
             stack.push(HirValidationNode::Expr(value));
             push_place_expr_children(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(HirValidationNode::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(HirValidationNode::Expr(value));
@@ -1171,7 +1171,7 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     stack.push(HirValidationNode::Expr(value));
                     push_place_expr_children(&mut stack, target);
                 }
-                Stmt::Expr { expr } => stack.push(HirValidationNode::Expr(expr)),
+                Stmt::Expr { expr, .. } => stack.push(HirValidationNode::Expr(expr)),
                 Stmt::Return { value } => {
                     if let Some(value) = value {
                         stack.push(HirValidationNode::Expr(value));

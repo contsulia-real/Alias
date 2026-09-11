@@ -218,6 +218,19 @@ func i32 main = () -> return find() - 5
     assert_eq!(run(src).unwrap(), 0);
 }
 
+#[test]
+fn discarded_expression_statements_destroy_their_owner_trees() {
+    let src = r#"
+struct bundle { val array<string> values = [] }
+func i32 main = () -> {
+    ['array', 'temporary']
+    bundle(values = ['nested', 'temporary'])
+    return 0
+}
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
 /// Reuse freed interpolation buffers while repeatedly relocating owning array elements.
 /// A borrowed hole must survive concatenation; relocation must not destroy its elements.
 #[test]

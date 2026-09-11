@@ -215,6 +215,20 @@ pub(super) fn finalize(program: &mut CheckedProgram) -> AliasResult<()> {
                     *element_destroy_plan =
                         Some(Box::new(super::destruction::plan(ty, *span, &structs)?));
                 }
+                if let Stmt::Expr {
+                    expr,
+                    discard_destroy_plan,
+                } = stmt
+                {
+                    if discard_destroy_plan.is_some() {
+                        return Err(invariant(
+                            expr.span(),
+                            "discarded expression destruction 被重复 finalization",
+                        ));
+                    }
+                    *discard_destroy_plan = discarded_expr_destroy_plan(expr, &structs)?
+                        .map(Box::new);
+                }
                 push_mut_stmt_children(&mut stack, stmt);
             }
             MutNode::Expr(expr) => {
@@ -341,6 +355,19 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         ));
                     }
                 }
+                if let Stmt::Expr {
+                    expr,
+                    discard_destroy_plan,
+                } = stmt
+                {
+                    let expected = discarded_expr_destroy_plan(expr, &structs)?;
+                    if discard_destroy_plan.as_deref() != expected.as_ref() {
+                        return Err(invariant(
+                            expr.span(),
+                            "discarded expression destruction plan 缺失或漂移",
+                        ));
+                    }
+                }
                 push_stmt_children(&mut stack, stmt);
             }
             Node::Expr(expr) => {
@@ -408,6 +435,23 @@ fn binding_destroy_plan(
         })
     } else {
         super::destruction::plan(&binding.ty, binding.span, structs)
+    }
+}
+
+fn discarded_expr_destroy_plan(
+    expr: &Expr,
+    structs: &HashMap<String, Vec<crate::sema::types::Ty>>,
+) -> AliasResult<Option<super::DestroyPlan>> {
+    if expr.value_category() == Some(ValueCategory::OwnedTemporary)
+        && expr.ownership_capability() == Some(OwnershipCapability::Available)
+    {
+        Ok(Some(super::destruction::plan(
+            expr.ty(),
+            expr.span(),
+            structs,
+        )?))
+    } else {
+        Ok(None)
     }
 }
 
@@ -541,7 +585,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
             stack.push(Node::Expr(value));
             push_place_children(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(Node::Expr(value));
@@ -586,7 +630,7 @@ fn push_mut_stmt_children<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) 
             stack.push(MutNode::Expr(value));
             push_mut_place_children(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(MutNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(MutNode::Expr(value));

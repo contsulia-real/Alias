@@ -152,7 +152,7 @@ fn push_stmt_children<'a>(
             stack.push(Node::Expr(value, borrowed_rebind));
             push_place_indices(stack, target);
         }
-        Stmt::Expr { expr } => stack.push(Node::Expr(expr, false)),
+        Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr, false)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(Node::Expr(

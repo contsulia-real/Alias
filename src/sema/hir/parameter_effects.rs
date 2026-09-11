@@ -2657,7 +2657,7 @@ fn push_stmt_children<'a>(stack: &mut Vec<Node<'a>>, stmt: &'a Stmt) {
             push_place_indices(stack, target);
             stack.push(Node::Expr(value));
         }
-        Stmt::Expr { expr } => stack.push(Node::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(Node::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(Node::Expr(value));
@@ -2822,7 +2822,7 @@ fn push_scoped_stmt<'a>(
             }
             stack.push(ScopedNode::Expr(value, current));
         }
-        Stmt::Expr { expr } => stack.push(ScopedNode::Expr(expr, current)),
+        Stmt::Expr { expr, .. } => stack.push(ScopedNode::Expr(expr, current)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(ScopedNode::Expr(value, current));
@@ -3002,7 +3002,7 @@ fn push_mut_stmt<'a>(stack: &mut Vec<MutNode<'a>>, stmt: &'a mut Stmt) {
             }
             stack.push(MutNode::Expr(value));
         }
-        Stmt::Expr { expr } => stack.push(MutNode::Expr(expr)),
+        Stmt::Expr { expr, .. } => stack.push(MutNode::Expr(expr)),
         Stmt::Return { value } => {
             if let Some(value) = value {
                 stack.push(MutNode::Expr(value));

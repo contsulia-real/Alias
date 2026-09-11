@@ -277,6 +277,7 @@ fn lower_stmt(stmt: &crate::ast::Stmt, facts: &mut LowerFacts) -> AliasResult<St
         }
         crate::ast::Stmt::Expr { expr } => Stmt::Expr {
             expr: lower_expr(expr, facts)?,
+            discard_destroy_plan: None,
         },
         crate::ast::Stmt::Return { value, .. } => Stmt::Return {
             value: value
