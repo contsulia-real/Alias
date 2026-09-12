@@ -394,13 +394,24 @@ pub(crate) fn emit_method_call<M: Module>(
         let array = value.into_scalar("iterator receiver 必须是 array root");
         return make_iterator(c, bcx, array).map(ExprValue::scalar);
     }
-    if receiver_pass.is_some() {
-        invariant_violation("builtin method receiver 携带 user pass")
-    }
-    let rv = emit_expr(c, bcx, frame, recv)?
+    let (receiver_value, destroy_plan) = match receiver_pass {
+        Some(
+            ArgumentPass::ReadBorrow { source, .. }
+            | ArgumentPass::WriteBorrow { source, .. },
+        ) => (emit_place_value(c, bcx, frame, source)?.0, None),
+        Some(ArgumentPass::BorrowTemporary { destroy_plan, .. }) => {
+            (emit_expr(c, bcx, frame, recv)?, Some(destroy_plan.as_ref()))
+        }
+        None => (emit_expr(c, bcx, frame, recv)?, None),
+        Some(ArgumentPass::Inline | ArgumentPass::Owned) => {
+            invariant_violation("builtin method receiver pass 与借用合同漂移")
+        }
+    };
+    let rv = receiver_value
+        .clone()
         .into_scalar("builtin method receiver 收到 multi-lane expression value");
 
-    match target {
+    let result = match target {
         MethodTarget::Numeric(op) => {
             let [arg] = args else {
                 invariant_violation("算术扩展函数元数 (sema 已校验)")
@@ -466,7 +477,11 @@ pub(crate) fn emit_method_call<M: Module>(
         }
         MethodTarget::ArrayIterator => invariant_violation("iterator 必须消费 resolved read pass"),
         MethodTarget::User { .. } => invariant_violation("user method 必须走 canonical ABI 分支"),
+    }?;
+    if let Some(plan) = destroy_plan {
+        emit_destroy_value(c, bcx, receiver_value, svt, plan)?;
     }
+    Ok(result)
 }
 
 fn emit_user_method_call<M: Module>(

@@ -203,6 +203,22 @@ func i32 main = () -> return nested_length(bundle(values = ok(['temporary']))) +
 }
 
 #[test]
+fn builtin_method_receiver_temporaries_end_after_the_call() {
+    let src = r#"
+func string make = () -> return 'made'
+func i32 main = () -> {
+    val string transformed = ' value '.trim().upper()
+    val i32 array_size = ['a', 'bb'].len()
+    val string popped = ['x', 'tail'].pop()
+    val i32 produced_size = make().upper().len()
+    ['discard'].push('added')
+    return transformed.len() + array_size + popped.len() + produced_size - 15
+}
+"#;
+    assert_eq!(run(src).unwrap(), 0);
+}
+
+#[test]
 fn for_loop_temporaries_end_on_continue_and_return() {
     let src = r#"
 func i32 find = () -> {

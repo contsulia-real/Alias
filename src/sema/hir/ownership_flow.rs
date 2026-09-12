@@ -1253,6 +1253,32 @@ impl<'a> GraphBuilder<'a> {
                     self.call_result(result.as_deref(), result_holder, after_call, exit, expr.span(), loops);
                     return Ok(());
                 }
+                if let Some(pass) = receiver_pass {
+                    let (holder, entry) = self.temporary_holder(entry, expr.span())?;
+                    let after_receiver = self.node(Action::Nop);
+                    let before_call = self.node(Action::Nop);
+                    self.tasks.push(Task::Argument {
+                        value: recv,
+                        pass,
+                        holder,
+                        entry,
+                        exit: after_receiver,
+                        loops,
+                    });
+                    self.expression_sequence(
+                        args.iter().map(|arg| &arg.value).collect(),
+                        after_receiver,
+                        before_call,
+                        replacement,
+                        loops,
+                    );
+                    self.action_between(
+                        before_call,
+                        exit,
+                        Action::UseLoanHolder(holder),
+                    );
+                    return Ok(());
+                }
                 if matches!(
                     target,
                     super::MethodTarget::ArrayPush | super::MethodTarget::ArrayPop
@@ -2899,7 +2925,7 @@ fn apply_kinds(
                         recv,
                         args,
                         result,
-                        target: super::MethodTarget::User { .. } | super::MethodTarget::ArrayIterator,
+                        target: super::MethodTarget::User { .. },
                         ..
                     } => {
                         let receiver_pass = receiver_pass.as_ref().ok_or_else(|| {
@@ -2918,6 +2944,15 @@ fn apply_kinds(
                             })?;
                             record_argument_loan(pass, arg.value.span(), kinds, &mut seen)?;
                         }
+                        record_return_loan(result, expr_span, kinds, &mut seen)?;
+                    }
+                    Expr::MethodCall {
+                        receiver_pass: Some(receiver_pass),
+                        recv,
+                        result,
+                        ..
+                    } => {
+                        record_argument_loan(receiver_pass, recv.span(), kinds, &mut seen)?;
                         record_return_loan(result, expr_span, kinds, &mut seen)?;
                     }
                     _ => {}

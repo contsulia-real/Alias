@@ -64,6 +64,21 @@ fn dynamic_owner(ty: &Ty) -> bool {
     super::value_categories::type_carries_dynamic_owner(ty)
 }
 
+fn temporary_builtin_receiver_effect(target: &MethodTarget) -> Option<ParamEffect> {
+    match target {
+        MethodTarget::StringLen
+        | MethodTarget::StringUpper
+        | MethodTarget::StringLower
+        | MethodTarget::StringTrim
+        | MethodTarget::ArrayLen => Some(ParamEffect::ReadBorrow),
+        MethodTarget::ArrayPush | MethodTarget::ArrayPop => Some(ParamEffect::WriteBorrow),
+        MethodTarget::Numeric(_)
+        | MethodTarget::BoolNot
+        | MethodTarget::ArrayIterator
+        | MethodTarget::User { .. } => None,
+    }
+}
+
 fn initial_effect(ty: &Ty) -> ParamEffect {
     if dynamic_owner(ty) {
         ParamEffect::ReadBorrow
@@ -426,18 +441,7 @@ fn argument_pass(
                     ParamEffect::Owned => unreachable!(),
                 })
             } else if value.value_category() == Some(ValueCategory::OwnedTemporary) {
-                Ok(ArgumentPass::BorrowTemporary {
-                    kind: if effect == ParamEffect::ReadBorrow {
-                        BorrowKind::Read
-                    } else {
-                        BorrowKind::Write
-                    },
-                    destroy_plan: Box::new(super::destruction::plan(
-                        value.ty(),
-                        value.span(),
-                        &facts.destruction_fields,
-                    )?),
-                })
+                temporary_borrow_pass(value, effect, &facts.destruction_fields)
             } else {
                 Err(AliasError {
                     msg: "borrow parameter 的动态实参必须是 stable Place 或 OwnedTemporary".into(),
@@ -446,6 +450,31 @@ fn argument_pass(
             }
         }
     }
+}
+
+fn temporary_borrow_pass(
+    value: &Expr,
+    effect: ParamEffect,
+    destruction_fields: &HashMap<String, Vec<Ty>>,
+) -> AliasResult<ArgumentPass> {
+    let kind = match effect {
+        ParamEffect::ReadBorrow => BorrowKind::Read,
+        ParamEffect::WriteBorrow => BorrowKind::Write,
+        ParamEffect::Owned => {
+            return Err(invariant(
+                value.span(),
+                "Owned effect 被用于 temporary borrow pass",
+            ));
+        }
+    };
+    Ok(ArgumentPass::BorrowTemporary {
+        kind,
+        destroy_plan: Box::new(super::destruction::plan(
+            value.ty(),
+            value.span(),
+            destruction_fields,
+        )?),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1873,6 +1902,7 @@ fn apply_return_maps(program: &mut CheckedProgram, maps: &ReturnMaps) -> AliasRe
 
 fn refresh_binding_relations(program: &mut CheckedProgram) -> AliasResult<()> {
     let categories = super::value_categories::resolved_categories(program)?;
+    let destruction_fields = super::destruction::struct_fields(program);
     let mut stack = root_mut_nodes(program);
     while let Some(node) = stack.pop() {
         match node {
@@ -1896,7 +1926,30 @@ fn refresh_binding_relations(program: &mut CheckedProgram) -> AliasResult<()> {
                 stack.push(MutNode::Expr(&mut binding.value));
             }
             MutNode::Stmt(stmt) => push_mut_stmt(&mut stack, stmt),
-            MutNode::Expr(expr) => push_mut_expr(&mut stack, expr),
+            MutNode::Expr(expr) => {
+                if let Expr::MethodCall {
+                    recv,
+                    receiver_pass,
+                    target,
+                    ..
+                } = expr
+                {
+                    if let Some(effect) = temporary_builtin_receiver_effect(target) {
+                        *receiver_pass = if recv.value_category()
+                            == Some(ValueCategory::OwnedTemporary)
+                        {
+                            Some(Box::new(temporary_borrow_pass(
+                                recv,
+                                effect,
+                                &destruction_fields,
+                            )?))
+                        } else {
+                            None
+                        };
+                    }
+                }
+                push_mut_expr(&mut stack, expr);
+            }
         }
     }
     Ok(())
@@ -2610,6 +2663,31 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         validate_argument_pass(recv, ParamEffect::ReadBorrow, pass, &facts)?;
                         if args.iter().any(|arg| arg.pass.is_some()) {
                             return Err(invariant(expr.span(), "iterator method 携带 argument pass"));
+                        }
+                    }
+                    Expr::MethodCall {
+                        recv,
+                        receiver_pass,
+                        args,
+                        target,
+                        ..
+                    } if temporary_builtin_receiver_effect(target).is_some() => {
+                        if recv.value_category() == Some(ValueCategory::OwnedTemporary) {
+                            let effect = temporary_builtin_receiver_effect(target).unwrap_or_else(|| {
+                                unreachable!("guard requires a temporary builtin receiver effect")
+                            });
+                            let pass = receiver_pass.as_ref().ok_or_else(|| {
+                                invariant(recv.span(), "builtin temporary receiver 缺少 pass fact")
+                            })?;
+                            validate_argument_pass(recv, effect, pass, &facts)?;
+                        } else if receiver_pass.is_some() {
+                            return Err(invariant(
+                                recv.span(),
+                                "non-temporary builtin receiver 携带 temporary pass",
+                            ));
+                        }
+                        if args.iter().any(|arg| arg.pass.is_some()) {
+                            return Err(invariant(expr.span(), "builtin method 携带 argument pass"));
                         }
                     }
                     Expr::Call { args, .. } => {

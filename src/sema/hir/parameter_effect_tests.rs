@@ -28,6 +28,44 @@ fn iterator_receiver_pass_is_required_and_rechecked_at_the_final_gate() {
 }
 
 #[test]
+fn builtin_temporary_receiver_destruction_is_frozen_and_rechecked() {
+    let mut program = checked("func i32 main = () -> return ' value '.trim().len()");
+    let main = top_binding(&mut program, "main");
+    let Expr::FuncLit { body, .. } = &mut main.value else {
+        panic!("main body")
+    };
+    let Body::Single(stmt) = body.as_mut() else {
+        panic!("main single body")
+    };
+    let Stmt::Return {
+        value:
+            Some(Expr::MethodCall {
+                recv,
+                receiver_pass,
+                ..
+            }),
+    } = stmt.as_mut()
+    else {
+        panic!("main return method")
+    };
+    let Some(ArgumentPass::BorrowTemporary { destroy_plan, .. }) = receiver_pass.as_deref_mut()
+    else {
+        panic!("builtin temporary receiver pass")
+    };
+    assert!(matches!(recv.as_ref(), Expr::MethodCall { .. }));
+    assert_eq!(destroy_plan.nodes, vec![DestroyNode::String]);
+    destroy_plan.nodes[0] = DestroyNode::Inline;
+
+    let error = validate_resolved_hir(&program)
+        .expect_err("builtin receiver destruction drift must fail closed");
+    assert!(
+        error.msg.contains("temporary argument destruction plan"),
+        "{}",
+        error.msg
+    );
+}
+
+#[test]
 fn iteration_source_pass_is_required_and_rechecked_at_the_final_gate() {
     let source = "func i32 main = () -> { val array<i32> values = [1]\nfor i32 item in values { println item }\nreturn 0 }";
     for missing in [true, false] {
