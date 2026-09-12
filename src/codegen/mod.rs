@@ -9,6 +9,9 @@ pub(crate) mod layout;
 mod native_runtime;
 mod runtime;
 
+#[cfg(test)]
+mod raw_tests;
+
 use crate::sema::hir::{
     BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, DestroyPlan, Expr, Item,
     MethodId, Param, StorageRelation,

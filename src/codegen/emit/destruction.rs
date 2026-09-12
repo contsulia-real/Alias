@@ -2,7 +2,7 @@
 
 use super::arrays::{array_element_addr, array_len, array_raw};
 use super::value::ExprValue;
-use crate::codegen::abi::VTy;
+use crate::codegen::abi::{PtrLane, VTy};
 use crate::codegen::layout::{
     result_layout, ARRAY_DATA_OFFSET, CLOSURE_ENV_OFFSET, RESULT_OK_TAG, RESULT_TAG_OFFSET,
 };
@@ -189,9 +189,12 @@ pub(crate) fn emit_destroy_value<M: Module>(
     plan: &DestroyPlan,
 ) -> AliasResult<()> {
     if matches!(plan.nodes.first(), Some(DestroyNode::RawAllocationRoot)) {
-        invariant_violation(
-            "raw allocation root destruction 在 reverse-init/free lowering 完成前不得进入 codegen",
-        );
+        if !matches!(vty, VTy::Ptr { .. }) {
+            invariant_violation("raw allocation destruction recipe 与 pointer VTy 不一致")
+        }
+        let descriptor = value.pointer_lane(bcx, &vty, PtrLane::Provenance);
+        c.call_rt_void(bcx, "rt.raw.free", &[descriptor])?;
+        return Ok(());
     }
     let value = value.into_scalar("destruction 尚未支持 multi-lane owned value");
     let mut tasks = vec![Task::Node {

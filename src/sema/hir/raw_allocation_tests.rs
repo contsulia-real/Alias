@@ -59,7 +59,7 @@ fn replace_with_raw_node(program: &mut super::CheckedProgram, allocate: bool) {
 }
 
 #[test]
-fn abstract_raw_allocation_nodes_remain_fail_closed_until_pointer_typing_lands() {
+fn abstract_raw_allocation_nodes_remain_fail_closed_until_source_ownership_lands() {
     for allocate in [true, false] {
         let mut program =
             checked("func i32 main = () -> {\n    val i32 value = 1\n    return value\n}\n");

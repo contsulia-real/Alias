@@ -355,7 +355,7 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
         Expr::RawAllocate { .. } | Expr::FreeRawAllocation { .. } => {
             return Err(invariant(
                 expr.span(),
-                "raw allocation HIR 在 ptr<T> 静态类型与 ownership contract 完成前不得通过 final gate",
+                "raw allocation HIR 在 source intrinsic resolution 与 allocation-root ownership consumption 完成前不得通过 final gate",
             ));
         }
         Expr::Call { .. }

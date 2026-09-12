@@ -113,11 +113,16 @@ fn emit_expr_value<M: Module>(
             }
             Ok(value)
         }
-        Expr::RawAllocate { span, .. } | Expr::FreeRawAllocation { span, .. } => {
-            Err(native_err(
-                *span,
-                "raw allocation HIR 在 pointer/runtime lowering 完成前不得进入 codegen",
-            ))
+        Expr::RawAllocate {
+            element_ty,
+            count,
+            ..
+        } => {
+            let result_vty = c.vty(e.ty());
+            super::raw::emit_raw_allocate(c, bcx, frame, element_ty, count, &result_vty)
+        }
+        Expr::FreeRawAllocation { pointer, .. } => {
+            super::raw::emit_raw_free(c, bcx, frame, pointer)
         }
         Expr::Borrow { source, .. } => {
             emit_place_addr(c, bcx, frame, source)

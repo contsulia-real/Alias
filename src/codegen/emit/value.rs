@@ -4,7 +4,7 @@
 //! the carrier explicit prevents scalar-only emitters from silently accepting the first lane of
 //! a pointer capability and discarding provenance or bounds.
 
-use crate::codegen::abi::{norm_load, norm_store, VTy, ValueAbi};
+use crate::codegen::abi::{norm_load, norm_store, PtrLane, VTy, ValueAbi};
 use crate::codegen::invariant_violation;
 use cranelift_codegen::ir::{BlockArg, InstBuilder, MemFlagsData, Type, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -24,6 +24,22 @@ impl ExprValue {
             invariant_violation("expression value 至少包含一个 SSA lane")
         }
         Self { lanes }
+    }
+
+    pub(crate) fn pointer(lanes: [Value; 4]) -> Self {
+        Self::from_lanes(lanes.into())
+    }
+
+    pub(crate) fn pointer_lane(&self, bcx: &FunctionBuilder, vty: &VTy, lane: PtrLane) -> Value {
+        if !matches!(vty, VTy::Ptr { .. }) {
+            invariant_violation("pointer lane access 收到非 pointer VTy")
+        }
+        self.assert_types(
+            bcx,
+            vty.abi().expression_types(),
+            "pointer expression 与 canonical 四 lane ABI 不一致",
+        );
+        self.lanes[lane as usize]
     }
 
     pub(crate) fn block_args(&self) -> Vec<BlockArg> {
@@ -178,7 +194,8 @@ fn storage_offset(base: i32, lane: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::ExprValue;
-    use crate::codegen::abi::PtrLayout;
+    use crate::codegen::abi::{PtrLane, PtrLayout, VTy};
+    use crate::sema::types::IntW;
     use crate::target::TARGET_TRIPLE;
     use cranelift_codegen::ir::{
         types, Function, InstBuilder, Signature, StackSlotData, StackSlotKind, UserFuncName,
@@ -210,11 +227,21 @@ mod tests {
         let slot =
             bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 3));
         let base = bcx.ins().stack_addr(types::I64, slot, 0);
-        let source = ExprValue::from_lanes(
+        let source = ExprValue::pointer(
             [11, 22, 33, 44]
                 .into_iter()
                 .map(|value| bcx.ins().iconst(types::I64, value))
-                .collect(),
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        );
+        let pointer_vty = VTy::Ptr {
+            pointee: Box::new(VTy::I(IntW::W32)),
+            nullable: false,
+        };
+        assert_eq!(
+            source.pointer_lane(&bcx, &pointer_vty, PtrLane::Address),
+            source.lanes[1]
         );
         source.store_aggregate(&mut bcx, base, 0, &abi);
         let loaded = ExprValue::load_aggregate(&mut bcx, base, 0, &abi);

@@ -537,7 +537,7 @@ pub(crate) enum Expr {
     /// later lowering from recovering either contract from generic-call syntax.
     #[allow(
         dead_code,
-        reason = "plan phase 14 freezes the raw-allocation HIR shape before phase 16 opens ptr<T> typing"
+        reason = "the raw-allocation HIR shape is frozen before the source ownership producer is activated"
     )]
     RawAllocate {
         element_ty: Ty,
@@ -550,7 +550,7 @@ pub(crate) enum Expr {
     /// local owner are both valid eventual sources; ownership_flow must prove the capability.
     #[allow(
         dead_code,
-        reason = "plan phase 14 freezes the free HIR shape before ownership consumption and runtime lowering are opened"
+        reason = "the free HIR shape is frozen before source ownership consumption is activated"
     )]
     FreeRawAllocation {
         pointer: Box<Expr>,

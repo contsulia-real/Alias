@@ -772,7 +772,7 @@ line / col / len
 - closure local 在退出时先释放 capture env，再释放 closure root；逆声明顺序保证它先于所捕获的更早 local 结束；
 - parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；用户函数/方法的 borrowed temporary receiver/argument 在调用返回后执行 resolved destruction 并释放 caller cell，`string.len/upper/lower/trim` 与 `array.len/push/pop` 的 temporary receiver 在 builtin 操作完成后执行同一 resolved destruction，纯机器 `IndirectByValue`/sret storage 在值完成转移或装载后释放；直接作为 `for` source 的 temporary 在正常穷尽、`break` 与函数 `return` 上清理，array source 对应的内部 iterator cursor 同步释放，`continue` 保持两者；普通 statement 丢弃的 owned expression result 在完整求值后销毁；`main` 正常返回后，顶层 owning Binding 按源码逆序销毁所持值并释放 global slab；`array.iterator()` temporary receiver 与其它嵌套表达式临时值尚未在对应生命周期出口完整回收；
 - 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式或顶层 Binding、被 replacement 替换，或者由其它 owning destination 接管时按对应 owner 生命周期回收，其余未被接管的表达式临时路径仍未完整回收。
-- raw allocation runtime 已拥有 canonical `StorageDescriptor` 与空 initialized-region metadata 的创建/失败回滚/释放路径；当前 source/HIR gate 仍不允许 `malloc/free` 进入 codegen，metadata 出现 live region 时释放会 fail-closed trap，等待 runtime type/destruction descriptor 与逆初始化顺序销毁落地。
+- raw allocation runtime 已拥有 canonical `StorageDescriptor` 与空 initialized-region metadata 的创建/失败回滚/释放路径；结构化 raw-allocation HIR 的后端会对规范化 i64 count 与 element stride 做 checked multiplication，并生成/消费完整四 lane capability，root destruction/free 仅消费 provenance descriptor。真实 COFF/link/process 后端测试覆盖空 raw allocation 的 descriptor 创建与 scope cleanup 释放。当前 source/final-HIR gate 仍不允许 `malloc/free` 进入 codegen，metadata 出现 live region 时释放会 fail-closed trap，等待静态 ownership consumer、runtime type/destruction descriptor 与逆初始化顺序销毁落地。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 

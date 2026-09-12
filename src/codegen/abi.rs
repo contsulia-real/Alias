@@ -65,7 +65,7 @@ pub(crate) enum PtrLane {
 }
 
 impl PtrLane {
-    const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::Provenance,
         Self::Address,
         Self::ViewStart,
