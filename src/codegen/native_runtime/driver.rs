@@ -88,6 +88,7 @@ pub(crate) fn emit_native_runtime<M: Module>(c: &mut Compiler<'_, M>) -> AliasRe
     }
 
     super::alloc::emit_alloc_runtime(c, &ext, heap_alloc, heap_free, get_process_heap)?;
+    super::raw::emit_raw_runtime(c)?;
     super::strings::emit_string_runtime(c, rtl_move_memory)?;
     super::arrays::emit_array_runtime(c, rtl_move_memory)?;
     super::display::emit_display_runtime(c, &ext, &static_ids)?;

@@ -87,6 +87,7 @@ mod display_float;
 mod display_integer;
 mod driver;
 mod io;
+mod raw;
 mod strings;
 
 pub(crate) use abort::define_span_data;

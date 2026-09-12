@@ -4,7 +4,7 @@
 //! 变成越界读写或把一个对象字段解释成另一个字段。这里仅拥有物理布局，不拥有
 //! array/iterator/closure/result/string 的语言语义。
 
-use super::abi::{OBJECT_WORD_BYTES, VTy, align_to, object_word_offset, value_layout};
+use super::abi::{align_to, object_word_offset, value_layout, VTy, OBJECT_WORD_BYTES};
 use crate::sema::hir::CtorKind;
 
 pub(crate) const ARRAY_RAW_WORDS: i64 = 4;
@@ -78,9 +78,34 @@ pub(crate) const STRING_LEN_OFFSET: i32 = object_word_offset(1);
 // must free the allocation base, never infer it from data/length or free a static address.
 pub(crate) const STRING_ALLOCATION_OFFSET: i32 = object_word_offset(2);
 
+/// Runtime provenance root shared by every view derived from one raw allocation. This layout is
+/// compiler/runtime-internal rather than a user ABI, but allocation, pointer lowering and release
+/// must still consume one owner instead of duplicating offsets.
+pub(crate) const STORAGE_DESCRIPTOR_WORDS: i64 = 4;
+pub(crate) const STORAGE_DESCRIPTOR_BYTES: i64 = STORAGE_DESCRIPTOR_WORDS * OBJECT_WORD_BYTES;
+pub(crate) const STORAGE_DESCRIPTOR_BASE_OFFSET: i32 = object_word_offset(0);
+pub(crate) const STORAGE_DESCRIPTOR_EXTENT_OFFSET: i32 = object_word_offset(1);
+pub(crate) const STORAGE_DESCRIPTOR_KIND_OFFSET: i32 = object_word_offset(2);
+pub(crate) const STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET: i32 = object_word_offset(3);
+pub(crate) const STORAGE_KIND_RAW: i64 = 1;
+
+/// Raw initialization metadata starts empty and is owned by its StorageDescriptor. Region entry
+/// layout remains with the later typed-initialization phase; freezing it before a producer exists
+/// would create a second, speculative type/destruction ABI.
+pub(crate) const RAW_INIT_METADATA_WORDS: i64 = 2;
+pub(crate) const RAW_INIT_METADATA_BYTES: i64 = RAW_INIT_METADATA_WORDS * OBJECT_WORD_BYTES;
+pub(crate) const RAW_INIT_REGIONS_OFFSET: i32 = object_word_offset(0);
+pub(crate) const RAW_INIT_REGION_COUNT_OFFSET: i32 = object_word_offset(1);
+
 #[cfg(test)]
 mod tests {
-    use super::{ResultLayout, result_layout_from_payloads};
+    use super::{
+        result_layout_from_payloads, ResultLayout, RAW_INIT_METADATA_BYTES,
+        RAW_INIT_METADATA_WORDS, RAW_INIT_REGIONS_OFFSET, RAW_INIT_REGION_COUNT_OFFSET,
+        STORAGE_DESCRIPTOR_BASE_OFFSET, STORAGE_DESCRIPTOR_BYTES, STORAGE_DESCRIPTOR_EXTENT_OFFSET,
+        STORAGE_DESCRIPTOR_KIND_OFFSET, STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET,
+        STORAGE_DESCRIPTOR_WORDS,
+    };
     use crate::codegen::abi::ValueLayout;
 
     #[test]
@@ -102,6 +127,27 @@ mod tests {
                 size: 40,
                 align: 8,
             }
+        );
+    }
+
+    #[test]
+    fn raw_storage_descriptor_and_metadata_offsets_have_one_word_owner() {
+        assert_eq!(STORAGE_DESCRIPTOR_WORDS, 4);
+        assert_eq!(STORAGE_DESCRIPTOR_BYTES, 32);
+        assert_eq!(
+            [
+                STORAGE_DESCRIPTOR_BASE_OFFSET,
+                STORAGE_DESCRIPTOR_EXTENT_OFFSET,
+                STORAGE_DESCRIPTOR_KIND_OFFSET,
+                STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET,
+            ],
+            [0, 8, 16, 24]
+        );
+        assert_eq!(RAW_INIT_METADATA_WORDS, 2);
+        assert_eq!(RAW_INIT_METADATA_BYTES, 16);
+        assert_eq!(
+            [RAW_INIT_REGIONS_OFFSET, RAW_INIT_REGION_COUNT_OFFSET],
+            [0, 8]
         );
     }
 }

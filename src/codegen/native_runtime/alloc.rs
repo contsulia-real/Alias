@@ -56,6 +56,28 @@ pub(super) fn emit_alloc_runtime<M: Module>(
         true
     });
 
+    shim!(c, "rt.heap.try_alloc", |bcx, a| {
+        let invalid = bcx
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThanOrEqual, a[0], 0);
+        let null_b = bcx.create_block();
+        let alloc_b = bcx.create_block();
+        bcx.ins().brif(invalid, null_b, &[], alloc_b, &[]);
+        bcx.seal_block(null_b);
+        bcx.seal_block(alloc_b);
+
+        bcx.switch_to_block(null_b);
+        let null = bcx.ins().iconst(c.machine_ptr_ty, 0);
+        bcx.ins().return_(&[null]);
+
+        bcx.switch_to_block(alloc_b);
+        let h = call_ext_m!(bcx, get_process_heap, vec![]);
+        let flags = bcx.ins().iconst(types::I32, HEAP_ZERO_MEMORY);
+        let p = call_ext_m!(bcx, heap_alloc, vec![h, flags, a[0]]);
+        bcx.ins().return_(&[p]);
+        true
+    });
+
     shim!(c, "rt.heap.free", |bcx, a| {
         // Null denotes an absent physical allocation (empty/static string, empty array backing),
         // not permission to release a semantic owner. Only resolved/internal owners call this.

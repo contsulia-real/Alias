@@ -131,7 +131,10 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.abort_overflow", [val(RuntimeTy::I32)]),
     contract!("alias.abort_iter", [val(RuntimeTy::I32)]),
     contract!("rt.heap.alloc", [val(RuntimeTy::I64)] -> val(RuntimeTy::Ptr)),
+    contract!("rt.heap.try_alloc", [val(RuntimeTy::I64)] -> nullable(RuntimeTy::Ptr)),
     contract!("rt.heap.free", [nullable(RuntimeTy::Ptr)]),
+    contract!("rt.raw.alloc", [val(RuntimeTy::I64)] -> nullable(RuntimeTy::Ptr)),
+    contract!("rt.raw.free", [nullable(RuntimeTy::Ptr)]),
     contract!("rt.str.drop", [val(RuntimeTy::I64)]),
     contract!("rt.write.dec", [val(RuntimeTy::Ptr), val(RuntimeTy::I64)]),
     contract!(
@@ -269,6 +272,13 @@ mod tests {
         let free = runtime_contract("rt.heap.free").unwrap();
         assert!(free.params[0].nullable, "无物理分配时释放为空操作");
         assert!(free.ret.is_none());
+        let try_alloc = runtime_contract("rt.heap.try_alloc").unwrap();
+        assert!(try_alloc.ret.unwrap().nullable);
+        let raw_alloc = runtime_contract("rt.raw.alloc").unwrap();
+        assert!(raw_alloc.ret.unwrap().nullable);
+        let raw_free = runtime_contract("rt.raw.free").unwrap();
+        assert!(raw_free.params[0].nullable);
+        assert!(raw_free.ret.is_none());
         let drop_string = runtime_contract("rt.str.drop").unwrap();
         assert!(!drop_string.params[0].nullable, "字符串 root 必须存在");
         assert!(drop_string.ret.is_none());

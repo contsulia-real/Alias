@@ -206,6 +206,8 @@ ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与
 
 `src/codegen/layout.rs` 是跨 emitter/runtime 的 heap object 物理布局 owner。目前 closure、raw array、array wrapper、iterator、result 与 string block 的 offset/size 都必须引用这里的命名常量。raw array header 的 data/len/cap/stride offset 只由该 owner 定义；runtime capacity growth 与 emitter element address 必须读取同一 stride 字段。result tag offset 与基于两个 payload `ValueLayout` 计算的 typed payload/root layout 同样只由 `ResultLayout` 定义。
 
+raw allocation 的 canonical `StorageDescriptor { base, extent, kind, raw_metadata }` 与当前空态 `RawInitMetadata { regions, count }` 物理布局也由 `codegen/layout.rs` 单一拥有；`rt.raw.alloc/free` 已通过 `RUNTIME_CONTRACTS` 建立 fallible allocation、稳定 descriptor identity、失败回滚与空 metadata 释放。源码级 `malloc/free`、initialized-region entry ABI 与 reverse-init destruction 尚未开放；region count 非零时当前 raw free shim 必须 trap，不能在缺少 destruction descriptor 时静默释放。
+
 禁止在 emitter、native runtime、display、IO 等文件重新写裸 `0/8/16/...` 来表达同一对象字段。历史上曾出现因 8-byte 分配与 16-byte 写入不一致导致的真实内存破坏；因此布局重复不是样式问题，而是正确性风险。
 
 执行 `docs/plan.md` 时，任何残留固定-word container 布局若与 typed `size/align/stride` 合同冲突，应重构其 canonical layout owner；不得通过在新 pointer 路径里复制裸 offset 来绕过布局限制。`StorageDescriptor`、pointer capability layout、raw initialization metadata 等新增物理合同也必须各有明确窄 owner，不能散落 magic offsets。
