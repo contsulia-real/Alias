@@ -10,6 +10,7 @@ mod match_expr;
 mod move_value;
 mod operators;
 mod ordinary_read;
+mod raw_allocation;
 mod shallow_clone;
 mod typing;
 

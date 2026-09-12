@@ -1160,9 +1160,8 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         validate_place_contract(source, &known_ids, &structs, false)?;
                         push_place_expr_children(&mut stack, source);
                     }
-                    // typed_contract rejects these abstract nodes until ptr<T>, ownership
-                    // consumption and runtime descriptor lowering are complete. Keep their child
-                    // traversal here so later opening the gate cannot hide unresolved operands.
+                    // typed_contract owns the local raw-allocation type/capability equations;
+                    // cross-reference traversal still must not hide unresolved operands.
                     Expr::RawAllocate { count, .. } => {
                         stack.push(HirValidationNode::Expr(count));
                     }

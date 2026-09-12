@@ -84,15 +84,21 @@ struct Node<'a> {
 struct OwnershipState {
     moved: HashSet<BindingId>,
     exposed: HashSet<BindingId>,
+    live_raw_roots: HashSet<BindingId>,
 }
 
 impl OwnershipState {
     fn join(&mut self, other: &Self) -> bool {
         let moved_before = self.moved.len();
         let exposed_before = self.exposed.len();
+        let raw_before = self.live_raw_roots.len();
         self.moved.extend(other.moved.iter().copied());
         self.exposed.extend(other.exposed.iter().copied());
-        self.moved.len() != moved_before || self.exposed.len() != exposed_before
+        self.live_raw_roots
+            .extend(other.live_raw_roots.iter().copied());
+        self.moved.len() != moved_before
+            || self.exposed.len() != exposed_before
+            || self.live_raw_roots.len() != raw_before
     }
 
     fn initialize(&mut self, id: BindingId) {
@@ -169,6 +175,8 @@ struct GraphBuilder<'a> {
     capture_permissions: HashMap<BindingId, BorrowKind>,
     parameter_permissions: HashMap<BindingId, ParamEffect>,
     loan_holder_bindings: HashSet<BindingId>,
+    raw_root_bindings: HashMap<BindingId, Span>,
+    raw_root_parameters: HashSet<BindingId>,
     nested_functions: Vec<&'a Expr>,
     next_temporary_holder: u32,
     return_sink: usize,
@@ -282,6 +290,8 @@ impl<'a> GraphBuilder<'a> {
             capture_permissions: HashMap::new(),
             parameter_permissions: HashMap::new(),
             loan_holder_bindings: HashSet::new(),
+            raw_root_bindings: HashMap::new(),
+            raw_root_parameters: HashSet::new(),
             nested_functions: Vec::new(),
             next_temporary_holder: 0,
             return_sink: 0,
@@ -632,6 +642,10 @@ impl<'a> GraphBuilder<'a> {
                     self.owning.insert(binding.binding_id);
                     if dynamic_owner(&binding.ty) {
                         self.eligible.insert(binding.binding_id);
+                        if matches!(binding.ty, Ty::Ptr { .. }) {
+                            self.raw_root_bindings
+                                .insert(binding.binding_id, binding.span);
+                        }
                         self.action_between(after_value, exit, Action::Declare(binding.binding_id));
                     } else {
                         self.edge(after_value, exit);
@@ -1460,14 +1474,17 @@ impl<'a> GraphBuilder<'a> {
                 capture_holder: None,
                 loops,
             }),
-            Expr::FreeRawAllocation { pointer, .. } => self.tasks.push(Task::Expr {
-                expr: pointer,
-                entry,
-                exit,
-                replacement: None,
-                capture_holder: None,
-                loops,
-            }),
+            Expr::FreeRawAllocation { pointer, .. } => {
+                super::typed_contract::validate_free_operand(pointer)?;
+                self.tasks.push(Task::Expr {
+                    expr: pointer,
+                    entry,
+                    exit,
+                    replacement: None,
+                    capture_holder: None,
+                    loops,
+                });
+            }
             Expr::Int(..)
             | Expr::Float(..)
             | Expr::Bool(..)
@@ -1943,7 +1960,11 @@ fn run_dataflow(
     previous_owners: &mut HashMap<usize, PreviousOwner>, verify_declared: bool,
 ) -> AliasResult<()> {
     let mut inputs: Vec<Option<OwnershipState>> = vec![None; graph.nodes.len()];
-    inputs[entry] = Some(OwnershipState::default());
+    let mut initial = OwnershipState::default();
+    initial
+        .live_raw_roots
+        .extend(graph.raw_root_parameters.iter().copied());
+    inputs[entry] = Some(initial);
     let mut queue = VecDeque::from([entry]);
     while let Some(node_id) = queue.pop_front() {
         let mut state = inputs[node_id].clone().unwrap_or_default();
@@ -2139,10 +2160,16 @@ fn run_dataflow(
                     if !state.moved.insert(*binding_id) {
                         return Err(error(span, "ownership capability 已被 move"));
                     }
+                    if matches!(source.ty(), Ty::Ptr { .. }) {
+                        state.live_raw_roots.remove(binding_id);
+                    }
                 }
             }
             Action::Declare(id) => {
                 state.initialize(id);
+                if graph.raw_root_bindings.contains_key(&id) {
+                    state.live_raw_roots.insert(id);
+                }
             }
             Action::Reinitialize(id, span) => {
                 if active
@@ -2151,13 +2178,43 @@ fn run_dataflow(
                 {
                     return Err(error(span, "owner reinitialization 与 live loan 冲突"));
                 }
+                if graph.raw_root_bindings.contains_key(&id)
+                    && state.live_raw_roots.contains(&id)
+                {
+                    return Err(error(
+                        span,
+                        "独立 allocation root 在 replacement 前必须显式 free 或 transfer",
+                    ));
+                }
                 state.initialize(id);
+                if graph.raw_root_bindings.contains_key(&id) {
+                    state.live_raw_roots.insert(id);
+                }
             }
             Action::Replacement(..) => {}
         }
         continue_state(&mut inputs, &mut queue, graph, node_id, &state);
     }
     unique_return_origin(graph, facts)?;
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        if !node.successors.is_empty() {
+            continue;
+        }
+        let Some(state) = &inputs[node_id] else {
+            continue;
+        };
+        if let Some(binding_id) = state.live_raw_roots.iter().next() {
+            let span = graph
+                .raw_root_bindings
+                .get(binding_id)
+                .copied()
+                .unwrap_or_default();
+            return Err(error(
+                span,
+                "独立 allocation root owner 在可达路径结束前必须显式 free 或 transfer",
+            ));
+        }
+    }
     // Inspect converged inputs, not an intermediate worklist visit: a backedge
     // or a later predecessor can turn a Live target into a may-be-moved target.
     for (index, node) in graph.nodes.iter().enumerate() {
@@ -2270,6 +2327,10 @@ fn configure_function_parameters(
             builder.owning.insert(id);
             if dynamic_owner(ty) {
                 builder.eligible.insert(id);
+                if matches!(ty, Ty::Ptr { .. }) {
+                    builder.raw_root_bindings.insert(id, function.span());
+                    builder.raw_root_parameters.insert(id);
+                }
             }
         }
     }

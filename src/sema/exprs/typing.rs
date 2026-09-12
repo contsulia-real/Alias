@@ -257,6 +257,18 @@ impl Checker {
                             self.record_call_target(e, LowerCallTarget::Move);
                             return Ok(expected.clone());
                         }
+                        OwnershipBuiltinName::Free => {
+                            let ty = self.check_raw_free(args, *span, env)?;
+                            if !types_match(expected, &ty) {
+                                return Err(ExprCheckError::Mismatch {
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(ty),
+                                    span: e.span(),
+                                });
+                            }
+                            self.record_call_target(e, LowerCallTarget::FreeRawAllocation);
+                            return Ok(expected.clone());
+                        }
                     };
                     self.record_call_target(e, LowerCallTarget::Builtin(target));
                     return Ok(ty);

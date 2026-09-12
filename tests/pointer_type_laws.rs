@@ -1,5 +1,4 @@
-//! Pointer type-stage laws. Values and raw allocation remain closed until their semantic and
-//! runtime phases land; these cases cover only the frozen type grammar and aggregate ABI wiring.
+//! Pointer type laws shared by the type grammar and the first raw-allocation ownership slice.
 
 use alias::{run, AliasError};
 
@@ -33,15 +32,9 @@ fn nullable_suffix_is_currently_pointer_only() {
 }
 
 #[test]
-fn pointer_owner_operations_stay_closed_before_raw_lifecycle_lowering() {
-    let error = fail(
-        "func ptr<i32> relay = (ptr<i32> value) -> return move value\nfunc i32 main = () -> return 0\n",
-    );
-    assert!(
-        error.msg.contains("ptr ownership transfer") && !error.msg.contains("内部"),
-        "{}",
-        error.msg
-    );
+fn pointer_owner_can_be_transferred_through_a_function_return() {
+    let source = "func ptr<i32> relay = (ptr<i32> value) -> return move value\nfunc i32 main = () -> return 0\n";
+    assert_eq!(run(source).unwrap(), 0);
 }
 
 #[test]

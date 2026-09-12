@@ -1,8 +1,8 @@
 //! Lowering for already-resolved raw allocation operations.
 //!
-//! The source gate remains closed until sema can prove root ownership consumption. Keeping the
-//! backend implementation behind the structured HIR nodes lets the eventual public intrinsic
-//! reuse one descriptor and four-lane construction path without inspecting source syntax.
+//! Sema has already proved allocation-root ownership consumption before these structured HIR
+//! nodes arrive. This module constructs and consumes the canonical descriptor/four-lane value;
+//! it never inspects source syntax or guesses whether a pointer is an owner.
 
 use super::expr::emit_expr;
 use super::value::ExprValue;

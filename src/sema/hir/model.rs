@@ -531,14 +531,9 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
-    /// Canonical semantic node for a raw allocation request. Parser/sema do not expose the
-    /// intrinsic until pointer typing, ownership consumption and runtime descriptor handling are
-    /// all connected; keeping the requested element type and count expression explicit prevents
-    /// later lowering from recovering either contract from generic-call syntax.
-    #[allow(
-        dead_code,
-        reason = "the raw-allocation HIR shape is frozen before the source ownership producer is activated"
-    )]
+    /// Canonical semantic node for a raw allocation request. Keeping the requested element type
+    /// and normalized count expression explicit prevents codegen from recovering either contract
+    /// from generic-call syntax.
     RawAllocate {
         element_ty: Ty,
         count: Box<Expr>,
@@ -548,10 +543,6 @@ pub(crate) enum Expr {
     /// Canonical semantic node for consuming an independently owned raw-allocation root. The
     /// pointer operand remains an expression because a fresh allocation temporary and a moved
     /// local owner are both valid eventual sources; ownership_flow must prove the capability.
-    #[allow(
-        dead_code,
-        reason = "the free HIR shape is frozen before source ownership consumption is activated"
-    )]
     FreeRawAllocation {
         pointer: Box<Expr>,
         span: Span,

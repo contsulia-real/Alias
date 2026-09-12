@@ -1,4 +1,7 @@
-use super::{ArmBody, Body, CheckedProgram, Expr, Item, Place, ResolvedConversion, Stmt, StrPart};
+use super::{
+    ArmBody, Body, CheckedProgram, Expr, ExprCategory, Item, OwnershipCapability, Place,
+    ResolvedConversion, Stmt, StrPart, ValueCategory,
+};
 use crate::sema::exprs::{binary_result_type, conversion_exists};
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -13,6 +16,24 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
         msg: format!("内部 sema 不变式被破坏: {}", msg.into()),
         span,
     }
+}
+
+pub(super) fn validate_free_operand(pointer: &Expr) -> AliasResult<()> {
+    if !matches!(pointer.ty(), Ty::Ptr { .. }) {
+        return Err(invariant(
+            pointer.span(),
+            "FreeRawAllocation operand 不是 ptr",
+        ));
+    }
+    if pointer.category() != Some(ExprCategory::Value(ValueCategory::OwnedTemporary))
+        || pointer.ownership_capability() != Some(OwnershipCapability::Available)
+    {
+        return Err(AliasError {
+            msg: "free 只能消费仍可用的独立 allocation-root ownership value".into(),
+            span: pointer.span(),
+        });
+    }
+    Ok(())
 }
 
 fn push_body<'a>(stack: &mut Vec<Node<'a>>, body: &'a Body) {
@@ -345,18 +366,32 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             if !matches!(source.as_ref(), Place::Local { .. }) {
                 return Err(invariant(expr.span(), "Move source 不是完整 local Place"));
             }
-            if matches!(source.ty(), Ty::Ptr { .. }) {
+        }
+        Expr::RawAllocate {
+            element_ty, count, ..
+        } => {
+            let Ty::Ptr {
+                pointee,
+                nullable: true,
+            } = expr.ty()
+            else {
+                return Err(invariant(expr.span(), "RawAllocate 结果不是 nullable ptr"));
+            };
+            if !types_match(pointee, element_ty) || count.ty() != &Ty::Int(IntW::W64) {
                 return Err(invariant(
                     expr.span(),
-                    "ptr ownership transfer 在 raw allocation lifecycle 闭合前尚未开放",
+                    "RawAllocate pointee/count contract 漂移",
                 ));
             }
         }
-        Expr::RawAllocate { .. } | Expr::FreeRawAllocation { .. } => {
-            return Err(invariant(
-                expr.span(),
-                "raw allocation HIR 在 source intrinsic resolution 与 allocation-root ownership consumption 完成前不得通过 final gate",
-            ));
+        Expr::FreeRawAllocation { pointer, .. } => {
+            if expr.ty() != &Ty::Unit {
+                return Err(invariant(
+                    expr.span(),
+                    "FreeRawAllocation 结果不是 unit",
+                ));
+            }
+            validate_free_operand(pointer)?;
         }
         Expr::Call { .. }
         | Expr::MethodCall { .. }

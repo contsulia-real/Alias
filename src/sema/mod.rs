@@ -34,6 +34,7 @@ pub(crate) enum LowerCallTarget {
     Builtin(BuiltinCall),
     Borrow,
     Move,
+    FreeRawAllocation,
     Typeof,
     ContextualConversion(ResolvedConversion),
     Method(MethodTarget),

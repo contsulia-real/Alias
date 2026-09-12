@@ -3,6 +3,7 @@ use super::{
     CheckedProgram, Expr, ExprInfo, FunctionId, Item, LowerFacts, LowerPlaceInfo, MatchArm, Param,
     Place, PlaceInfo, Stmt, StrPart, StructDef, StructField,
 };
+use crate::sema::types::{IntW, Ty};
 use crate::sema::LowerCallTarget;
 use crate::{AliasError, AliasResult, Span};
 use std::collections::HashMap;
@@ -526,6 +527,38 @@ fn lower_expr_node(
             let [cond, then_expr, else_expr] = ternary.expect("ternary children lowered before parent");
             Expr::Ternary { cond, then_expr, else_expr, span: *span, info }
         },
+        crate::ast::Expr::RawAllocate { args, span, .. } => {
+            if !args.is_empty() {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: 尚未开放的 malloc count 进入 lowering".into(),
+                    span: *span,
+                });
+            }
+            let Ty::Ptr { pointee, nullable: true } = &info.ty else {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: malloc 结果不是 nullable ptr".into(),
+                    span: *span,
+                });
+            };
+            let count = finalize_expr(Expr::Int(
+                1,
+                *span,
+                ExprInfo {
+                    ty: Ty::Int(IntW::W64),
+                    category: None,
+                    ownership_capability: None,
+                    return_pass: None,
+                    projection_read: None,
+                    container_write: None,
+                },
+            ))?;
+            Expr::RawAllocate {
+                element_ty: (**pointee).clone(),
+                count: Box::new(count),
+                span: *span,
+                info,
+            }
+        }
         crate::ast::Expr::Call { callee, args, span } => {
             let target = call_target.take().ok_or_else(|| AliasError {
                 msg: "内部 sema 不变式被破坏: Call 缺少 target".into(),
@@ -568,6 +601,9 @@ fn lower_expr_node(
                     lower_borrow_expr(callee, args, *span, key, info, facts)?
                 }
                 LowerCallTarget::Move => lower_move_expr(callee, args, *span, key, info, facts)?,
+                LowerCallTarget::FreeRawAllocation => {
+                    lower_raw_free_expr(callee, args, *span, info, facts)?
+                }
                 other => Expr::Call {
                     callee: Box::new(lower_expr(callee, facts)?),
                     args: args
@@ -860,6 +896,28 @@ fn lower_move_expr(
     })
 }
 
+fn lower_raw_free_expr(
+    callee: &crate::ast::Expr,
+    args: &[crate::ast::CallArg],
+    span: Span,
+    info: ExprInfo,
+    facts: &mut LowerFacts,
+) -> AliasResult<Expr> {
+    let [_arg] = args else {
+        return Err(AliasError {
+            msg: "内部 sema 不变式被破坏: free 元数不是 1".into(),
+            span,
+        });
+    };
+    let _ = lower_expr(callee, facts)?;
+    let pointer = lower_expr(&args[0].value, facts)?;
+    Ok(Expr::FreeRawAllocation {
+        pointer: Box::new(pointer),
+        span,
+        info,
+    })
+}
+
 fn lower_borrow_expr(
     callee: &crate::ast::Expr,
     args: &[crate::ast::CallArg],
@@ -918,6 +976,7 @@ fn lower_call_target(
         LowerCallTarget::Typeof
         | LowerCallTarget::Borrow
         | LowerCallTarget::Move
+        | LowerCallTarget::FreeRawAllocation
         | LowerCallTarget::ContextualConversion(_) => Err(AliasError {
             msg: "内部 sema 不变式被破坏: 已解析静态操作进入普通 Call lowering".into(),
             span,

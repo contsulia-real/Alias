@@ -87,7 +87,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 用户类型 | `struct` |
 | 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout 和 Ty→VTy 投影已经接通；pointer 值生产、普通读写、ownership transfer、string/display 转换、`malloc/free/refer/deref/reinterpret` 与 pointer 运算仍未开放并在 sema/final gate fail-closed。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影以及 `malloc<T>()` 产生的 nullable allocation-root value 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`refer/deref/reinterpret` 与 pointer 运算仍未开放并在 sema/final gate fail-closed。
 
 除上述四种内建泛型外，其它泛型类型尚未实现。
 
@@ -190,7 +190,7 @@ source Place 与递归 plan 在 sema 固化为 `ReadPlace` HIR，final-HIR gate 
 
 三元表达式和 match 的普通数据值分支（含块臂尾表达式）从稳定 Place 产出值时执行同一普通读取规则：动态值递归 DeepClone，inline 值复制；fresh owned 分支结果直接 transfer，且只求值选中的分支。函数值选择仍走 callable/capture-loan 路径，不支持借此 clone 函数。临时对象的字段/数组元素，以及 `?` 成功 payload 进入 owning context 时，同样复制为独立值，不能与仍 live 的容器 payload 共享 ownership root；透明 identity conversion 不绕过这些规则。
 
-普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为；非 iterator builtin method 的 owned temporary receiver 也固化相应 `BorrowTemporary` pass，稳定 Place 与 borrowed alias receiver 继续使用已有 access flow。函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化，temporary source 在正常穷尽、`break` 或函数 `return` 时执行 pass 携带的 resolved destruction，array source 对应的内部 iterator cursor 同时释放，`continue` 则保持二者进入下一轮；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，parameter/self、显式 local、`for` element、Pattern binding、borrowed call temporary、非 iterator builtin temporary receiver 与直接 for-source temporary 的对应生命周期 destruction 已落地；其余完整 destruction / free 仍未落地。
+普通用户函数实参与用户方法 receiver/实参已经按 4.5 的 parameter effect 固化 caller-side ownership/loan 行为；非 iterator builtin method 的 owned temporary receiver 也固化相应 `BorrowTemporary` pass，稳定 Place 与 borrowed alias receiver 继续使用已有 access flow。函数返回已经按 4.6 的 return effect 固化 caller-side ownership/loan 行为，不再依赖“当前机器表示碰巧共享”的隐式规则。`for` 循环变量作为新的 owning binding，会按元素静态类型消费 sema 固化并由 final-HIR gate 复核的 `DeepClonePlan`；动态元素不会与容器中仍 live 的 owning element 共用 root。match/Pattern binding 按 7.2 节固化 `InlineCopy / DeepClone / OwnershipTransfer`；for source pass 已按 8.3 节固化，temporary source 在正常穷尽、`break` 或函数 `return` 时执行 pass 携带的 resolved destruction，array source 对应的内部 iterator cursor 同时释放，`continue` 则保持二者进入下一轮；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，持久容器写入被拒绝。局部 borrow/loan 已按 3.6 落地，closure capture loan 已按 4.4 落地，parameter/self、显式 local、`for` element、Pattern binding、borrowed call temporary、非 iterator builtin temporary receiver、直接 for-source temporary 与空态 raw allocation 的显式 free 已落地；其它嵌套 temporary 与 initialized raw region 的完整 destruction 仍未落地。
 
 ### 3.5 显式 move
 
@@ -204,7 +204,7 @@ move place
 当前纵切边界：
 
 - source 必须是完整 local Place；普通 struct field 与 array element 不能被 move-out 后留下 partial-move hole；
-- 对 string、struct、array、result、iterator、function/closure 等携带动态 ownership 的 owning local，结果为 `OwnedTemporary + Available`，source capability 进入 moved 状态；
+- 对 string、struct、array、result、iterator、function/closure、ptr 等携带动态 ownership 的 owning local，结果为 `OwnedTemporary + Available`，source capability 进入 moved 状态；
 - moved local 在重新初始化前不能读取或再次 move；控制流 merge 与 loop back-edge 采用 may-be-moved 的 fail-closed join；
 - 已解析为 owning-slot `ReadPlace` 的读取产生独立副本，不暴露 source alias，因此不阻止后续 move；closure capture 只在其 NLL live region 内阻止冲突 move，尚未解析 effect 的其它共享读取仍按 fail-closed exposure 处理；
 - `var` local 可由新的 `OwnedTemporary` 重新初始化；
@@ -237,6 +237,29 @@ borrow place
 
 sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/WriteLoan` kind 的专用 HIR；final-HIR gate 重算 loan facts 并拒绝漂移。codegen 只物化 borrowed alias cell 与 canonical referent address，不执行 borrow checker，也不从机器地址猜 relation。
 
+### 3.7 当前 raw allocation / free 纵切
+
+当前源码入口：
+
+```alias
+malloc<T>()
+free(pointer_owner)
+free pointer_owner
+```
+
+`malloc<T>()` 是专用 intrinsic generic syntax，等价于目标设计中的 `malloc<T>(1)`，返回 `ptr<T>?`。成功时生成独立 `StorageDescriptor`、raw storage 与完整四 lane capability；失败时返回四 lane 全零的 null value。allocation 初始没有 initialized region，也不会构造 `T`。
+
+该结果是 `OwnedTemporary + Available`，采用普通 owner transfer 合同：可以初始化 local owning binding、作为 `Owned` 实参跨用户函数传递或作为 owned return 返回。稳定 local 必须写成 `move(local)` 后才能进入 `free` 或其它 owning destination；普通读取不会复制 pointer capability。`free(null)` 运行时为 no-op，但静态 capability 同样被消费。
+
+ownership CFG 为每个 local/`Owned` parameter pointer root 跟踪独立的 live-root 状态。所有可达的正常落空、显式 return、branch join 与 loop back-edge 都要求该状态已经由 `free` 或 ownership transfer 消费；不能用词法 cleanup 隐式释放，live root replacement、重复 free、moved 后使用以及只在部分分支 free 都静态拒绝。fresh `free(malloc<T>())` 与 `free(move(local))` 均生成专用 `FreeRawAllocation` HIR，codegen 只消费 provenance descriptor lane。
+
+当前仍保持关闭的边界：
+
+- `malloc<T>(count)` 的 source integer type 尚未冻结，因此不擅自选用某个现有整数类型；
+- allocation-root ptr 暂不能 transfer 进 field、array/result payload 或 global storage，等待 parent destruction 能消费 aggregate pointer lanes 与 raw child recipe；
+- pointer temporary 不能借给只在调用结束时自动销毁 temporary 的参数，也不能作为 expression statement 隐式丢弃；
+- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`refer/deref/reinterpret` 与 pointer 运算尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
+
 ---
 
 ## 4. 绑定、作用域与函数
@@ -260,7 +283,8 @@ sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/
 
 预定义语言名字不属于普通可 shadow 的词法绑定，不能用于用户声明、参数、for 变量或 Pattern 绑定：
 
-- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`borrow`、`move`；
+- 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`borrow`、`move`、`free`；
+- intrinsic generic 名：`malloc`；
 - result 构造器：`ok`、`err`；
 - 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator ptr`。
 
@@ -772,7 +796,7 @@ line / col / len
 - closure local 在退出时先释放 capture env，再释放 closure root；逆声明顺序保证它先于所捕获的更早 local 结束；
 - parameter/self、`for` element 与 Pattern binding 在各自词法出口执行 resolved destruction；用户函数/方法的 borrowed temporary receiver/argument 在调用返回后执行 resolved destruction 并释放 caller cell，`string.len/upper/lower/trim` 与 `array.len/push/pop` 的 temporary receiver 在 builtin 操作完成后执行同一 resolved destruction，纯机器 `IndirectByValue`/sret storage 在值完成转移或装载后释放；直接作为 `for` source 的 temporary 在正常穷尽、`break` 与函数 `return` 上清理，array source 对应的内部 iterator cursor 同步释放，`continue` 保持两者；普通 statement 丢弃的 owned expression result 在完整求值后销毁；`main` 正常返回后，顶层 owning Binding 按源码逆序销毁所持值并释放 global slab；`array.iterator()` temporary receiver 与其它嵌套表达式临时值尚未在对应生命周期出口完整回收；
 - 显式 dynamic `clone` 与合法 aggregate `shallow` 会分配新的相关 storage/root；进入显式或顶层 Binding、被 replacement 替换，或者由其它 owning destination 接管时按对应 owner 生命周期回收，其余未被接管的表达式临时路径仍未完整回收。
-- raw allocation runtime 已拥有 canonical `StorageDescriptor` 与空 initialized-region metadata 的创建/失败回滚/释放路径；结构化 raw-allocation HIR 的后端会对规范化 i64 count 与 element stride 做 checked multiplication，并生成/消费完整四 lane capability，root destruction/free 仅消费 provenance descriptor。真实 COFF/link/process 后端测试覆盖空 raw allocation 的 descriptor 创建与 scope cleanup 释放。当前 source/final-HIR gate 仍不允许 `malloc/free` 进入 codegen，metadata 出现 live region 时释放会 fail-closed trap，等待静态 ownership consumer、runtime type/destruction descriptor 与逆初始化顺序销毁落地。
+- raw allocation runtime 已拥有 canonical `StorageDescriptor` 与空 initialized-region metadata 的创建/失败回滚/释放路径；`malloc<T>()` / `free` 已通过结构化 HIR 进入正常源码管线。后端对规范化 i64 count 与 element stride 做 checked multiplication，生成/消费完整四 lane capability，free 仅消费 provenance descriptor；ownership CFG 阻止独立 local/parameter root 在 scope/path 结束或 live replacement 时被隐式回收。真实 COFF/link/process 测试覆盖 fresh/local/call/return 的 descriptor 创建与显式释放。metadata 出现 live region 时释放仍会 fail-closed trap，等待 runtime type/destruction descriptor 与逆初始化顺序销毁落地；显式 count 源码形式也仍等待整数类型合同。
 
 这是**当前实现事实**，不是“已经确定的长期内存管理方案”。在正式加入生命周期管理前，不得在文档中写成 GC、引用计数或已经完整落地的所有权系统。
 
@@ -811,10 +835,10 @@ line / col / len
 - `iterator` / function/closure 的显式 clone/shallow；
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
-- `free` 以及其余尚未落地的计划内显式 ownership/pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
+- `malloc<T>(count)`、raw initialized-region 操作以及其余尚未落地的 pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
 - stored iterator/source-loan 对象图（v1 禁止，不作为待实现能力）；
-- 完整 destruction / free 生命周期；
+- initialized raw region 的完整 destruction / free 生命周期；
 - 旧 `public`；
 - 旧 `to_*` 转换入口；
 - 解释器/JIT/进程内机器码执行；

@@ -404,6 +404,7 @@ fn argument_pass(
     effect: ParamEffect,
     facts: &ProgramFacts<'_>,
     loan_id: &mut impl FnMut() -> AliasResult<super::LoanId>,
+    strict: bool,
 ) -> AliasResult<ArgumentPass> {
     if !dynamic_owner(value.ty()) {
         return Ok(ArgumentPass::Inline);
@@ -441,7 +442,7 @@ fn argument_pass(
                     ParamEffect::Owned => unreachable!(),
                 })
             } else if value.value_category() == Some(ValueCategory::OwnedTemporary) {
-                temporary_borrow_pass(value, effect, &facts.destruction_fields)
+                temporary_borrow_pass(value, effect, &facts.destruction_fields, strict)
             } else {
                 Err(AliasError {
                     msg: "borrow parameter 的动态实参必须是 stable Place 或 OwnedTemporary".into(),
@@ -456,7 +457,15 @@ fn temporary_borrow_pass(
     value: &Expr,
     effect: ParamEffect,
     destruction_fields: &HashMap<String, Vec<Ty>>,
+    strict: bool,
 ) -> AliasResult<ArgumentPass> {
+    if strict && matches!(value.ty(), Ty::Ptr { .. }) {
+        return Err(AliasError {
+            msg: "allocation-root ptr temporary 不能在 borrow 调用结束时隐式 free；请显式 transfer 或 free"
+                .into(),
+            span: value.span(),
+        });
+    }
     let kind = match effect {
         ParamEffect::ReadBorrow => BorrowKind::Read,
         ParamEffect::WriteBorrow => BorrowKind::Write,
@@ -561,7 +570,7 @@ fn collect_pass_maps(
                 if let Stmt::For { iterable, .. } = stmt {
                     let key = stmt as *const Stmt as usize;
                     let mut allocate = || loan_for_site(PassSite::Iteration(key), site_loans, next_loan_id, iterable.span());
-                    maps.iterations.insert(key, argument_pass(iterable, ParamEffect::ReadBorrow, facts, &mut allocate)?);
+                    maps.iterations.insert(key, argument_pass(iterable, ParamEffect::ReadBorrow, facts, &mut allocate, strict)?);
                 }
                 push_scoped_stmt(&mut stack, stmt, current);
             }
@@ -595,7 +604,7 @@ fn collect_pass_maps(
                             let site = PassSite::Argument(key);
                             let mut allocate =
                                 || loan_for_site(site, site_loans, next_loan_id, arg.value.span());
-                            let pass = argument_pass(&arg.value, effect, facts, &mut allocate)?;
+                            let pass = argument_pass(&arg.value, effect, facts, &mut allocate, strict)?;
                             if maps.arguments.insert(key, pass).is_some() {
                                 return Err(invariant(expr.span(), "CallArg identity 重复"));
                             }
@@ -628,6 +637,7 @@ fn collect_pass_maps(
                                 parameter_effects[0],
                                 facts,
                                 &mut allocate_receiver,
+                                strict,
                             )?,
                         );
                         for (arg, effect) in args.iter().zip(&parameter_effects[1..]) {
@@ -635,7 +645,7 @@ fn collect_pass_maps(
                             let site = PassSite::Argument(key);
                             let mut allocate =
                                 || loan_for_site(site, site_loans, next_loan_id, arg.value.span());
-                            let pass = argument_pass(&arg.value, *effect, facts, &mut allocate)?;
+                            let pass = argument_pass(&arg.value, *effect, facts, &mut allocate, strict)?;
                             if maps.arguments.insert(key, pass).is_some() {
                                 return Err(invariant(expr.span(), "method CallArg identity 重复"));
                             }
@@ -644,7 +654,7 @@ fn collect_pass_maps(
                     Expr::MethodCall { recv, target: MethodTarget::ArrayIterator, .. } => {
                         let key = expr as *const Expr as usize;
                         let mut allocate = || loan_for_site(PassSite::Receiver(key), site_loans, next_loan_id, recv.span());
-                        maps.receivers.insert(key, argument_pass(recv, ParamEffect::ReadBorrow, facts, &mut allocate)?);
+                        maps.receivers.insert(key, argument_pass(recv, ParamEffect::ReadBorrow, facts, &mut allocate, strict)?);
                     }
                     _ => {}
                 }
@@ -1560,6 +1570,12 @@ fn validate_argument_pass(
                     ));
                 }
             } else if value.value_category() == Some(ValueCategory::OwnedTemporary) {
+                if matches!(value.ty(), Ty::Ptr { .. }) {
+                    return Err(invariant(
+                        value.span(),
+                        "allocation-root ptr temporary 被错误固化为 BorrowTemporary",
+                    ));
+                }
                 let expected_kind = if effect == ParamEffect::ReadBorrow {
                     BorrowKind::Read
                 } else {
@@ -1942,6 +1958,7 @@ fn refresh_binding_relations(program: &mut CheckedProgram) -> AliasResult<()> {
                                 recv,
                                 effect,
                                 &destruction_fields,
+                                true,
                             )?))
                         } else {
                             None

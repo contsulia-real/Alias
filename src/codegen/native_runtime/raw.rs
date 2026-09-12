@@ -1,8 +1,8 @@
 //! Raw allocation provenance runtime.
 //!
-//! Source-level malloc/free remains closed until ownership and initialized-region HIR contracts
-//! are complete. These shims establish the canonical runtime storage identity and empty metadata
-//! lifecycle that those resolved operations will consume.
+//! Source-level malloc/free reaches these shims only after sema proves allocation-root ownership.
+//! They currently own canonical storage identity and the empty-metadata lifecycle; non-empty raw
+//! initialization metadata remains fail-closed until typed reverse-order destruction is wired.
 
 use crate::codegen::layout::{
     RAW_INIT_METADATA_BYTES, RAW_INIT_REGIONS_OFFSET, RAW_INIT_REGION_COUNT_OFFSET,

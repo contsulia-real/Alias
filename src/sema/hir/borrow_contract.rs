@@ -29,6 +29,15 @@ pub(super) fn validate_stored_value(value: &Expr) -> AliasResult<()> {
     if matches!(value.ty(), crate::sema::types::Ty::Iterator(_)) {
         return Err(error(value.span(), "iterator 来源 loan 不能作为 stored borrow 保存进字段、容器或 global storage"));
     }
+    // Pointer-containing parent destruction still needs aggregate ExprValue lanes plus raw
+    // reverse-init metadata. Until that vertical slice lands, accepting this transfer would make
+    // the backend either leak the child root or guess a scalar representation.
+    if matches!(value.ty(), crate::sema::types::Ty::Ptr { .. }) {
+        return Err(error(
+            value.span(),
+            "allocation-root ptr 暂不能 transfer 进字段、容器或 global storage",
+        ));
+    }
     Ok(())
 }
 

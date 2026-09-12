@@ -1,4 +1,5 @@
 use crate::ast::{CallArg, Expr};
+use crate::builtins::{classify_generic_intrinsic, GenericIntrinsicName};
 use crate::lexer::Tok;
 use crate::limits::MAX_EXPR_CHAIN;
 use crate::parser::Parser;
@@ -32,6 +33,28 @@ impl Parser {
         loop {
             let span = self.span();
             match self.peek().cloned() {
+                Some(Tok::Lt)
+                    if matches!(
+                        &expr,
+                        Expr::Ident(name, _)
+                            if classify_generic_intrinsic(name)
+                                == Some(GenericIntrinsicName::Malloc)
+                    ) =>
+                {
+                    chain += 1;
+                    self.bump()?;
+                    let element_ty = self.parse_type()?;
+                    self.expect(&Tok::Gt)?;
+                    if self.peek() != Some(&Tok::LParen) {
+                        return Err(self.err_here("malloc<T> 后必须跟调用括号"));
+                    }
+                    let args = self.parse_args()?;
+                    expr = Expr::RawAllocate {
+                        element_ty,
+                        args,
+                        span,
+                    };
+                }
                 Some(Tok::Dot) => {
                     chain += 1;
                     self.bump()?;

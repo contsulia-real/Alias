@@ -445,6 +445,13 @@ fn discarded_expr_destroy_plan(
     if expr.value_category() == Some(ValueCategory::OwnedTemporary)
         && expr.ownership_capability() == Some(OwnershipCapability::Available)
     {
+        if matches!(expr.ty(), crate::sema::types::Ty::Ptr { .. }) {
+            return Err(AliasError {
+                msg: "独立 allocation root 不能作为表达式结果被隐式丢弃；请显式 free 或 transfer"
+                    .into(),
+                span: expr.span(),
+            });
+        }
         Ok(Some(super::destruction::plan(
             expr.ty(),
             expr.span(),

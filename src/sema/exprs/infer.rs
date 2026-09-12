@@ -127,6 +127,11 @@ impl Checker {
                     })
                 }
             }
+            Expr::RawAllocate {
+                element_ty,
+                args,
+                span,
+            } => self.check_raw_allocate(element_ty, args, *span),
             Expr::Call { callee, args, span } => {
                 let ownership_intrinsic = match callee.as_ref() {
                     Expr::Ident(name, _) => classify_ownership_builtin(name),
@@ -152,6 +157,11 @@ impl Checker {
                         OwnershipBuiltinName::Move => {
                             let ty = self.check_move_call(e, args, *span, env)?;
                             self.record_call_target(e, LowerCallTarget::Move);
+                            return Ok(ty);
+                        }
+                        OwnershipBuiltinName::Free => {
+                            let ty = self.check_raw_free(args, *span, env)?;
+                            self.record_call_target(e, LowerCallTarget::FreeRawAllocation);
                             return Ok(ty);
                         }
                     };

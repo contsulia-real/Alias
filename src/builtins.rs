@@ -22,6 +22,12 @@ pub(crate) enum OwnershipBuiltinName {
     Shallow,
     Borrow,
     Move,
+    Free,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GenericIntrinsicName {
+    Malloc,
 }
 
 pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
@@ -46,6 +52,14 @@ pub(crate) fn classify_ownership_builtin(name: &str) -> Option<OwnershipBuiltinN
         "shallow" => OwnershipBuiltinName::Shallow,
         "borrow" => OwnershipBuiltinName::Borrow,
         "move" => OwnershipBuiltinName::Move,
+        "free" => OwnershipBuiltinName::Free,
+        _ => return None,
+    })
+}
+
+pub(crate) fn classify_generic_intrinsic(name: &str) -> Option<GenericIntrinsicName> {
+    Some(match name {
+        "malloc" => GenericIntrinsicName::Malloc,
         _ => return None,
     })
 }
@@ -85,6 +99,7 @@ pub(crate) fn is_output_builtin(name: &str) -> bool {
 pub(crate) fn is_reserved_lexical_name(name: &str) -> bool {
     classify_call_builtin(name).is_some()
         || classify_ownership_builtin(name).is_some()
+        || classify_generic_intrinsic(name).is_some()
         || classify_result_constructor(name).is_some()
         || TYPE_NAMES.contains(&name)
 }
