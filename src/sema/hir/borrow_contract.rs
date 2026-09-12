@@ -273,6 +273,8 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr, allow_borro
             }
             stack.push(Node::Expr(subject, false));
         }
+        Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count, false)),
+        Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer, false)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
         | Expr::Move { source, .. } => push_place_indices(stack, source),

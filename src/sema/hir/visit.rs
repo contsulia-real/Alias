@@ -142,6 +142,15 @@ impl CheckedProgram {
                             stack.push(TypeNode::Expr(then_expr));
                             stack.push(TypeNode::Expr(cond));
                         }
+                        Expr::RawAllocate {
+                            element_ty, count, ..
+                        } => {
+                            visit(element_ty);
+                            stack.push(TypeNode::Expr(count));
+                        }
+                        Expr::FreeRawAllocation { pointer, .. } => {
+                            stack.push(TypeNode::Expr(pointer));
+                        }
                         Expr::Call { callee, args, target, .. } => {
                             for arg in args.iter().rev() {
                                 stack.push(TypeNode::Expr(&arg.value));

@@ -53,7 +53,9 @@ fn produces_owned_temporary(
         | Expr::This(..)
         | Expr::Typeof { .. }
         | Expr::ArrayLit { .. }
-        | Expr::FuncLit { .. } => true,
+        | Expr::FuncLit { .. }
+        | Expr::RawAllocate { .. } => true,
+        Expr::FreeRawAllocation { .. } => false,
         Expr::Cast { .. }
         | Expr::Convert {
             mode: ResolvedConversion::Convert,
@@ -391,6 +393,8 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         }
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
+        Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::Typeof { .. }
         | Expr::Int(..)
         | Expr::Float(..)

@@ -145,6 +145,8 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         }
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { body, .. } => push_validation_body(stack, body),
+        Expr::RawAllocate { count, .. } => stack.push(HirValidationNode::Expr(count)),
+        Expr::FreeRawAllocation { pointer, .. } => stack.push(HirValidationNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
@@ -1157,6 +1159,15 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     Expr::Move { source, .. } => {
                         validate_place_contract(source, &known_ids, &structs, false)?;
                         push_place_expr_children(&mut stack, source);
+                    }
+                    // typed_contract rejects these abstract nodes until ptr<T>, ownership
+                    // consumption and runtime descriptor lowering are complete. Keep their child
+                    // traversal here so later opening the gate cannot hide unresolved operands.
+                    Expr::RawAllocate { count, .. } => {
+                        stack.push(HirValidationNode::Expr(count));
+                    }
+                    Expr::FreeRawAllocation { pointer, .. } => {
+                        stack.push(HirValidationNode::Expr(pointer));
                     }
                     Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::This(..) => {}
                 }

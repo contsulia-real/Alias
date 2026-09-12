@@ -531,6 +531,32 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// Canonical semantic node for a raw allocation request. Parser/sema do not expose the
+    /// intrinsic until pointer typing, ownership consumption and runtime descriptor handling are
+    /// all connected; keeping the requested element type and count expression explicit prevents
+    /// later lowering from recovering either contract from generic-call syntax.
+    #[allow(
+        dead_code,
+        reason = "plan phase 14 freezes the raw-allocation HIR shape before phase 16 opens ptr<T> typing"
+    )]
+    RawAllocate {
+        element_ty: Ty,
+        count: Box<Expr>,
+        span: Span,
+        info: ExprInfo,
+    },
+    /// Canonical semantic node for consuming an independently owned raw-allocation root. The
+    /// pointer operand remains an expression because a fresh allocation temporary and a moved
+    /// local owner are both valid eventual sources; ownership_flow must prove the capability.
+    #[allow(
+        dead_code,
+        reason = "plan phase 14 freezes the free HIR shape before ownership consumption and runtime lowering are opened"
+    )]
+    FreeRawAllocation {
+        pointer: Box<Expr>,
+        span: Span,
+        info: ExprInfo,
+    },
     Call {
         callee: Box<Expr>,
         args: Vec<CallArg>,
@@ -631,6 +657,8 @@ impl Expr {
             | Self::Not { info, .. }
             | Self::BitNot { info, .. }
             | Self::Ternary { info, .. }
+            | Self::RawAllocate { info, .. }
+            | Self::FreeRawAllocation { info, .. }
             | Self::Call { info, .. }
             | Self::MethodCall { info, .. }
             | Self::Field { info, .. }
@@ -661,6 +689,8 @@ impl Expr {
             | Self::Not { info, .. }
             | Self::BitNot { info, .. }
             | Self::Ternary { info, .. }
+            | Self::RawAllocate { info, .. }
+            | Self::FreeRawAllocation { info, .. }
             | Self::Call { info, .. }
             | Self::MethodCall { info, .. }
             | Self::Field { info, .. }
@@ -710,6 +740,8 @@ impl Expr {
             | Self::Not { span, .. }
             | Self::BitNot { span, .. }
             | Self::Ternary { span, .. }
+            | Self::RawAllocate { span, .. }
+            | Self::FreeRawAllocation { span, .. }
             | Self::Call { span, .. }
             | Self::MethodCall { span, .. }
             | Self::Field { span, .. }

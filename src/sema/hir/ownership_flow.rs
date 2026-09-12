@@ -1452,6 +1452,22 @@ impl<'a> GraphBuilder<'a> {
                     });
                 }
             }
+            Expr::RawAllocate { count, .. } => self.tasks.push(Task::Expr {
+                expr: count,
+                entry,
+                exit,
+                replacement: None,
+                capture_holder: None,
+                loops,
+            }),
+            Expr::FreeRawAllocation { pointer, .. } => self.tasks.push(Task::Expr {
+                expr: pointer,
+                entry,
+                exit,
+                replacement: None,
+                capture_holder: None,
+                loops,
+            }),
             Expr::Int(..)
             | Expr::Float(..)
             | Expr::Bool(..)
@@ -2785,6 +2801,8 @@ fn push_expr_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) {
             }
             stack.push(MutNode::Expr(subject));
         }
+        Expr::RawAllocate { count, .. } => stack.push(MutNode::Expr(count)),
+        Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children_mut(stack, source),

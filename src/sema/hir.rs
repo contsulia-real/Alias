@@ -43,6 +43,8 @@ mod place_relation_tests;
 #[cfg(test)]
 mod return_effect_tests;
 #[cfg(test)]
+mod raw_allocation_tests;
+#[cfg(test)]
 mod runtime_check_tests;
 #[cfg(test)]
 mod shallow_clone_tests;

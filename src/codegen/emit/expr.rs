@@ -113,6 +113,12 @@ fn emit_expr_value<M: Module>(
             }
             Ok(value)
         }
+        Expr::RawAllocate { span, .. } | Expr::FreeRawAllocation { span, .. } => {
+            Err(native_err(
+                *span,
+                "raw allocation HIR 在 pointer/runtime lowering 完成前不得进入 codegen",
+            ))
+        }
         Expr::Borrow { source, .. } => {
             emit_place_addr(c, bcx, frame, source)
                 .map(|(address, _)| ExprValue::scalar(address))

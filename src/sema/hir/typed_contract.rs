@@ -112,6 +112,8 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             }
             stack.push(Node::Expr(subject));
         }
+        Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
@@ -343,6 +345,12 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             if !matches!(source.as_ref(), Place::Local { .. }) {
                 return Err(invariant(expr.span(), "Move source 不是完整 local Place"));
             }
+        }
+        Expr::RawAllocate { .. } | Expr::FreeRawAllocation { .. } => {
+            return Err(invariant(
+                expr.span(),
+                "raw allocation HIR 在 ptr<T> 静态类型与 ownership contract 完成前不得通过 final gate",
+            ));
         }
         Expr::Call { .. }
         | Expr::MethodCall { .. }
