@@ -62,7 +62,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 
 `src/codegen/abi.rs::project_ty(&CheckedProgram)` 是唯一类型投影入口。codegen 开始时对整棵 HIR 恰执行一次并得到只读投影表；发射阶段只能读取该表。
 
-投影递归保留完整函数签名以及 `result/array/iterator` 内层类型。`Unknown` 是显式不变式状态；不存在 `Other` 或默认回退为 I64。任何需要值 ABI 的 `Unknown` / `unit` 到达 codegen 都属于 sema 缺口，必须失败。
+投影递归保留完整函数签名以及 `result/array/iterator/ptr` 内层类型。`ptr<T>` 与 `ptr<T>?` 投影为保留 nullability 静态事实的四个 I64 lane、32-byte aggregate VTy，并共同消费 canonical `PtrLayout`；不会压成 I64 handle。`Unknown` 是显式不变式状态；不存在 `Other` 或默认回退为 I64。任何需要值 ABI 的 `Unknown` / `unit` 到达 codegen 都属于 sema 缺口，必须失败。
 
 ### 2.4 ABI 与 runtime 契约
 
@@ -85,9 +85,11 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 标量 | `bool string` |
 | 函数 | 完整函数签名；类型槽 `func` 为多态函数槽 |
 | 用户类型 | `struct` |
-| 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>` |
+| 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-除上述三种内建泛型外，其它泛型类型尚未实现。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout 和 Ty→VTy 投影已经接通；pointer 值生产、普通读写、ownership transfer、string/display 转换、`malloc/free/refer/deref/reinterpret` 与 pointer 运算仍未开放并在 sema/final gate fail-closed。
+
+除上述四种内建泛型外，其它泛型类型尚未实现。
 
 ### 3.1 `unit`
 
@@ -260,7 +262,7 @@ sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/
 
 - 调用/语句内建：`print`、`println`、`from`、`try_from`、`typeof`、`increase`、`decrease`、`clone`、`shallow`、`borrow`、`move`；
 - result 构造器：`ok`、`err`；
-- 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator`。
+- 内建类型名：`i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool string unit func result array iterator ptr`。
 
 用户定义的 struct 名不属于上述预定义集合：它与顶层 binding/func 冲突，但词法子作用域中的普通 binding、参数或 Pattern binding 可遮蔽 constructor 名字。
 

@@ -107,6 +107,12 @@ pub(crate) enum Ty {
     /// iterator<T> 是真实语言/runtime 类型；数组 iterator 携带结构版本号并在消费时
     /// fail-fast 检查失效，当前 `for` 也可直接消费 iterator 值。
     Iterator(Box<Ty>),
+    /// Pointer nullability is a static fact only. Ownership relation remains a separate HIR
+    /// contract, and both forms project to the same four-lane capability ABI.
+    Ptr {
+        pointee: Box<Ty>,
+        nullable: bool,
+    },
     Unknown,
 }
 
@@ -134,6 +140,9 @@ impl Ty {
             Ty::Result(t, e) => format!("result<{}, {}>", t.name(), e.name()),
             Ty::Array(t) => format!("array<{}>", t.name()),
             Ty::Iterator(t) => format!("iterator<{}>", t.name()),
+            Ty::Ptr { pointee, nullable } => {
+                format!("ptr<{}>{}", pointee.name(), if *nullable { "?" } else { "" })
+            }
             Ty::Unknown => "未知".into(),
         }
     }
@@ -149,7 +158,9 @@ impl Ty {
                 params.iter().any(Ty::contains_unknown) || ret.contains_unknown()
             }
             Ty::Result(ok, err) => ok.contains_unknown() || err.contains_unknown(),
-            Ty::Array(elem) | Ty::Iterator(elem) => elem.contains_unknown(),
+            Ty::Array(elem) | Ty::Iterator(elem) | Ty::Ptr { pointee: elem, .. } => {
+                elem.contains_unknown()
+            }
             _ => false,
         }
     }
@@ -161,7 +172,9 @@ impl Ty {
                 params.iter().any(Ty::contains_unit) || ret.contains_unit()
             }
             Ty::Result(ok, err) => ok.contains_unit() || err.contains_unit(),
-            Ty::Array(elem) | Ty::Iterator(elem) => elem.contains_unit(),
+            Ty::Array(elem) | Ty::Iterator(elem) | Ty::Ptr { pointee: elem, .. } => {
+                elem.contains_unit()
+            }
             _ => false,
         }
     }
@@ -178,6 +191,16 @@ pub(crate) fn types_match(want: &Ty, got: &Ty) -> bool {
     match (want, got) {
         (Ty::Result(t1, e1), Ty::Result(t2, e2)) => types_match(t1, t2) && types_match(e1, e2),
         (Ty::Array(a), Ty::Array(b)) | (Ty::Iterator(a), Ty::Iterator(b)) => types_match(a, b),
+        (
+            Ty::Ptr {
+                pointee: left,
+                nullable: left_nullable,
+            },
+            Ty::Ptr {
+                pointee: right,
+                nullable: right_nullable,
+            },
+        ) => left_nullable == right_nullable && types_match(left, right),
         _ => matches!(want, Ty::FuncPoly) && matches!(got, Ty::Func { .. } | Ty::FuncPoly),
     }
 }
@@ -234,7 +257,7 @@ pub(crate) fn check_type_slot(
         TypeExpr::Generic(name, args) => {
             let want_arity = match name.as_str() {
                 "result" => 2,
-                "array" | "iterator" => 1,
+                "array" | "iterator" | "ptr" => 1,
                 _ => {
                     return Err(AliasError {
                         msg: format!("泛型类型 {} 尚未实现", te.display()),
@@ -259,12 +282,42 @@ pub(crate) fn check_type_slot(
                 "result" => Ok(Ty::Result(Box::new(ts.remove(0)), Box::new(ts.remove(0)))),
                 "array" => Ok(Ty::Array(Box::new(ts.remove(0)))),
                 "iterator" => Ok(Ty::Iterator(Box::new(ts.remove(0)))),
+                "ptr" => {
+                    let pointee = ts.remove(0);
+                    if matches!(pointee, Ty::Unit | Ty::FuncPoly | Ty::Unknown) {
+                        return Err(AliasError {
+                            msg: format!("ptr pointee {} 不是完整可存储类型", pointee.name()),
+                            span,
+                        });
+                    }
+                    Ok(Ty::Ptr {
+                        pointee: Box::new(pointee),
+                        nullable: false,
+                    })
+                }
                 _ => Err(AliasError {
                     msg: "内部 sema 不变式被破坏: 泛型类型分类漂移".into(),
                     span,
                 }),
             }
         }
+        TypeExpr::Nullable(inner) => match check_type_slot(inner, span, structs)? {
+            Ty::Ptr {
+                pointee,
+                nullable: false,
+            } => Ok(Ty::Ptr {
+                pointee,
+                nullable: true,
+            }),
+            Ty::Ptr { nullable: true, .. } => Err(AliasError {
+                msg: "ptr 类型已经是 nullable".into(),
+                span,
+            }),
+            other => Err(AliasError {
+                msg: format!("当前只支持 ptr<T>?，{} 不能使用 nullable 后缀", other.name()),
+                span,
+            }),
+        },
         TypeExpr::Named(n) => match n.as_str() {
             "i8" => Ok(Ty::Int(IntW::W8)),
             "i16" => Ok(Ty::Int(IntW::W16)),

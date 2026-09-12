@@ -145,7 +145,12 @@ where
             ok: Box::new(build_shallow_clone_plan(ok, span, struct_fields, visiting)?),
             err: Box::new(build_shallow_clone_plan(err, span, struct_fields, visiting)?),
         },
-        Ty::Str | Ty::Array(_) | Ty::Iterator(_) | Ty::Func { .. } | Ty::FuncPoly => {
+        Ty::Str
+        | Ty::Array(_)
+        | Ty::Iterator(_)
+        | Ty::Ptr { .. }
+        | Ty::Func { .. }
+        | Ty::FuncPoly => {
             return Err(AliasError {
                 msg: format!("类型 {} 不支持 shallow", ty.name()),
                 span,

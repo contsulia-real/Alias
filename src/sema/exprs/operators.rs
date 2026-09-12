@@ -122,7 +122,9 @@ pub(super) fn literal_slot_unify(declared: &Ty, value: &Expr) -> Option<ExprChec
 /// 显式 cast 与 contextual conversion 的唯一可转换关系。
 pub(in crate::sema) fn conversion_exists(source: &Ty, target: &Ty) -> bool {
     (source.is_numeric() && target.is_numeric())
-        || (matches!(target, Ty::Str) && !source.is_unknown() && *source != Ty::Unit)
+        || (matches!(target, Ty::Str)
+            && !source.is_unknown()
+            && !matches!(source, Ty::Unit | Ty::Ptr { .. }))
 }
 
 pub(in crate::sema) fn require_value(ty: Ty, span: Span) -> AliasResult<Ty> {

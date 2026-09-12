@@ -164,7 +164,7 @@ impl Parser {
             other => return Err(self.err_here(format!("期望类型名, 实际 {:?}", other))),
         };
 
-        if self.eat(&Tok::Lt) {
+        let ty = if self.eat(&Tok::Lt) {
             let mut args = Vec::new();
             loop {
                 args.push(self.parse_type_at_depth(depth + 1)?);
@@ -174,10 +174,15 @@ impl Parser {
                 break;
             }
             self.expect_type_gt()?;
-            Ok(TypeExpr::Generic(name, args))
+            TypeExpr::Generic(name, args)
         } else {
-            Ok(TypeExpr::Named(name))
-        }
+            TypeExpr::Named(name)
+        };
+        Ok(if self.eat(&Tok::Question) {
+            TypeExpr::Nullable(Box::new(ty))
+        } else {
+            ty
+        })
     }
 
     /// 类型上下文把 lexer 合并出的 `>>` 按两个泛型右尖括号消费。

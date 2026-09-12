@@ -26,7 +26,13 @@ fn is_inline_value(ty: &Ty) -> bool {
 fn carries_dynamic_owner(ty: &Ty) -> bool {
     matches!(
         ty,
-        Ty::Str | Ty::Func { .. } | Ty::Struct(_) | Ty::Result(..) | Ty::Array(_) | Ty::Iterator(_)
+        Ty::Str
+            | Ty::Func { .. }
+            | Ty::Struct(_)
+            | Ty::Result(..)
+            | Ty::Array(_)
+            | Ty::Iterator(_)
+            | Ty::Ptr { .. }
     )
 }
 

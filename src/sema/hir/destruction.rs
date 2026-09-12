@@ -19,6 +19,7 @@ pub(crate) enum DestroyNode {
     String,
     Iterator,
     Closure,
+    RawAllocationRoot,
     Struct { name: String, fields: Vec<usize> },
     Array { element: usize },
     Result { ok: usize, err: usize },
@@ -95,6 +96,10 @@ pub(super) fn plan(
                 DestroyNode::Result { ok, err }
             }
             Ty::Func { .. } => DestroyNode::Closure,
+            // The recipe records semantic root destruction, but codegen keeps it fail-closed until
+            // reverse-init metadata and descriptor release are implemented. Classifying this as
+            // Inline would let owning pointer trees leak without either a static or runtime owner.
+            Ty::Ptr { .. } => DestroyNode::RawAllocationRoot,
             Ty::Unit | Ty::Unknown | Ty::FuncPoly => return Err(invalid()),
         };
     }

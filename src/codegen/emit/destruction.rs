@@ -188,6 +188,11 @@ pub(crate) fn emit_destroy_value<M: Module>(
     vty: VTy,
     plan: &DestroyPlan,
 ) -> AliasResult<()> {
+    if matches!(plan.nodes.first(), Some(DestroyNode::RawAllocationRoot)) {
+        invariant_violation(
+            "raw allocation root destruction 在 reverse-init/free lowering 完成前不得进入 codegen",
+        );
+    }
     let value = value.into_scalar("destruction 尚未支持 multi-lane owned value");
     let mut tasks = vec![Task::Node {
         value,
@@ -265,6 +270,9 @@ pub(crate) fn emit_destroy_value<M: Module>(
                     );
                     c.call_rt_void(bcx, "rt.heap.free", &[env])?;
                     c.call_rt_void(bcx, "rt.heap.free", &[value])?;
+                }
+                DestroyNode::RawAllocationRoot => {
+                    invariant_violation("nested raw allocation destruction 未被 root gate 拦截")
                 }
                 DestroyNode::Struct { name, fields } => {
                     let VTy::Struct(vname) = &vty else {

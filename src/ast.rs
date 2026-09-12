@@ -50,6 +50,7 @@ pub struct Binding {
 pub enum TypeExpr {
     Named(String),
     Generic(String, Vec<TypeExpr>),
+    Nullable(Box<TypeExpr>),
 }
 
 impl TypeExpr {
@@ -63,6 +64,7 @@ impl TypeExpr {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            TypeExpr::Nullable(inner) => format!("{}?", inner.display()),
         }
     }
 }

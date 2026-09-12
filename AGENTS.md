@@ -186,9 +186,9 @@ ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与
 当前实现事实：
 
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
-- `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；调用与返回发射已消费对应 passing，当前已接入的语言类型仍全部投影为 scalar 形态，aggregate 原生路径尚待 pointer 类型接入后验证；
-- `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer expression/type projection 仍未开放；
-- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge、用户调用结果与返回路径保留完整 lane；pointer VTy 与具体 pointer expression 尚未接入；
+- `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；调用与返回发射已消费对应 passing；`ptr<T>` / `ptr<T>?` 已投影为 aggregate VTy，其它当前语言值仍使用既有 scalar/root-pointer ABI；
+- `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer type slot / struct layout / Ty→VTy 已接通，具体 pointer expression 尚未开放；
+- `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge、用户调用结果与返回路径保留完整 lane；pointer VTy 已进入统一 ABI，具体 pointer value producer/operation 仍保持 fail-closed；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
 - `binding_cell_vty` 统一把当前 resolved slot relation 投影为物理 cell 值：owning cell 保存原值，borrowed alias cell 复用 `VTy::Borrowed` 的 referent-address ABI。local/global 分配、初始化与 alias 重绑定共同消费这一表示及 `ExprValue::store`，不在各写入点另写 alias 宽度；该地址 carrier 不等于 pointer capability value。
@@ -198,9 +198,9 @@ ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与
 - `unit` 与 `Unknown` 没有值 ABI，到达需要值 ABI 的位置属于内部不变式失败；
 - 结构体布局必须统一处理字段对齐与最终尾部 padding。
 
-当前已投影语言类型仍使用 scalar expression ABI 是**当前实现事实，不是长期设计合同**。`docs/plan.md` 已冻结 aggregate-capable pointer ABI；实施时必须沿现有 aggregate-capable `ValueAbi` 继续接入 pointer，不能把 `ptr<T>` 压成 I64 handle 或建立第二套临时 ABI。
+当前除 pointer 外的既有语言类型仍使用 scalar/root-pointer expression ABI；`ptr<T>` / `ptr<T>?` 已直接消费 aggregate-capable `ValueAbi` 与 `PtrLayout`，不能退回 I64 handle 或建立第二套临时 ABI。
 
-`UserFunctionAbi` 统一决定用户函数机器签名、parameter passing、return passing 与 `[sret?, globals, closure_env, ...]` 的机器参数索引；`VTy::Func` 保留 resolved parameter effects。调用端与函数生成器共同消费这一 owner，borrow parameter 传递 I64 referent address，by-value parameter 消费 `Direct / IndirectByValue`。callee 为两者建立显式 cell：borrowed cell 在退出时只释放自身，Owned cell 按 resolved `DestroyPlan` 清理，已 transfer 的 owner 由 presence 跳过。caller 在调用返回后逆序结束 `BorrowTemporary` 的 resolved owner 生命周期并释放其 cell；`IndirectByValue` argument cell 在 callee 完成按值装载后只 deallocate，不销毁已经 transfer 的值。调用结果与 return 汇合已保留 `ExprValue`，显式 sret 分支写入 caller return area，caller 完整装载 lanes 后立即释放该纯机器 storage；当前语言类型仍只产生 scalar ABI，pointer 类型接入及 aggregate 原生端到端验证尚未完成，不能据此宣称 pointer function ABI 已落地。
+`UserFunctionAbi` 统一决定用户函数机器签名、parameter passing、return passing 与 `[sret?, globals, closure_env, ...]` 的机器参数索引；`VTy::Func` 保留 resolved parameter effects。调用端与函数生成器共同消费这一 owner，borrow parameter 传递 I64 referent address，by-value parameter 消费 `Direct / IndirectByValue`。callee 为两者建立显式 cell：borrowed cell 在退出时只释放自身，Owned cell 按 resolved `DestroyPlan` 清理，已 transfer 的 owner 由 presence 跳过。caller 在调用返回后逆序结束 `BorrowTemporary` 的 resolved owner 生命周期并释放其 cell；`IndirectByValue` argument cell 在 callee 完成按值装载后只 deallocate，不销毁已经 transfer 的值。调用结果与 return 汇合已保留 `ExprValue`，显式 sret 分支写入 caller return area，caller 完整装载 lanes 后立即释放该纯机器 storage。pointer borrowed parameter 的类型/机器签名已可生成；pointer owner transfer、return 与真实 caller value 尚在 raw lifecycle gate 外，不能据此宣称 pointer 函数值纵切已落地。
 
 ### heap object layout
 

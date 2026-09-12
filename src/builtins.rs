@@ -68,7 +68,7 @@ pub(crate) fn classify_result_constructor(name: &str) -> Option<CtorKind> {
 
 pub(crate) const TYPE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "string", "unit",
-    "func", "result", "array", "iterator",
+    "func", "result", "array", "iterator", "ptr",
 ];
 
 pub(crate) fn is_no_paren_builtin(name: &str) -> bool {

@@ -59,6 +59,12 @@ impl Checker {
                 span: arg.value.span(),
             });
         }
+        if matches!(checked_ty, Ty::Ptr { .. }) {
+            return Err(AliasError {
+                msg: "ptr ownership transfer 在 raw allocation lifecycle 闭合前尚未开放".into(),
+                span: arg.value.span(),
+            });
+        }
         self.move_places.insert(Self::expr_key(call), place);
         Ok(checked_ty)
     }

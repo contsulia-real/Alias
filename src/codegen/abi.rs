@@ -37,6 +37,10 @@ pub(crate) enum VTy {
     Result(Box<VTy>, Box<VTy>),
     Array(Box<VTy>),
     Iterator(Box<VTy>),
+    Ptr {
+        pointee: Box<VTy>,
+        nullable: bool,
+    },
     Unknown,
 }
 
@@ -275,6 +279,7 @@ impl VTy {
             VTy::F(FloatW::F64) => ValueAbi::scalar(types::F64, types::F64, 8),
             VTy::Unit => panic!("内部 ABI 不变式被破坏: unit 没有值 ABI"),
             VTy::Unknown => panic!("内部 ABI 不变式被破坏: 未确定类型没有值 ABI"),
+            VTy::Ptr { .. } => WINDOWS_X64_PTR_LAYOUT.value_abi(),
             VTy::Bool
             | VTy::Str
             | VTy::Func { .. }
@@ -545,6 +550,13 @@ fn insert_projection(ty: &Ty, table: &mut ProjectionTable) {
         Ty::Iterator(element) => {
             insert_projection(element, table);
             VTy::Iterator(Box::new(table[element.as_ref()].clone()))
+        }
+        Ty::Ptr { pointee, nullable } => {
+            insert_projection(pointee, table);
+            VTy::Ptr {
+                pointee: Box::new(table[pointee.as_ref()].clone()),
+                nullable: *nullable,
+            }
         }
         Ty::Unknown => VTy::Unknown,
     };
@@ -851,6 +863,26 @@ mod tests {
             (
                 Ty::Iterator(Box::new(Ty::Float(FloatW::F32))),
                 VTy::Iterator(Box::new(VTy::F(FloatW::F32))),
+            ),
+            (
+                Ty::Ptr {
+                    pointee: Box::new(Ty::Int(IntW::W32)),
+                    nullable: false,
+                },
+                VTy::Ptr {
+                    pointee: Box::new(VTy::I(IntW::W32)),
+                    nullable: false,
+                },
+            ),
+            (
+                Ty::Ptr {
+                    pointee: Box::new(Ty::Str),
+                    nullable: true,
+                },
+                VTy::Ptr {
+                    pointee: Box::new(VTy::Str),
+                    nullable: true,
+                },
             ),
             (Ty::Unknown, VTy::Unknown),
         ];

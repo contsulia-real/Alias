@@ -114,6 +114,10 @@ pub(crate) fn display_typed<M: Module>(
         VTy::Struct(_) => c.call_rt(bcx, "alias.display.struct", &[]),
         VTy::Array(_) => c.call_rt(bcx, "alias.display.array", &[]),
         VTy::Iterator(_) => str_literal_handle(c, bcx, "<iterator>"),
+        VTy::Ptr { .. } => Err(native_err(
+            span,
+            "pointer display 语义尚未开放，aggregate capability 不能进入 scalar display 路径",
+        )),
         VTy::Result(..) => {
             let tag = bcx
                 .ins()

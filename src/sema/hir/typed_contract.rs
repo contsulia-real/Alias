@@ -345,6 +345,12 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             if !matches!(source.as_ref(), Place::Local { .. }) {
                 return Err(invariant(expr.span(), "Move source 不是完整 local Place"));
             }
+            if matches!(source.ty(), Ty::Ptr { .. }) {
+                return Err(invariant(
+                    expr.span(),
+                    "ptr ownership transfer 在 raw allocation lifecycle 闭合前尚未开放",
+                ));
+            }
         }
         Expr::RawAllocate { .. } | Expr::FreeRawAllocation { .. } => {
             return Err(invariant(
