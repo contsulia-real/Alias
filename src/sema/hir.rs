@@ -13,6 +13,7 @@ mod ownership_operations;
 mod parameter_effects;
 mod pattern_bindings;
 mod place_relation;
+mod runtime_checks;
 mod storage_relations;
 mod typed_contract;
 mod validate;
@@ -42,6 +43,8 @@ mod place_relation_tests;
 #[cfg(test)]
 mod return_effect_tests;
 #[cfg(test)]
+mod runtime_check_tests;
+#[cfg(test)]
 mod shallow_clone_tests;
 #[cfg(test)]
 mod storage_relation_tests;
@@ -52,16 +55,17 @@ mod typed_contract_tests;
 #[cfg(test)]
 mod value_category_tests;
 
+pub(crate) use destruction::{DestroyNode, DestroyPlan};
 pub(crate) use model::{
-    ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId, BindingOperation, BindingOwner,
-    Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget, Capture, CheckedProgram,
-    CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId, Item, LoanId, MatchArm,
-    MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability, OwningWrite, Param, Pattern,
-    PatternBindingOperation, Place, PlaceInfo, PreviousOwner, ResolvedConversion, ReturnPass, ShallowClonePlan,
-    Stmt, StorageRelation, StrPart, StructDef, StructField, ValueCategory,
+    ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId,
+    BindingOperation, BindingOwner, Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget,
+    Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId,
+    Item, LoanId, MatchArm, MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability,
+    OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PreviousOwner,
+    ResolvedConversion, ReturnPass, RuntimeCheckRequirement, ShallowClonePlan, Stmt,
+    StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
-pub(crate) use destruction::{DestroyNode, DestroyPlan};
 
 use crate::sema::types::Ty;
 use std::collections::HashMap;

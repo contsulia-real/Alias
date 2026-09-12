@@ -285,12 +285,20 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 return Err(invariant(expr.span(), "Ternary HIR 条件/分支类型不一致"));
             }
         }
-        Expr::Index { recv, idx, .. } => {
+        Expr::Index {
+            recv,
+            idx,
+            bounds_check,
+            ..
+        } => {
             let Ty::Array(elem) = recv.ty() else {
                 return Err(invariant(expr.span(), "Index HIR 接收者不是 array"));
             };
             if idx.ty() != &Ty::Int(IntW::W32) || !types_match(elem, expr.ty()) {
                 return Err(invariant(expr.span(), "Index HIR 下标/结果类型不一致"));
+            }
+            if *bounds_check != super::runtime_checks::array_index(recv, idx, expr.span())? {
+                return Err(invariant(expr.span(), "Index HIR bounds-check fact 漂移"));
             }
         }
         Expr::ArrayLit { elems, .. } => {
@@ -363,12 +371,23 @@ fn validate_place(place: &Place) -> AliasResult<()> {
                 }
                 stack.push(base);
             }
-            Place::Index { base, index, .. } => {
+            Place::Index {
+                base,
+                index,
+                bounds_check,
+                ..
+            } => {
                 let Ty::Array(elem) = base.ty() else {
                     return Err(invariant(place.span(), "Index Place base 不是 array"));
                 };
                 if index.ty() != &Ty::Int(IntW::W32) || !types_match(elem, place.ty()) {
                     return Err(invariant(place.span(), "Index Place 下标/结果类型不一致"));
+                }
+                if *bounds_check != super::runtime_checks::array_place_index(base, index) {
+                    return Err(invariant(
+                        place.span(),
+                        "Index Place bounds-check fact 漂移",
+                    ));
                 }
                 stack.push(base);
             }

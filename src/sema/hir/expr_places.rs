@@ -4,11 +4,11 @@
 //! ownership flow share this owner so a projected read cannot silently use a coarser root rule
 //! than the loan source recorded at the same expression.
 
-use super::{Expr, Place, PlaceInfo, ResolvedConversion};
+use super::{Expr, Place, PlaceInfo, ResolvedConversion, RuntimeCheckRequirement};
 
 enum Projection<'a> {
     Field(usize, PlaceInfo),
-    Index(&'a Expr, PlaceInfo),
+    Index(&'a Expr, RuntimeCheckRequirement, PlaceInfo),
 }
 
 pub(super) fn from_expr(expr: &Expr) -> Option<Place> {
@@ -31,9 +31,10 @@ pub(super) fn from_expr(expr: &Expr) -> Option<Place> {
                             field_index,
                             info,
                         },
-                        Projection::Index(index, info) => Place::Index {
+                        Projection::Index(index, bounds_check, info) => Place::Index {
                             base: Box::new(place),
                             index: Box::new(index.clone()),
+                            bounds_check,
                             info,
                         },
                     };
@@ -58,11 +59,13 @@ pub(super) fn from_expr(expr: &Expr) -> Option<Place> {
             Expr::Index {
                 recv,
                 idx,
+                bounds_check,
                 span,
                 info,
             } => {
                 projections.push(Projection::Index(
                     idx,
+                    *bounds_check,
                     PlaceInfo {
                         ty: info.ty.clone(),
                         span: *span,
@@ -115,14 +118,17 @@ pub(super) fn same_source(left: &Place, right: &Place) -> bool {
                 Place::Index {
                     base: left_base,
                     index: left_index,
+                    bounds_check: left_check,
                     info: left_info,
                 },
                 Place::Index {
                     base: right_base,
                     index: right_index,
+                    bounds_check: right_check,
                     info: right_info,
                 },
             ) if left_info.ty == right_info.ty
+                && left_check == right_check
                 && left_index.ty() == right_index.ty()
                 && left_index.span() == right_index.span() =>
             {

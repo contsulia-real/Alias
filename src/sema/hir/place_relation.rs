@@ -1,7 +1,6 @@
 use super::{
-    ArmBody, BindingId, Body, CheckedProgram, Expr, Item, Place, ResolvedConversion, Stmt, StrPart,
+    ArmBody, BindingId, Body, CheckedProgram, Expr, Item, Place, Stmt, StrPart,
 };
-use crate::sema::types::{IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
 
 /// 两个 resolved Place 的静态关系。`Unknown` 与 `Overlap` 一样必须被 ownership / borrow
@@ -31,26 +30,6 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-fn constant_i32(expr: &Expr) -> Option<i32> {
-    if expr.ty() != &Ty::Int(IntW::W32) {
-        return None;
-    }
-    match expr {
-        Expr::Int(value, ..) => i32::try_from(*value).ok(),
-        Expr::Neg { expr, .. } => match expr.as_ref() {
-            Expr::Int(value, ..) if *value == i32::MAX as u64 + 1 => Some(i32::MIN),
-            Expr::Int(value, ..) => i32::try_from(*value).ok().map(|value| -value),
-            _ => None,
-        },
-        Expr::Convert {
-            expr,
-            mode: ResolvedConversion::Identity,
-            ..
-        } => constant_i32(expr),
-        _ => None,
-    }
-}
-
 fn decompose(place: &Place) -> (BindingId, Vec<Projection<'_>>) {
     let mut current = place;
     let mut path = Vec::new();
@@ -77,7 +56,10 @@ fn index_relation(left: &Expr, right: &Expr) -> PlaceRelation {
     if std::ptr::eq(left, right) {
         return PlaceRelation::Overlap;
     }
-    match (constant_i32(left), constant_i32(right)) {
+    match (
+        super::runtime_checks::constant_i32(left),
+        super::runtime_checks::constant_i32(right),
+    ) {
         (Some(left), Some(right)) if left != right => PlaceRelation::Disjoint,
         (Some(_), Some(_)) => PlaceRelation::Overlap,
         _ => PlaceRelation::Unknown,

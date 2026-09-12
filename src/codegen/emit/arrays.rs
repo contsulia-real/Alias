@@ -2,12 +2,12 @@ use super::expr::emit_container_value;
 use super::ops::{emit_index_guard, emit_runtime_abort};
 use crate::codegen::abi::{value_layout, VTy};
 use crate::codegen::layout::{
-    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_WRAPPER_RAW_OFFSET, ARRAY_WRAPPER_VERSION_OFFSET,
-    ARRAY_STRIDE_OFFSET, ARRAY_WRAPPER_WORDS, ITERATOR_ARRAY_OFFSET, ITERATOR_INDEX_OFFSET,
-    ITERATOR_VERSION_OFFSET, ITERATOR_WORDS,
+    ARRAY_DATA_OFFSET, ARRAY_LEN_OFFSET, ARRAY_STRIDE_OFFSET, ARRAY_WRAPPER_RAW_OFFSET,
+    ARRAY_WRAPPER_VERSION_OFFSET, ARRAY_WRAPPER_WORDS, ITERATOR_ARRAY_OFFSET,
+    ITERATOR_INDEX_OFFSET, ITERATOR_VERSION_OFFSET, ITERATOR_WORDS,
 };
 use crate::codegen::{Compiler, Frame};
-use crate::sema::hir::Expr;
+use crate::sema::hir::{Expr, RuntimeCheckRequirement};
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -30,11 +30,7 @@ pub(super) fn array_len(bcx: &mut FunctionBuilder, raw: Value) -> Value {
 /// raw array header 保存创建时由 canonical ValueLayout 固化的 element stride。所有 emitter
 /// 对 backing element 的寻址必须经过这里；调用点自行重算或写死 8-byte 步长会让扩容复制、
 /// index 与 iterator 对同一 backing 产生不同解释。
-pub(super) fn array_element_addr(
-    bcx: &mut FunctionBuilder,
-    raw: Value,
-    index: Value,
-) -> Value {
+pub(super) fn array_element_addr(bcx: &mut FunctionBuilder, raw: Value, index: Value) -> Value {
     let data = bcx
         .ins()
         .load(types::I64, MemFlagsData::new(), raw, ARRAY_DATA_OFFSET);
@@ -45,23 +41,27 @@ pub(super) fn array_element_addr(
     bcx.ins().iadd(data, offset)
 }
 
-/// 用户可控 array index 的 bounds-check + backing address 唯一入口。
+/// 用户可控 array index 的 resolved bounds contract + backing address 唯一入口。
 ///
-/// 普通 Index 读取、后续 Place::Index 写入/borrow/refer 必须共用同一 guard 和地址计算；
-/// for/clone 等已经由自身循环不变量证明 index 合法的内部遍历继续调用 unchecked
-/// `array_element_addr`，避免把不同 failure model 机械合并。
-pub(super) fn checked_array_element_addr<M: Module>(
+/// Sema has already frozen whether the guard is required. Reconstructing that decision from the
+/// receiver syntax here would let pointer/raw-memory checks drift into a second backend policy.
+/// Internal for/clone traversals remain on `array_element_addr` because their loop invariant is a
+/// different proof owner.
+pub(super) fn resolved_array_element_addr<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     array: Value,
     index_word: Value,
+    bounds_check: RuntimeCheckRequirement,
     span: Span,
 ) -> AliasResult<Value> {
     let raw = array_raw(bcx, array);
     let idx32 = bcx.ins().ireduce(types::I32, index_word);
-    let len64 = array_len(bcx, raw);
-    let len32 = bcx.ins().ireduce(types::I32, len64);
-    emit_index_guard(c, bcx, idx32, len32, span)?;
+    if bounds_check == RuntimeCheckRequirement::Required {
+        let len64 = array_len(bcx, raw);
+        let len32 = bcx.ins().ireduce(types::I32, len64);
+        emit_index_guard(c, bcx, idx32, len32, span)?;
+    }
     let idx64 = bcx.ins().sextend(types::I64, idx32);
     Ok(array_element_addr(bcx, raw, idx64))
 }

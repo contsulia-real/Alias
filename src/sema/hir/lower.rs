@@ -206,9 +206,13 @@ fn lower_place(
             info: PlaceInfo { ty, span },
         }),
         (crate::ast::Expr::Index { recv, idx, .. }, LowerPlaceInfo::Index { base, ty }) => {
+            let base = Box::new(lower_place(recv, *base, facts)?);
+            let index = Box::new(lower_expr(idx, facts)?);
+            let bounds_check = super::runtime_checks::array_place_index(&base, &index);
             Ok(Place::Index {
-                base: Box::new(lower_place(recv, *base, facts)?),
-                index: Box::new(lower_expr(idx, facts)?),
+                base,
+                index,
+                bounds_check,
                 info: PlaceInfo { ty, span },
             })
         }
@@ -641,12 +645,18 @@ fn lower_expr_node(
             span: *span,
             info,
         },
-        crate::ast::Expr::Index { recv, idx, span } => Expr::Index {
-            recv: Box::new(lower_expr(recv, facts)?),
-            idx: Box::new(lower_expr(idx, facts)?),
-            span: *span,
-            info,
-        },
+        crate::ast::Expr::Index { recv, idx, span } => {
+            let recv = Box::new(lower_expr(recv, facts)?);
+            let idx = Box::new(lower_expr(idx, facts)?);
+            let bounds_check = super::runtime_checks::array_index(&recv, &idx, *span)?;
+            Expr::Index {
+                recv,
+                idx,
+                bounds_check,
+                span: *span,
+                info,
+            }
+        }
         crate::ast::Expr::ArrayLit { elems, span } => Expr::ArrayLit {
             elems: elems
                 .iter()
@@ -773,6 +783,7 @@ fn lower_resolved_place(expr: Expr, place: LowerPlaceInfo, span: Span) -> AliasR
                 Expr::Index {
                     recv,
                     idx,
+                    bounds_check: _,
                     span: expr_span,
                     info,
                 },
@@ -806,11 +817,16 @@ fn lower_resolved_place(expr: Expr, place: LowerPlaceInfo, span: Span) -> AliasR
                 field_index,
                 info,
             },
-            Projection::Index { index, info } => Place::Index {
-                base: Box::new(lowered),
-                index,
-                info,
-            },
+            Projection::Index { index, info } => {
+                let base = Box::new(lowered);
+                let bounds_check = super::runtime_checks::array_place_index(&base, &index);
+                Place::Index {
+                    base,
+                    index,
+                    bounds_check,
+                    info,
+                }
+            }
         };
     }
     Ok(lowered)

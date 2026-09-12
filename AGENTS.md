@@ -108,6 +108,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - `hir/ownership_capabilities.rs` 独立固化当前可证明的 initial capability：`InlineValue → None`、`OwnedTemporary → Available`、`BorrowedValue → None`；Place / General 在当前迁移阶段没有可伪造的 capability fact，codegen 不得把缺失 fact 当 fallback；
 - 显式 Binding 由 `hir/storage_relations.rs` 固化当前可证明的 slot relation：InlineValue / OwnedTemporary、已解析 owning-slot `ReadPlace` 与 `Owned` call result 为 `Owning`，显式 BorrowedValue local 及 `Borrowed` call result 为 `Borrowed`；尚未纳入 effect/loan 的读取上下文不得提前猜 relation；
 - `hir/place_relation.rs` 是 resolved Place 三态关系 `Disjoint / Overlap / Unknown` 的唯一 owner；不同 Local root、字段 divergence、常量 index divergence 等证明只在这里完成，动态 index 无充分事实时保持 `Unknown`，final gate 同时验证自反与 ancestor overlap 不变量；
+- `hir/runtime_checks.rs` 是“静态已证明 / 必须运行时检查”决策的 canonical owner。当前 array Index 已在 Expr/Place HIR 固化 bounds `RuntimeCheckRequirement`：直接数组字面量的合法常量下标可标记 `Proven`，静态越界直接拒绝，其它数组 Place / 动态下标保持 `Required`；final typed-HIR gate 独立复算，后续 pointer provenance/bounds/alignment/raw-init checks 必须扩展同一 owner，不能让 emitter 从语法形状重建决策；
 - `hir/ownership_flow.rs` 以显式 CFG/worklist 统一验证 dynamic local 的程序点 capability、local borrow 与 closure capture loan；branch/loop join 对 may-be-moved / may-be-exposed fail-closed；reaching-definition + backward liveness 推导每个 loan generation 的 NLL region，并按实际 referent use 固化 ReadLoan/WriteLoan；命名 closure binding 与立即调用临时值都是显式 loan holder，嵌套 closure holder dependency 继续保持被捕获 closure 的内层 loans；loan conflict 与 Move replacement 都消费 canonical Place relation，只有 `Disjoint` 授权独立；分析不得把用户 HIR nesting 映射到宿主递归；
 - `hir/capture.rs` 以 child-before-parent 的有限遍历分配并固化 capture loan；捕获 dynamic Place 进入用户调用时由 parameter argument pass 建立 call loan；capture 不是当前 `Borrowed(source)` 支持的 return source，非 fresh-owner capture return 继续 fail-closed；
 - `hir/expr_places.rs` 是已解析 HIR expression 恢复 stable `Place` projection 的唯一 owner；parameter argument planning 与 ownership flow 必须共同消费它，不能分别按 expression 形状拼第二套 Field/Index source；
@@ -147,7 +148,7 @@ codegen 只消费已解析 HIR，不得根据：
 
 重新决定静态语义、ownership 或 borrow relation。
 
-`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影复用 checked array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则。
+`codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影直接消费 HIR 的 bounds-check fact 并复用统一 array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则或在后端重做检查决策。
 
 Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径。owning replacement 已按“完整 RHS → target projection → 销毁旧 owner → commit 新 owner”发射；初始化不运行 destruction，borrowed alias rebind 不销毁 referent。
 

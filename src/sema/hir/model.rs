@@ -119,6 +119,7 @@ pub(crate) enum Place {
     Index {
         base: Box<Place>,
         index: Box<Expr>,
+        bounds_check: RuntimeCheckRequirement,
         info: PlaceInfo,
     },
 }
@@ -406,6 +407,15 @@ pub(crate) enum PreviousOwner {
     MaybeMoved,
 }
 
+/// Sema's decision for a safety condition that codegen cannot silently rediscover from syntax.
+/// `Proven` removes the runtime branch only when the canonical semantic owner can establish the
+/// condition statically; every unresolved case remains `Required` and must abort on failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeCheckRequirement {
+    Proven,
+    Required,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BindingOperation {
     Initialize(OwningWrite),
@@ -549,6 +559,7 @@ pub(crate) enum Expr {
     Index {
         recv: Box<Expr>,
         idx: Box<Expr>,
+        bounds_check: RuntimeCheckRequirement,
         span: Span,
         info: ExprInfo,
     },

@@ -1,4 +1,4 @@
-use super::arrays::checked_array_element_addr;
+use super::arrays::resolved_array_element_addr;
 use super::cells::binding_storage_addr;
 use super::expr::emit_expr;
 use super::value::ExprValue;
@@ -67,7 +67,12 @@ pub(super) fn emit_place_addr<M: Module>(
             let addr = bcx.ins().iadd_imm_s(base_value, offset as i64);
             Ok((addr, field_vty))
         }
-        Place::Index { base, index, .. } => {
+        Place::Index {
+            base,
+            index,
+            bounds_check,
+            ..
+        } => {
             let (array, base_vty) = emit_place_value(c, bcx, frame, base)?;
             let array = array.into_scalar("array Place base 必须是 scalar reference");
             let VTy::Array(elem_vty) = base_vty else {
@@ -75,7 +80,14 @@ pub(super) fn emit_place_addr<M: Module>(
             };
             let index_word = emit_expr(c, bcx, frame, index)?;
             let index_word = index_word.into_scalar("Place index 必须是 scalar i32 expression");
-            let addr = checked_array_element_addr(c, bcx, array, index_word, place.span())?;
+            let addr = resolved_array_element_addr(
+                c,
+                bcx,
+                array,
+                index_word,
+                *bounds_check,
+                place.span(),
+            )?;
             Ok((addr, *elem_vty))
         }
     }

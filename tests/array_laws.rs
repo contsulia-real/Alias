@@ -4,7 +4,7 @@
 //! - 字面量 [e1, e2, ...] 元素类型一致；类型槽 array<T> 恰一参；
 //! - owning binding 的稳定 Place 读取创建独立 array wrapper/backing；
 //! - for 循环变量按元素静态类型递归 clone，不与容器元素共享 owning root；
-//! - 下标读带越界守卫 (i<0 或 i>=len → span-ID 中止存根, exit 1)；
+//! - 下标读消费 sema 固化的 bounds fact；未静态证明时由守卫在 i<0 或 i>=len 时中止；
 //!   下标赋值当前未支持并显式拒绝；
 //! - 内建 len/push/pop/iterator 由编译器提供；push/pop 推进所属 wrapper 的结构版本，
 //!   pop 空数组运行时中止。
@@ -47,6 +47,13 @@ fn assert_law(src: &str, want_sub: &str, line: u32, col: u32) {
 fn literal_index_roundtrip() {
     let src = "func i32 main = () -> {\n    val array<i32> xs = [3, 14, 15]\n    return xs[0] + xs[1] + xs[2]\n}\n";
     assert_eq!(run(src).unwrap(), 32);
+}
+
+/// Direct literal indexing carries a sema-proven bounds fact and executes without a backend guard.
+#[test]
+fn direct_literal_constant_index_roundtrip() {
+    let src = "func i32 main = () -> return [3, 14, 15][1]\n";
+    assert_eq!(run(src).unwrap(), 14);
 }
 
 /// push 越初始容量增长: 初始 len=cap=1, 推到 6 必经换缓冲复制路径,

@@ -463,6 +463,7 @@ Pattern binding 是独立的 owning local，可建立局部 borrow；这也适�
 - 非空元素必须统一到同一元素类型；
 - 下标读：`arr[index]`；
 - 下标当前只读，`arr[i] = x` 明确拒绝；
+- 下标的 bounds 决策由 sema 固化为 HIR `Proven / Required` fact：直接数组字面量的合法常量下标可静态证明并省略 guard，已知越界在编译期拒绝；其它数组 Place / 动态下标保留运行时检查，失败时中止；codegen 不按表达式形状自行决定是否检查；
 - `len()` 返回 `i32`；
 - `push(v)` 无返回值；
 - `pop()` 返回元素，空数组中止；

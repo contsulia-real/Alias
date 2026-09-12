@@ -1,4 +1,4 @@
-use super::arrays::{checked_array_element_addr, emit_array_lit};
+use super::arrays::{emit_array_lit, resolved_array_element_addr};
 use super::calls::{emit_call, emit_method_call};
 use super::cells::{
     binding_storage_addr, emit_local_cell, ensure_current, pop_scope, push_scope,
@@ -255,7 +255,11 @@ fn emit_expr_value<M: Module>(
             Ok(ExprValue::load(bcx, p, offset, &fvty))
         }
         Expr::Index {
-            recv, idx, span, ..
+            recv,
+            idx,
+            bounds_check,
+            span,
+            ..
         } => {
             let array = emit_expr(c, bcx, frame, recv)?
                 .into_scalar("array index receiver 收到 multi-lane expression value");
@@ -265,7 +269,7 @@ fn emit_expr_value<M: Module>(
                 VTy::Array(inner) => (*inner).clone(),
                 _ => invariant_violation("下标主语为 array (sema 已校验)"),
             };
-            let addr = checked_array_element_addr(c, bcx, array, idxw, *span)?;
+            let addr = resolved_array_element_addr(c, bcx, array, idxw, *bounds_check, *span)?;
             Ok(ExprValue::load(bcx, addr, 0, &elem_vty))
         }
         Expr::ArrayLit { elems, .. } => {
