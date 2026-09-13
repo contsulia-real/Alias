@@ -58,11 +58,11 @@ pub(super) fn pointer_binary(
     op: BinOp,
     left: &Expr,
     right: &Expr,
-) -> (
+) -> AliasResult<(
     Option<RuntimeCheckRequirement>,
     Option<RuntimeCheckRequirement>,
     Option<RuntimeCheckRequirement>,
-) {
+)> {
     let left_ty = left.ty();
     let right_ty = right.ty();
     if !matches!(
@@ -72,12 +72,27 @@ pub(super) fn pointer_binary(
             ..
         }
     ) {
-        return (None, None, None);
+        return Ok((None, None, None));
     }
     if matches!(op, BinOp::Add | BinOp::Sub)
         && matches!(right_ty, Ty::Int(_) | Ty::UInt(_))
     {
-        return (
+        let delta = constant_integer(right);
+        if let (Some(current), Some(delta)) = (known_refer_offset(left), delta) {
+            let next = if op == BinOp::Add {
+                current.checked_add(delta)
+            } else {
+                current.checked_sub(delta)
+            };
+            if !matches!(next, Some(0 | 1)) {
+                return Err(AliasError {
+                    msg: "pointer arithmetic 的静态 offset 超出 source view".into(),
+                    span: right.span(),
+                });
+            }
+            return Ok((None, None, Some(RuntimeCheckRequirement::Proven)));
+        }
+        return Ok((
             None,
             None,
             Some(if constant_integer_is_zero(right) {
@@ -85,14 +100,14 @@ pub(super) fn pointer_binary(
             } else {
                 RuntimeCheckRequirement::Required
             }),
-        );
+        ));
     }
     if left_ty != right_ty {
-        return (None, None, None);
+        return Ok((None, None, None));
     }
     // Static pointer values currently carry no symbolic provenance identity. Preserve that
     // uncertainty explicitly instead of letting codegen infer a proof from expression shape.
-    match op {
+    Ok(match op {
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             (Some(RuntimeCheckRequirement::Required), None, None)
         }
@@ -102,7 +117,7 @@ pub(super) fn pointer_binary(
             None,
         ),
         _ => (None, None, None),
-    }
+    })
 }
 
 fn constant_integer_is_zero(expr: &Expr) -> bool {
@@ -112,5 +127,31 @@ fn constant_integer_is_zero(expr: &Expr) -> bool {
             constant_integer_is_zero(expr)
         }
         _ => false,
+    }
+}
+
+fn constant_integer(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::Int(value, ..) => Some(*value as i128),
+        Expr::Neg { expr, .. } => constant_integer(expr)?.checked_neg(),
+        Expr::Convert { expr, mode: ResolvedConversion::Identity, .. } => constant_integer(expr),
+        _ => None,
+    }
+}
+
+fn known_refer_offset(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::Refer { .. } => Some(0),
+        Expr::Binary { op, lhs, rhs, pointer_offset_source: Some(_), .. } => {
+            let left = known_refer_offset(lhs)?;
+            let right = constant_integer(rhs)?;
+            if *op == BinOp::Add {
+                left.checked_add(right)
+            } else {
+                left.checked_sub(right)
+            }
+        }
+        Expr::Convert { expr, mode: ResolvedConversion::Identity, .. } => known_refer_offset(expr),
+        _ => None,
     }
 }

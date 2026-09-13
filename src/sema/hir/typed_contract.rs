@@ -19,6 +19,15 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
+fn expected_pointer_offset_source(expr: &Expr) -> Option<super::PointerOffsetSource> {
+    match expr {
+        Expr::Ident(_, Some(binding), ..) => Some(super::PointerOffsetSource::Binding(*binding)),
+        Expr::Refer { loan_id, .. } => Some(super::PointerOffsetSource::Loan(*loan_id)),
+        Expr::Binary { pointer_offset_source, .. } => *pointer_offset_source,
+        _ => None,
+    }
+}
+
 pub(super) fn validate_free_operand(pointer: &Expr) -> AliasResult<()> {
     if !matches!(pointer.ty(), Ty::Ptr { .. }) {
         return Err(invariant(
@@ -286,7 +295,8 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                     "Binary HIR 结果类型与 canonical operator contract 不一致",
                 ));
             }
-            let expected_checks = super::runtime_checks::pointer_binary(*op, lhs, rhs);
+            let expected_checks = super::runtime_checks::pointer_binary(*op, lhs, rhs)
+                .map_err(|_| invariant(expr.span(), "Binary pointer static-check contract 漂移"))?;
             if (
                 *pointer_provenance_check,
                 *pointer_element_lattice_check,
@@ -299,10 +309,7 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 ));
             }
             let expected_offset_source = if expected_checks.2.is_some() {
-                match lhs.as_ref() {
-                    Expr::Ident(_, Some(binding_id), ..) => Some(*binding_id),
-                    _ => None,
-                }
+                expected_pointer_offset_source(lhs)
             } else {
                 None
             };

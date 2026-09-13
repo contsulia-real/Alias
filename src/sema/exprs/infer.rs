@@ -109,28 +109,33 @@ impl Checker {
                     && matches!(r, Ty::Int(_) | Ty::UInt(_))
                     && matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub)
                 {
-                    let Expr::Ident(_, _) = lhs.as_ref() else {
+                    let source = if let Some(source) = self.pointer_offsets
+                        .get(&Self::expr_key(lhs))
+                        .map(|info| info.source)
+                    {
+                        source
+                    } else if let Some(borrow) = self.borrow_places.get(&Self::expr_key(lhs)) {
+                        crate::sema::hir::PointerOffsetSource::Loan(borrow.loan_id)
+                    } else if let Some(binding) = self.expr_binding_ids
+                        .get(&Self::expr_key(lhs))
+                        .copied()
+                    {
+                        if !self.borrowed_bindings.contains_key(&binding) {
+                            return Err(AliasError {
+                                msg: "pointer arithmetic 当前只从 borrowed pointer view 派生；allocation root owner 保持原位".into(),
+                                span: lhs.span(),
+                            });
+                        }
+                        crate::sema::hir::PointerOffsetSource::Binding(binding)
+                    } else {
                         return Err(AliasError {
-                            msg: "pointer arithmetic 当前要求左操作数是 stable borrowed pointer local".into(),
+                            msg: "pointer arithmetic source 必须是 borrow-derived pointer view".into(),
                             span: lhs.span(),
                         });
                     };
-                    let source_binding = self.expr_binding_ids
-                        .get(&Self::expr_key(lhs))
-                        .copied()
-                        .ok_or_else(|| AliasError {
-                            msg: "内部 sema 不变式被破坏: pointer arithmetic source 缺少 BindingId".into(),
-                            span: lhs.span(),
-                        })?;
-                    if !self.borrowed_bindings.contains_key(&source_binding) {
-                        return Err(AliasError {
-                            msg: "pointer arithmetic 当前只从 borrowed pointer view 派生；allocation root owner 保持原位".into(),
-                            span: lhs.span(),
-                        });
-                    }
                     self.pointer_offsets.insert(
                         Self::expr_key(e),
-                        crate::sema::hir::LowerPointerOffsetInfo { source_binding },
+                        crate::sema::hir::LowerPointerOffsetInfo { source },
                     );
                 }
                 Ok(result)

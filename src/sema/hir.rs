@@ -65,8 +65,8 @@ pub(crate) use model::{
     BindingOperation, BindingOwner, Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget,
     Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId,
     Item, LoanId, MatchArm, MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability,
-    OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PreviousOwner,
-    ResolvedConversion, ReturnPass, RuntimeCheckRequirement, ShallowClonePlan, Stmt,
+    OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PointerOffsetSource,
+    PreviousOwner, ResolvedConversion, ReturnPass, RuntimeCheckRequirement, ShallowClonePlan, Stmt,
     StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
@@ -126,7 +126,7 @@ pub(super) struct LowerBorrowInfo {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LowerPointerOffsetInfo {
-    pub(super) source_binding: BindingId,
+    pub(super) source: PointerOffsetSource,
 }
 
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时

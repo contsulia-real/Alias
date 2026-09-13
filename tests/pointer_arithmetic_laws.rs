@@ -102,7 +102,7 @@ fn pointer_offset_stride_overflow_aborts_before_bounds_evaluation() {
 }
 
 #[test]
-fn pointer_arithmetic_rejects_nullable_owners_and_unbound_views() {
+fn pointer_arithmetic_rejects_nullable_owners() {
     let nullable = fail(
         r#"
 func i32 main = () -> {
@@ -115,18 +115,32 @@ func i32 main = () -> {
     );
     assert!(nullable.msg.contains("不适用于"), "{}", nullable.msg);
 
-    let direct = fail(
+}
+
+#[test]
+fn direct_and_chained_borrow_derived_offsets_keep_one_loan_origin() {
+    let source = r#"
+func i32 main = () -> {
+    val i32 owner = 7
+    val ptr<i32> start = refer(owner) + 1 - 1
+    val ptr<i32> repeated = refer(owner)
+    if start != repeated { return 1 }
+    return 0
+}
+"#;
+    assert_eq!(run(source).unwrap(), 0);
+}
+
+#[test]
+fn statically_known_direct_refer_offset_outside_view_is_rejected() {
+    let error = fail(
         r#"
 func i32 main = () -> {
     val i32 owner = 7
-    val ptr<i32> next = refer(owner) + 1
+    val ptr<i32> invalid = refer(owner) + 2
     return 0
 }
 "#,
     );
-    assert!(
-        direct.msg.contains("stable borrowed pointer local"),
-        "{}",
-        direct.msg
-    );
+    assert!(error.msg.contains("静态 offset 超出 source view"), "{}", error.msg);
 }

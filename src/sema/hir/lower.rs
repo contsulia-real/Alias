@@ -508,10 +508,10 @@ fn lower_expr_node(
             let lhs = Box::new(lower_expr(lhs, facts)?);
             let rhs = Box::new(lower_expr(rhs, facts)?);
             let (pointer_provenance_check, pointer_element_lattice_check, pointer_offset_check) =
-                super::runtime_checks::pointer_binary(*op, &lhs, &rhs);
+                super::runtime_checks::pointer_binary(*op, &lhs, &rhs)?;
             let pointer_offset_source = facts.pointer_offsets
                 .remove(&key)
-                .map(|source| source.source_binding);
+                .map(|source| source.source);
             Expr::Binary {
                 op: *op,
                 lhs,

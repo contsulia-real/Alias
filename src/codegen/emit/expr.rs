@@ -233,6 +233,12 @@ fn emit_expr_value<M: Module>(
             let right = emit_expr(c, bcx, frame, rhs)?;
             let left_vty = c.vty(lhs.ty());
             if pointer_offset_source.is_some() {
+                let left = if matches!(lhs.as_ref(), Expr::Ident(..)) {
+                    left
+                } else {
+                    let cell = left.into_scalar("derived pointer view 必须由 canonical cell 承载");
+                    ExprValue::load(bcx, cell, 0, &left_vty)
+                };
                 let right = right.into_scalar("pointer arithmetic offset 必须是 scalar integer");
                 super::provenance::emit_pointer_offset(
                     c,

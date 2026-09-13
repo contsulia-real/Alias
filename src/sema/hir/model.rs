@@ -110,6 +110,12 @@ pub(crate) struct PlaceInfo {
     pub(crate) span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerOffsetSource {
+    Binding(BindingId),
+    Loan(LoanId),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Place {
     Local {
@@ -519,7 +525,7 @@ pub(crate) enum Expr {
         /// lattice. Other binary operations carry no lattice check.
         pointer_element_lattice_check: Option<RuntimeCheckRequirement>,
         /// Resolved borrowed pointer binding whose reaching loans a derived view must preserve.
-        pointer_offset_source: Option<BindingId>,
+        pointer_offset_source: Option<PointerOffsetSource>,
         /// Pointer offset overflow/bounds is either statically proved or guarded at runtime.
         pointer_offset_check: Option<RuntimeCheckRequirement>,
         span: Span,

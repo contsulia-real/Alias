@@ -363,7 +363,10 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     ));
                 }
                 match expr {
-                    Expr::Binary { pointer_offset_source: Some(source), .. }
+                    Expr::Binary {
+                        pointer_offset_source: Some(super::PointerOffsetSource::Binding(source)),
+                        ..
+                    }
                         if relations.get(source) != Some(&StorageRelation::Borrowed) =>
                     {
                         return Err(error(
