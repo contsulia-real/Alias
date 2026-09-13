@@ -42,6 +42,14 @@ pub(in crate::sema) fn binary_result_type(
     };
     match op {
         Add | Sub | Mul | Div => match (l, r) {
+            (
+                Ty::Ptr {
+                    nullable: false, ..
+                },
+                Ty::Ptr {
+                    nullable: false, ..
+                },
+            ) if op == Sub && l == r => Ok(Ty::Int(crate::sema::types::IntW::W64)),
             (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
             (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
             (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),

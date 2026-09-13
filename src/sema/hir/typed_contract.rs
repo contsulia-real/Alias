@@ -268,6 +268,7 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             lhs,
             rhs,
             pointer_provenance_check,
+            pointer_element_lattice_check,
             ..
         } => {
             let result =
@@ -283,12 +284,13 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                     "Binary HIR 结果类型与 canonical operator contract 不一致",
                 ));
             }
-            if *pointer_provenance_check
-                != super::runtime_checks::pointer_ordering(*op, lhs.ty(), rhs.ty())
+            let expected_checks =
+                super::runtime_checks::pointer_binary(*op, lhs.ty(), rhs.ty());
+            if (*pointer_provenance_check, *pointer_element_lattice_check) != expected_checks
             {
                 return Err(invariant(
                     expr.span(),
-                    "Binary pointer provenance-check fact 漂移",
+                    "Binary pointer runtime-check fact 漂移",
                 ));
             }
         }

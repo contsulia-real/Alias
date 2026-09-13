@@ -6,7 +6,7 @@ use super::cells::{
 use super::clone::{emit_deep_clone_place, emit_deep_clone_value};
 use super::control::emit_stmt;
 use super::ops::{
-    emit_abort_branch, emit_binary, emit_convert, emit_pointer_comparison, narrow, widen_signed,
+    emit_abort_branch, emit_binary, emit_convert, emit_pointer_binary, narrow, widen_signed,
     widen_unsigned,
 };
 use super::places::{emit_place_addr, emit_place_value, field_storage};
@@ -223,6 +223,7 @@ fn emit_expr_value<M: Module>(
             lhs,
             rhs,
             pointer_provenance_check,
+            pointer_element_lattice_check,
             span,
             ..
         } => {
@@ -230,7 +231,7 @@ fn emit_expr_value<M: Module>(
             let right = emit_expr(c, bcx, frame, rhs)?;
             let left_vty = c.vty(lhs.ty());
             if matches!(left_vty, VTy::Ptr { .. }) {
-                emit_pointer_comparison(
+                emit_pointer_binary(
                     c,
                     bcx,
                     (
@@ -239,6 +240,7 @@ fn emit_expr_value<M: Module>(
                         &left,
                         &right,
                         *pointer_provenance_check,
+                        *pointer_element_lattice_check,
                         *span,
                     ),
                 )

@@ -54,25 +54,34 @@ pub(super) fn array_place_index(_base: &Place, _index: &Expr) -> RuntimeCheckReq
     RuntimeCheckRequirement::Required
 }
 
-pub(super) fn pointer_ordering(
+pub(super) fn pointer_binary(
     op: BinOp,
     left: &Ty,
     right: &Ty,
-) -> Option<RuntimeCheckRequirement> {
-    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-        && matches!(
-            left,
-            Ty::Ptr {
-                nullable: false,
-                ..
-            }
-        )
-        && left == right
+) -> (
+    Option<RuntimeCheckRequirement>,
+    Option<RuntimeCheckRequirement>,
+) {
+    if !matches!(
+        left,
+        Ty::Ptr {
+            nullable: false,
+            ..
+        }
+    ) || left != right
     {
-        // Static pointer values currently carry no symbolic provenance identity. Preserve that
-        // uncertainty explicitly instead of letting codegen infer a proof from expression shape.
-        Some(RuntimeCheckRequirement::Required)
-    } else {
-        None
+        return (None, None);
+    }
+    // Static pointer values currently carry no symbolic provenance identity. Preserve that
+    // uncertainty explicitly instead of letting codegen infer a proof from expression shape.
+    match op {
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            (Some(RuntimeCheckRequirement::Required), None)
+        }
+        BinOp::Sub => (
+            Some(RuntimeCheckRequirement::Required),
+            Some(RuntimeCheckRequirement::Required),
+        ),
+        _ => (None, None),
     }
 }

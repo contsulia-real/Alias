@@ -6,6 +6,23 @@ fn fail(source: &str) -> AliasError {
     run(source).expect_err("source must be rejected")
 }
 
+fn cli_run(source: &str, file_name: &str) -> std::process::Output {
+    let dir = std::env::temp_dir().join(format!(
+        "alias-pointer-comparison-laws-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create test temp directory");
+    let path = dir.join(file_name);
+    std::fs::write(&path, source).expect("write pointer comparison source");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_alias"))
+        .arg(&path)
+        .output()
+        .expect("run Alias CLI");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+    output
+}
+
 #[test]
 fn equality_uses_provenance_and_address_but_not_view_storage_identity() {
     let source = r#"
@@ -95,19 +112,7 @@ func i32 main = () -> {
 #[test]
 fn ordering_across_provenance_aborts_at_the_operator() {
     let source = "func i32 main = () -> {\n    val i32 first = 1\n    val i32 second = 2\n    val ptr<i32> left = refer(first)\n    val ptr<i32> right = refer(second)\n    if left < right { return 1 }\n    return 0\n}\n";
-    let dir = std::env::temp_dir().join(format!(
-        "alias-pointer-comparison-laws-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("create test temp directory");
-    let path = dir.join("ordering.as");
-    std::fs::write(&path, source).expect("write pointer ordering source");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_alias"))
-        .arg(&path)
-        .output()
-        .expect("run Alias CLI");
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
+    let output = cli_run(source, "ordering.as");
 
     assert_eq!(output.stdout, b"");
     assert_eq!(
@@ -161,4 +166,59 @@ func i32 main = () -> {
             error.msg
         );
     }
+}
+
+#[test]
+fn difference_within_one_provenance_returns_i64_element_distance() {
+    let source = r#"
+func i32 main = () -> {
+    val i32 owner = 1
+    val ptr<i32> left = refer(owner)
+    val ptr<i32> right = refer(owner)
+    val i64 distance = left - right
+    if distance != 0 { return 1 }
+    return 0
+}
+"#;
+    assert_eq!(run(source).unwrap(), 0);
+}
+
+#[test]
+fn difference_across_provenance_aborts() {
+    let source = r#"
+func i32 main = () -> {
+    val i32 first = 1
+    val i32 second = 2
+    val ptr<i32> left = refer(first)
+    val ptr<i32> right = refer(second)
+    val i64 distance = left - right
+    if distance == 0 { return 1 }
+    return 0
+}
+"#;
+    let output = cli_run(source, "difference.as");
+    assert_eq!(output.stdout, b"");
+    assert_eq!(
+        output.stderr,
+        "错误 @ 7:23 — pointer provenance 不兼容\n".as_bytes()
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn nullable_pointer_difference_is_rejected_statically() {
+    let error = fail(
+        r#"
+func i32 main = () -> {
+    val ptr<i32>? left = malloc<i32>()
+    val ptr<i32>? right = malloc<i32>()
+    val i64 distance = left - right
+    free(move(left))
+    free(move(right))
+    if distance == 0 { return 1 }
+    return 0
+}
+"#,
+    );
+    assert!(error.msg.contains("不适用于"), "{}", error.msg);
 }

@@ -515,6 +515,9 @@ pub(crate) enum Expr {
         /// that condition was proved or still needs a runtime guard; non-pointer operations and
         /// pointer equality carry no provenance check.
         pointer_provenance_check: Option<RuntimeCheckRequirement>,
+        /// Pointer subtraction additionally requires an integral distance on the pointee stride
+        /// lattice. Other binary operations carry no lattice check.
+        pointer_element_lattice_check: Option<RuntimeCheckRequirement>,
         span: Span,
         info: ExprInfo,
     },

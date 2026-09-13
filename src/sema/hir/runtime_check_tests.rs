@@ -84,6 +84,7 @@ fn pointer_ordering_freezes_required_provenance_check() {
     );
     let Expr::Binary {
         pointer_provenance_check,
+        pointer_element_lattice_check,
         ..
     } = local_value(&mut program, "ordered")
     else {
@@ -93,6 +94,7 @@ fn pointer_ordering_freezes_required_provenance_check() {
         *pointer_provenance_check,
         Some(RuntimeCheckRequirement::Required)
     );
+    assert_eq!(*pointer_element_lattice_check, None);
 
     *pointer_provenance_check = None;
     let error = validate_resolved_hir(&program)
@@ -100,7 +102,39 @@ fn pointer_ordering_freezes_required_provenance_check() {
     assert!(
         error
             .msg
-            .contains("Binary pointer provenance-check fact 漂移"),
+            .contains("Binary pointer runtime-check fact 漂移"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn pointer_difference_freezes_provenance_and_lattice_checks() {
+    let mut program = checked(
+        "func i32 main = () -> {\n    val i32 owner = 1\n    val ptr<i32> left = refer(owner)\n    val ptr<i32> right = refer(owner)\n    val i64 distance = left - right\n    return 0\n}\n",
+    );
+    let Expr::Binary {
+        pointer_provenance_check,
+        pointer_element_lattice_check,
+        ..
+    } = local_value(&mut program, "distance")
+    else {
+        panic!("distance must be pointer subtraction")
+    };
+    assert_eq!(
+        *pointer_provenance_check,
+        Some(RuntimeCheckRequirement::Required)
+    );
+    assert_eq!(
+        *pointer_element_lattice_check,
+        Some(RuntimeCheckRequirement::Required)
+    );
+
+    *pointer_element_lattice_check = None;
+    let error = validate_resolved_hir(&program)
+        .expect_err("a missing pointer lattice-check decision must fail closed");
+    assert!(
+        error.msg.contains("Binary pointer runtime-check fact 漂移"),
         "实际: {}",
         error.msg
     );

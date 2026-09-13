@@ -323,6 +323,17 @@ impl Checker {
             );
             return self.check_inferred_expected(arg, env, expected);
         }
+        // Pointer subtraction has a fixed i64 result but pointer operands. Give ordinary
+        // inference one chance before numeric result-context propagation tries to force i64 into
+        // those operands. Numeric literal subtraction still falls through and adopts the slot.
+        if matches!(e, Expr::Binary { op: crate::ast::BinOp::Sub, .. })
+            && expected == &Ty::Int(crate::sema::types::IntW::W64)
+        {
+            let inferred = self.expr(e, env)?;
+            if inferred == *expected {
+                return Ok(inferred);
+            }
+        }
         if let Some(r) = literal_slot_unify(expected, e) {
             return r;
         }

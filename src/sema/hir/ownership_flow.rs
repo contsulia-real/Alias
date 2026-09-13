@@ -1178,7 +1178,7 @@ impl<'a> GraphBuilder<'a> {
                 }) {
                     return Err(error(
                         expr.span(),
-                        "pointer comparison 不能消费未锚定的 allocation root temporary；请先 transfer 到 owning local",
+                        "pointer binary operation 不能消费未锚定的 allocation root temporary；请先 transfer 到 owning local",
                     ));
                 }
                 let middle = self.node(Action::Nop);

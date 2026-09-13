@@ -506,13 +506,14 @@ fn lower_expr_node(
         crate::ast::Expr::Binary { op, lhs, rhs, span } => {
             let lhs = Box::new(lower_expr(lhs, facts)?);
             let rhs = Box::new(lower_expr(rhs, facts)?);
-            let pointer_provenance_check =
-                super::runtime_checks::pointer_ordering(*op, lhs.ty(), rhs.ty());
+            let (pointer_provenance_check, pointer_element_lattice_check) =
+                super::runtime_checks::pointer_binary(*op, lhs.ty(), rhs.ty());
             Expr::Binary {
                 op: *op,
                 lhs,
                 rhs,
                 pointer_provenance_check,
+                pointer_element_lattice_check,
                 span: *span,
                 info,
             }

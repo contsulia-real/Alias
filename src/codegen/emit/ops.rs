@@ -1,6 +1,6 @@
 use super::strings::{call_str_cmp, display_typed};
 use super::value::ExprValue;
-use crate::codegen::abi::{cl_type, ir_type_bits, PtrLane, VTy};
+use crate::codegen::abi::{cl_type, ir_type_bits, value_layout, PtrLane, VTy};
 use crate::codegen::{invariant_violation, Compiler};
 use crate::sema::hir::{BinOp, Expr, RuntimeCheckRequirement};
 use crate::sema::types::FloatW;
@@ -153,7 +153,7 @@ pub(crate) fn emit_binary_values<M: Module>(
     }
 }
 
-pub(crate) fn emit_pointer_comparison<M: Module>(
+pub(crate) fn emit_pointer_binary<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
     input: (
@@ -162,10 +162,11 @@ pub(crate) fn emit_pointer_comparison<M: Module>(
         &ExprValue,
         &ExprValue,
         Option<RuntimeCheckRequirement>,
+        Option<RuntimeCheckRequirement>,
         Span,
     ),
 ) -> AliasResult<Value> {
-    let (op, vty, left, right, provenance_check, span) = input;
+    let (op, vty, left, right, provenance_check, lattice_check, span) = input;
     let left_provenance = left.pointer_lane(bcx, vty, PtrLane::Provenance);
     let right_provenance = right.pointer_lane(bcx, vty, PtrLane::Provenance);
     let left_address = left.pointer_lane(bcx, vty, PtrLane::Address);
@@ -175,16 +176,17 @@ pub(crate) fn emit_pointer_comparison<M: Module>(
         .icmp(IntCC::Equal, left_provenance, right_provenance);
     let result = match op {
         BinOp::EqEq | BinOp::NotEq => {
-            if provenance_check.is_some() {
-                invariant_violation("pointer equality 不携带 provenance runtime check")
+            if provenance_check.is_some() || lattice_check.is_some() {
+                invariant_violation("pointer equality 不携带 pointer runtime check")
             }
             let same_address = bcx.ins().icmp(IntCC::Equal, left_address, right_address);
             let equal = bcx.ins().band(same_provenance, same_address);
-            if op == BinOp::EqEq {
+            let equal = if op == BinOp::EqEq {
                 equal
             } else {
                 bcx.ins().icmp_imm_s(IntCC::Equal, equal, 0)
-            }
+            };
+            bcx.ins().uextend(types::I64, equal)
         }
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             let VTy::Ptr {
@@ -193,22 +195,75 @@ pub(crate) fn emit_pointer_comparison<M: Module>(
             else {
                 invariant_violation("pointer ordering 需要 non-null pointer type")
             };
-            match provenance_check {
+            emit_pointer_provenance_guard(
+                c,
+                bcx,
+                left_provenance,
+                right_provenance,
+                provenance_check,
+                span,
+            )?;
+            if lattice_check.is_some() {
+                invariant_violation("pointer ordering 不携带 element-lattice check")
+            }
+            let ordered = bcx
+                .ins()
+                .icmp(int_cc(op, false), left_address, right_address);
+            bcx.ins().uextend(types::I64, ordered)
+        }
+        BinOp::Sub => {
+            let VTy::Ptr {
+                pointee,
+                nullable: false,
+            } = vty
+            else {
+                invariant_violation("pointer difference 需要 non-null pointer type")
+            };
+            emit_pointer_provenance_guard(
+                c,
+                bcx,
+                left_provenance,
+                right_provenance,
+                provenance_check,
+                span,
+            )?;
+            let (distance, overflow) = bcx.ins().ssub_overflow(left_address, right_address);
+            emit_abort_branch(c, bcx, overflow, "alias.abort_ptr_distance", span)?;
+            let stride = i64::try_from(value_layout(pointee).stride)
+                .unwrap_or_else(|_| invariant_violation("pointer pointee stride 超出 i64"));
+            let stride = bcx.ins().iconst(types::I64, stride);
+            match lattice_check {
                 Some(RuntimeCheckRequirement::Required) => {
-                    let different =
-                        bcx.ins()
-                            .icmp(IntCC::NotEqual, left_provenance, right_provenance);
-                    emit_abort_branch(c, bcx, different, "alias.abort_ptr", span)?;
+                    let remainder = bcx.ins().srem(distance, stride);
+                    let non_integral = bcx.ins().icmp_imm_s(IntCC::NotEqual, remainder, 0);
+                    emit_abort_branch(c, bcx, non_integral, "alias.abort_ptr_lattice", span)?;
                 }
                 Some(RuntimeCheckRequirement::Proven) => {}
-                None => invariant_violation("pointer ordering 缺少 provenance-check fact"),
+                None => invariant_violation("pointer difference 缺少 element-lattice check fact"),
             }
-            bcx.ins()
-                .icmp(int_cc(op, false), left_address, right_address)
+            bcx.ins().sdiv(distance, stride)
         }
-        _ => invariant_violation("pointer comparison 收到非比较运算符"),
+        _ => invariant_violation("pointer binary emitter 收到尚未开放的运算符"),
     };
-    Ok(bcx.ins().uextend(types::I64, result))
+    Ok(result)
+}
+
+fn emit_pointer_provenance_guard<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    left: Value,
+    right: Value,
+    requirement: Option<RuntimeCheckRequirement>,
+    span: Span,
+) -> AliasResult<()> {
+    match requirement {
+        Some(RuntimeCheckRequirement::Required) => {
+            let different = bcx.ins().icmp(IntCC::NotEqual, left, right);
+            emit_abort_branch(c, bcx, different, "alias.abort_ptr", span)
+        }
+        Some(RuntimeCheckRequirement::Proven) => Ok(()),
+        None => invariant_violation("pointer operation 缺少 provenance-check fact"),
+    }
 }
 
 fn emit_checked_int_binary<M: Module>(
