@@ -540,6 +540,7 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(TestNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_exprs(stack, source),
         Expr::Int(..)
         | Expr::Float(..)

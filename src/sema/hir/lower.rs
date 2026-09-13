@@ -13,13 +13,15 @@ pub(super) fn lower(
     mut facts: LowerFacts,
     main_id: BindingId,
 ) -> AliasResult<CheckedProgram> {
+    let items = program
+        .items
+        .iter()
+        .map(|item| lower_item(item, &mut facts))
+        .collect::<AliasResult<Vec<_>>>()?;
     let mut checked = CheckedProgram {
         main_id,
-        items: program
-            .items
-            .iter()
-            .map(|item| lower_item(item, &mut facts))
-            .collect::<AliasResult<Vec<_>>>()?,
+        items,
+        address_taken_roots: std::mem::take(&mut facts.address_taken_roots),
     };
     ensure_facts_consumed(&facts)?;
     // 每个 Expr 在 lower_expr 返回前已按 resolved HIR 形状固化 value category 与当前可证明的
@@ -600,6 +602,9 @@ fn lower_expr_node(
                 LowerCallTarget::Borrow => {
                     lower_borrow_expr(callee, args, *span, key, info, facts)?
                 }
+                LowerCallTarget::Refer => {
+                    lower_refer_expr(callee, args, *span, key, info, facts)?
+                }
                 LowerCallTarget::Move => lower_move_expr(callee, args, *span, key, info, facts)?,
                 LowerCallTarget::FreeRawAllocation => {
                     lower_raw_free_expr(callee, args, *span, info, facts)?
@@ -945,6 +950,36 @@ fn lower_borrow_expr(
     })
 }
 
+fn lower_refer_expr(
+    callee: &crate::ast::Expr,
+    args: &[crate::ast::CallArg],
+    span: Span,
+    key: usize,
+    info: ExprInfo,
+    facts: &mut LowerFacts,
+) -> AliasResult<Expr> {
+    let [_arg] = args else {
+        return Err(AliasError {
+            msg: "内部 sema 不变式被破坏: refer 元数不是 1".into(),
+            span,
+        });
+    };
+    let _ = lower_expr(callee, facts)?;
+    let source_expr = lower_expr(&args[0].value, facts)?;
+    let source_fact = take_required(&mut facts.borrow_places, key, span, "refer Place")?;
+    facts
+        .address_taken_roots
+        .insert(source_fact.place.root_binding_id());
+    let source = lower_resolved_place(source_expr, source_fact.place, span)?;
+    Ok(Expr::Refer {
+        loan_id: source_fact.loan_id,
+        source: Box::new(source),
+        kind: Some(BorrowKind::Read),
+        span,
+        info,
+    })
+}
+
 fn lower_call_target(
     target: LowerCallTarget,
     args: &[crate::ast::CallArg],
@@ -975,6 +1010,7 @@ fn lower_call_target(
         }),
         LowerCallTarget::Typeof
         | LowerCallTarget::Borrow
+        | LowerCallTarget::Refer
         | LowerCallTarget::Move
         | LowerCallTarget::FreeRawAllocation
         | LowerCallTarget::ContextualConversion(_) => Err(AliasError {

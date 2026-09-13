@@ -147,6 +147,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
@@ -426,7 +427,10 @@ fn validate_uses(program: &CheckedProgram, collected: &CollectedContracts) -> Al
                         }
                     }
                 }
-                if let Expr::Move { source, .. } | Expr::Borrow { source, .. } = expr {
+                if let Expr::Move { source, .. }
+                | Expr::Borrow { source, .. }
+                | Expr::Refer { source, .. } = expr
+                {
                     validate_place_bindings(source, contracts)?;
                 }
                 if let Expr::ReadPlace { source, .. } = expr {

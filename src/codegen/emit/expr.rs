@@ -128,6 +128,10 @@ fn emit_expr_value<M: Module>(
             emit_place_addr(c, bcx, frame, source)
                 .map(|(address, _)| ExprValue::scalar(address))
         }
+        Expr::Refer { source, .. } => {
+            let result_vty = c.vty(e.ty());
+            super::provenance::emit_refer(c, bcx, frame, source, &result_vty)
+        }
         Expr::ReadPlace { source, plan, .. } => {
             emit_deep_clone_place(c, bcx, frame, source, plan).map(ExprValue::scalar)
         }

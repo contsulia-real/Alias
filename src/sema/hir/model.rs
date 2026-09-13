@@ -4,6 +4,7 @@ pub use crate::ast::{BinOp, BindKind, CtorKind, Pattern};
 pub(crate) use crate::sema::types::BindingId;
 use crate::sema::types::{ParamEffect, ReturnBorrowSource, ReturnEffect, Ty};
 use crate::Span;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MethodId(pub(crate) u32);
@@ -18,6 +19,9 @@ pub(crate) struct FunctionId(pub(crate) u32);
 pub(crate) struct CheckedProgram {
     pub(crate) main_id: BindingId,
     pub(crate) items: Vec<Item>,
+    /// Roots whose storage address is observed by a resolved Refer node. Codegen consumes this
+    /// set when materializing the root cell so repeated Refer operations share one descriptor.
+    pub(crate) address_taken_roots: HashSet<BindingId>,
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +626,15 @@ pub(crate) enum Expr {
         span: Span,
         info: ExprInfo,
     },
+    /// Non-owning pointer capability to a resolved Place. The source Place is shared by loan
+    /// analysis and provenance lowering so neither layer can silently target a coarser root.
+    Refer {
+        loan_id: LoanId,
+        source: Box<Place>,
+        kind: Option<BorrowKind>,
+        span: Span,
+        info: ExprInfo,
+    },
     /// Explicit ownership transfer from a sema-resolved Place. Keeping the Place as payload makes
     /// source identity and later overlap checks independent of the original AST expression shape.
     Move {
@@ -660,6 +673,7 @@ impl Expr {
             | Self::Propagate { info, .. }
             | Self::ReadPlace { info, .. }
             | Self::Borrow { info, .. }
+            | Self::Refer { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -692,6 +706,7 @@ impl Expr {
             | Self::Propagate { info, .. }
             | Self::ReadPlace { info, .. }
             | Self::Borrow { info, .. }
+            | Self::Refer { info, .. }
             | Self::Move { info, .. } => info,
         }
     }
@@ -743,6 +758,7 @@ impl Expr {
             | Self::Propagate { span, .. }
             | Self::ReadPlace { span, .. }
             | Self::Borrow { span, .. }
+            | Self::Refer { span, .. }
             | Self::Move { span, .. } => *span,
         }
     }

@@ -207,6 +207,7 @@ impl CheckedProgram {
                         }
                         Expr::ReadPlace { source, .. }
                         | Expr::Borrow { source, .. }
+                        | Expr::Refer { source, .. }
                         | Expr::Move { source, .. } => visit_place(source, visit, &mut stack),
                     }
                 }

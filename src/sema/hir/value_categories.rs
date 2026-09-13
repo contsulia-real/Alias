@@ -78,7 +78,7 @@ fn produces_owned_temporary(
         },
         Expr::ReadPlace { plan, .. } => !matches!(plan, DeepClonePlan::Inline),
         Expr::Move { .. } => carries_dynamic_owner(expr.ty()),
-        Expr::Borrow { .. } => false,
+        Expr::Borrow { .. } | Expr::Refer { .. } => false,
         Expr::MethodCall { result, target, .. } => match target {
             MethodTarget::StringUpper
             | MethodTarget::StringLower
@@ -149,7 +149,9 @@ fn expected_category(
         }));
     }
     Ok(match expr {
-        Expr::Borrow { .. } => ExprCategory::Value(ValueCategory::BorrowedValue),
+        Expr::Borrow { .. } | Expr::Refer { .. } => {
+            ExprCategory::Value(ValueCategory::BorrowedValue)
+        }
         Expr::Call {
             result,
             target: CallTarget::FunctionValue,
@@ -360,6 +362,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         | Expr::Propagate { expr, .. } => stack.push(Node::Expr(expr)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Binary { lhs, rhs, .. } => {
             stack.push(Node::Expr(rhs));

@@ -45,6 +45,8 @@ mod return_effect_tests;
 #[cfg(test)]
 mod raw_allocation_tests;
 #[cfg(test)]
+mod refer_tests;
+#[cfg(test)]
 mod runtime_check_tests;
 #[cfg(test)]
 mod shallow_clone_tests;
@@ -70,7 +72,7 @@ pub(crate) use model::{
 pub(crate) use place_relation::{relation as place_relation, PlaceRelation};
 
 use crate::sema::types::Ty;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// check 阶段解析出的结构化 Place。该类型只跨越 check → lower；最终 lowering 必须把
 /// Local/Field/Index 的递归 projection 原样固化到 model::Place，不能重新按 AST 名字猜测。
@@ -137,6 +139,7 @@ pub(super) struct LowerFacts {
     pub(super) field_indices: HashMap<usize, usize>,
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) borrow_places: HashMap<usize, LowerBorrowInfo>,
+    pub(super) address_taken_roots: HashSet<BindingId>,
     pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) owning_reads: HashMap<usize, LowerOwningReadInfo>,
     pub(super) ctor_arg_indices: HashMap<usize, usize>,

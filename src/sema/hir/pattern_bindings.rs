@@ -413,6 +413,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
@@ -494,6 +495,7 @@ fn push_mut_expr_children<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
         Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_mut_place_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)

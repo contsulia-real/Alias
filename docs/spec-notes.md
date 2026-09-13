@@ -87,7 +87,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 用户类型 | `struct` |
 | 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影以及 `malloc<T>()` 产生的 nullable allocation-root value 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`refer/deref/reinterpret` 与 pointer 运算仍未开放并在 sema/final gate fail-closed。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value，以及 3.7 所述 `refer` local pointer view 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。除该 `refer` 纵切外，普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret` 与 pointer 运算仍未开放并在 sema/final gate fail-closed。
 
 除上述四种内建泛型外，其它泛型类型尚未实现。
 
@@ -237,7 +237,24 @@ borrow place
 
 sema 将 borrow 固化为携带 `LoanId`、resolved `Place` 与最终 `ReadLoan/WriteLoan` kind 的专用 HIR；final-HIR gate 重算 loan facts 并拒绝漂移。codegen 只物化 borrowed alias cell 与 canonical referent address，不执行 borrow checker，也不从机器地址猜 relation。
 
-### 3.7 当前 raw allocation / free 纵切
+### 3.7 当前 `refer` 与 local storage descriptor 纵切
+
+当前已实现两种等价写法：
+
+```alias
+refer(place)
+refer place
+```
+
+`refer` 是预定义保留名。它把当前函数内完整 owning local 的 storage 暴露为 non-null `ptr<T>` pointer view，结果类别为 `BorrowedValue`，不产生 ownership capability，也不延长 source 生命周期。当前 source 必须恰好是 `Place::Local`；field/index subview、borrowed alias、parameter、capture 与 global 仍 fail-closed。
+
+每个实际 address-taken local 在其 storage 生命周期内只创建一个 canonical `StorageDescriptor`。重复 `refer` 复用同一 descriptor identity，并分别形成 `{ provenance=descriptor, address=local storage, view_start=address, view_end=address+stride(T) }` 四 lane view。descriptor 与 pointer-view 临时 cell 均由当前词法 cleanup 生命周期释放；borrowed alias cell 只保存该 pointer-view cell 的地址，不拥有 descriptor、pointer view 或 referent。
+
+`refer` 复用 3.6 的 NLL loan 与 stored-borrow 限制：结果当前只能初始化或重新绑定 local borrowed slot，不能写入 global、field、array/result payload 等持久 owning storage，也不能作为 borrowed pointer return 或显式 BorrowedValue 实参向外转发。`deref`、pointer index/arithmetic 与 global/heap/subplace descriptor 生命周期尚未开放，因此当前 pointer view 只能建立并由静态生命周期检查约束，尚不能在源码中解引用。
+
+sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
+
+### 3.8 当前 raw allocation / free 纵切
 
 当前源码入口：
 
@@ -258,7 +275,7 @@ ownership CFG 为每个 local/`Owned` parameter pointer root 跟踪独立的 liv
 - `malloc<T>(count)` 的 source integer type 尚未冻结，因此不擅自选用某个现有整数类型；
 - allocation-root ptr 暂不能 transfer 进 field、array/result payload 或 global storage，等待 parent destruction 能消费 aggregate pointer lanes 与 raw child recipe；
 - pointer temporary 不能借给只在调用结束时自动销毁 temporary 的参数，也不能作为 expression statement 隐式丢弃；
-- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`refer/deref/reinterpret` 与 pointer 运算尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
+- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref/reinterpret`、global/heap/subplace `refer` 与 pointer 运算尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
 
 ---
 

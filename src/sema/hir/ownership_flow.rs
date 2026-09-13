@@ -40,6 +40,7 @@ struct BorrowSpec<'a> {
     loan_id: LoanId,
     source: &'a Place,
     declared_kind: Option<BorrowKind>,
+    address_taken: bool,
     span: Span,
 }
 
@@ -53,6 +54,7 @@ enum Action<'a> {
         loan_id: LoanId,
         source: &'a Place,
         declared_kind: Option<BorrowKind>,
+        address_taken: bool,
         span: Span,
     },
     // A borrowed slot rebind replaces its one referent generation; a call/closure holder owns all
@@ -169,6 +171,7 @@ struct GraphBuilder<'a> {
     nodes: Vec<Node<'a>>,
     tasks: Vec<Task<'a>>,
     eligible: HashSet<BindingId>,
+    local_roots: HashSet<BindingId>,
     owning: HashSet<BindingId>,
     borrowed: HashSet<BindingId>,
     borrowed_source_writable: HashMap<BindingId, bool>,
@@ -199,6 +202,9 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
     loop {
         match current {
             Expr::Borrow {
+                loan_id, source, ..
+            }
+            | Expr::Refer {
                 loan_id, source, ..
             } => return Some((*loan_id, source)),
             Expr::Call { result, .. } | Expr::MethodCall { result, .. } => {
@@ -284,6 +290,7 @@ impl<'a> GraphBuilder<'a> {
             nodes: Vec::new(),
             tasks: Vec::new(),
             eligible: HashSet::new(),
+            local_roots: HashSet::new(),
             owning: HashSet::new(),
             borrowed: HashSet::new(),
             borrowed_source_writable: HashMap::new(),
@@ -418,11 +425,33 @@ impl<'a> GraphBuilder<'a> {
     ) {
         match result {
             Some(CallResult::Borrowed { loan_id, source, kind, .. }) => {
-                self.build_borrow(BorrowSpec { loan_id: *loan_id, source, declared_kind: *kind, span }, entry, exit, loops);
+                self.build_borrow(
+                    BorrowSpec {
+                        loan_id: *loan_id,
+                        source,
+                        declared_kind: *kind,
+                        address_taken: false,
+                        span,
+                    },
+                    entry,
+                    exit,
+                    loops,
+                );
             }
             Some(CallResult::OwnedBorrowing(OwnedReturnLoan::Read { loan_id, source })) => {
                 let borrowed = self.node(Action::Nop);
-                self.build_borrow(BorrowSpec { loan_id: *loan_id, source, declared_kind: Some(BorrowKind::Read), span }, entry, borrowed, loops);
+                self.build_borrow(
+                    BorrowSpec {
+                        loan_id: *loan_id,
+                        source,
+                        declared_kind: Some(BorrowKind::Read),
+                        address_taken: false,
+                        span,
+                    },
+                    entry,
+                    borrowed,
+                    loops,
+                );
                 self.action_between(borrowed, exit, Action::AddLoan(holder, *loan_id));
             }
             // Argument/receiver loans were evaluated directly into the result
@@ -482,6 +511,9 @@ impl<'a> GraphBuilder<'a> {
                     capture_holder,
                     loops,
                 } => {
+                    if let Some(binding_id) = arm.binding_id {
+                        self.local_roots.insert(binding_id);
+                    }
                     let body_entry = match (arm.binding_id, binding_dynamic) {
                         (Some(binding_id), true) => {
                             if matches!(
@@ -593,6 +625,7 @@ impl<'a> GraphBuilder<'a> {
     ) -> AliasResult<()> {
         match stmt {
             Stmt::Binding(binding) => {
+                self.local_roots.insert(binding.binding_id);
                 // Effect inference runs before final operations exist; both phases use the same
                 // destination-operation owner rather than reconstructing initialization semantics.
                 let operation = match binding.operation {
@@ -828,6 +861,7 @@ impl<'a> GraphBuilder<'a> {
                 self.edge(body_exit, header);
             }
             Stmt::For { binding_id, ty, iterable, source_pass, body, .. } => {
+                self.local_roots.insert(*binding_id);
                 let (holder, entry) = self.temporary_holder(entry, iterable.span())?;
                 // Every header visit consumes the next element. Backward liveness therefore
                 // keeps the source loan over loop backedges, but not beyond its final use.
@@ -1058,6 +1092,25 @@ impl<'a> GraphBuilder<'a> {
                     loan_id: *loan_id,
                     source,
                     declared_kind: *kind,
+                    address_taken: false,
+                    span: *span,
+                },
+                entry,
+                exit,
+                loops,
+            ),
+            Expr::Refer {
+                loan_id,
+                source,
+                kind,
+                span,
+                ..
+            } => self.build_borrow(
+                BorrowSpec {
+                    loan_id: *loan_id,
+                    source,
+                    declared_kind: *kind,
+                    address_taken: true,
                     span: *span,
                 },
                 entry,
@@ -1422,6 +1475,7 @@ impl<'a> GraphBuilder<'a> {
                                 loan_id: capture.loan_id,
                                 source: &capture.source,
                                 declared_kind: capture.kind,
+                                address_taken: false,
                                 span: expr.span(),
                             },
                             current,
@@ -1602,6 +1656,7 @@ impl<'a> GraphBuilder<'a> {
                         loan_id: *loan_id,
                         source,
                         declared_kind: Some(kind),
+                        address_taken: false,
                         span: value.span(),
                     },
                     entry,
@@ -1625,6 +1680,7 @@ impl<'a> GraphBuilder<'a> {
             loan_id,
             source,
             declared_kind,
+            address_taken,
             span,
         } = spec;
         let mut root = source;
@@ -1644,6 +1700,7 @@ impl<'a> GraphBuilder<'a> {
                     loan_id,
                     source,
                     declared_kind,
+                    address_taken,
                     span,
                 },
             );
@@ -1658,6 +1715,7 @@ impl<'a> GraphBuilder<'a> {
                 loan_id,
                 source,
                 declared_kind,
+                address_taken,
                 span,
             },
         );
@@ -1815,6 +1873,7 @@ fn derive_loan_facts<'a>(
             source,
             declared_kind,
             span,
+            ..
         } = node.action
         {
             if sources.insert(loan_id, source).is_some() {
@@ -2055,9 +2114,16 @@ fn run_dataflow(
                 loan_id,
                 source,
                 declared_kind: _,
+                address_taken,
                 span,
             } => {
                 let root = source.root_binding_id();
+                if address_taken && !graph.local_roots.contains(&root) {
+                    return Err(error(
+                        span,
+                        "refer 当前只开放当前函数 owning local 的完整 Place descriptor",
+                    ));
+                }
                 if let Some(parameter_effect) = graph.parameter_permissions.get(&root) {
                     if facts.kinds[&loan_id] == BorrowKind::Write
                         && *parameter_effect == ParamEffect::ReadBorrow
@@ -2319,6 +2385,7 @@ fn configure_function_parameters(
         ));
     }
     for ((id, ty), effect) in ids.into_iter().zip(parameter_types).zip(parameter_effects) {
+        builder.local_roots.insert(id);
         builder.parameter_permissions.insert(id, *effect);
         if *effect == ParamEffect::Owned {
             if matches!(ty, Ty::Iterator(_)) {
@@ -2866,6 +2933,7 @@ fn push_expr_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children_mut(stack, source),
         Expr::Typeof { .. }
         | Expr::Int(..)
@@ -3058,10 +3126,16 @@ fn apply_kinds(
                     kind,
                     span,
                     ..
+                }
+                | Expr::Refer {
+                    loan_id,
+                    kind,
+                    span,
+                    ..
                 } = expr
                 {
                     let inferred = kinds.get(loan_id).copied().ok_or_else(|| {
-                        error(*span, "内部 sema 不变式被破坏: Borrow 缺少 NLL kind fact")
+                        error(*span, "内部 sema 不变式被破坏: borrow/refer 缺少 NLL kind fact")
                     })?;
                     *kind = Some(inferred);
                     if !seen.insert(*loan_id) {

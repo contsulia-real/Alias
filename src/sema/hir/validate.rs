@@ -149,6 +149,7 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         Expr::FreeRawAllocation { pointer, .. } => stack.push(HirValidationNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
@@ -1153,6 +1154,13 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                         validate_place_contract(source, &known_ids, &structs, false)?;
                         if kind.is_none() {
                             return Err(invariant(expr.span(), "Borrow 缺少已解析 loan kind"));
+                        }
+                        push_place_expr_children(&mut stack, source);
+                    }
+                    Expr::Refer { source, kind, .. } => {
+                        validate_place_contract(source, &known_ids, &structs, false)?;
+                        if kind.is_none() {
+                            return Err(invariant(expr.span(), "Refer 缺少已解析 loan kind"));
                         }
                         push_place_expr_children(&mut stack, source);
                     }

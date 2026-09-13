@@ -245,6 +245,18 @@ impl Checker {
                             self.record_call_target(e, LowerCallTarget::Borrow);
                             return Ok(expected.clone());
                         }
+                        OwnershipBuiltinName::Refer => {
+                            let ty = self.check_refer_call(e, args, *span, env)?;
+                            if !types_match(expected, &ty) {
+                                return Err(ExprCheckError::Mismatch {
+                                    expected: Box::new(expected.clone()),
+                                    actual: Box::new(ty),
+                                    span: e.span(),
+                                });
+                            }
+                            self.record_call_target(e, LowerCallTarget::Refer);
+                            return Ok(expected.clone());
+                        }
                         OwnershipBuiltinName::Move => {
                             let ty = self.check_move_call(e, args, *span, env)?;
                             if !types_match(expected, &ty) {

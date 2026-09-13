@@ -351,6 +351,7 @@ fn collect_function_captures(
                 }
                 Expr::ReadPlace { source, .. }
                 | Expr::Borrow { source, .. }
+                | Expr::Refer { source, .. }
                 | Expr::Move { source, .. } => {
                     if let Some(frame) = frames.last_mut() {
                         record_place_uses(frame, locals, globals, source)?;
@@ -652,6 +653,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::FuncLit { .. }
         | Expr::Typeof { .. }
@@ -808,6 +810,7 @@ fn push_expr_children_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) 
         Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children_mut(stack, source),
         Expr::FuncLit { .. }
         | Expr::Typeof { .. }

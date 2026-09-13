@@ -5,6 +5,7 @@ use super::{
 use crate::sema::exprs::{binary_result_type, conversion_exists};
 use crate::sema::types::{types_match, IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
+use std::collections::HashSet;
 
 enum Node<'a> {
     Expr(&'a Expr),
@@ -137,6 +138,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_expr_children(stack, source),
         Expr::Int(..)
         | Expr::Float(..)
@@ -359,6 +361,24 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 return Err(invariant(expr.span(), "Borrow source/result 类型不一致"));
             }
         }
+        Expr::Refer { source, .. } => {
+            let Ty::Ptr {
+                pointee,
+                nullable: false,
+            } = expr.ty()
+            else {
+                return Err(invariant(expr.span(), "Refer 结果不是 non-null ptr"));
+            };
+            if !types_match(source.ty(), pointee) {
+                return Err(invariant(expr.span(), "Refer source/result pointee 类型不一致"));
+            }
+            if !matches!(source.as_ref(), Place::Local { .. }) {
+                return Err(invariant(
+                    expr.span(),
+                    "Refer subplace descriptor lifecycle 尚未开放",
+                ));
+            }
+        }
         Expr::Move { source, .. } => {
             if !types_match(source.ty(), expr.ty()) {
                 return Err(invariant(expr.span(), "Move source/result 类型不一致"));
@@ -471,10 +491,14 @@ fn validate_stmt(stmt: &Stmt) -> AliasResult<()> {
 
 pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
     let mut stack = root_nodes(program);
+    let mut address_taken_roots = HashSet::new();
     while let Some(node) = stack.pop() {
         match node {
             Node::Expr(expr) => {
                 validate_expr(expr)?;
+                if let Expr::Refer { source, .. } = expr {
+                    address_taken_roots.insert(source.root_binding_id());
+                }
                 push_expr_children(&mut stack, expr);
             }
             Node::Stmt(stmt) => {
@@ -482,6 +506,12 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 push_stmt_children(&mut stack, stmt);
             }
         }
+    }
+    if address_taken_roots != program.address_taken_roots {
+        return Err(invariant(
+            Span::default(),
+            "address-taken root set 与 resolved Refer graph 漂移",
+        ));
     }
     Ok(())
 }

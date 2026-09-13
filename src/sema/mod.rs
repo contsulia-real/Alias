@@ -12,7 +12,7 @@ use crate::builtins::{classify_call_builtin, is_reserved_lexical_name, CallBuilt
 use crate::sema::hir::{BindingId, BuiltinCall, MethodId, MethodTarget, ResolvedConversion};
 use crate::{AliasError, AliasResult, Span};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use types::{IntW, Ty};
@@ -33,6 +33,7 @@ pub(crate) enum LowerCallTarget {
     ResultConstructor(crate::ast::CtorKind),
     Builtin(BuiltinCall),
     Borrow,
+    Refer,
     Move,
     FreeRawAllocation,
     Typeof,
@@ -444,6 +445,7 @@ pub(crate) fn check(program: Program) -> AliasResult<hir::CheckedProgram> {
             field_indices: ck.field_indices,
             assignment_places: ck.assignment_places,
             borrow_places: ck.borrow_places,
+            address_taken_roots: HashSet::new(),
             move_places: ck.move_places,
             owning_reads: ck.owning_reads,
             params: ck.param_types,

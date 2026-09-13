@@ -104,6 +104,7 @@ pub(crate) fn emit_local_cell<M: Module>(
         .last_mut()
         .unwrap_or_else(|| invariant_violation("作用域栈非空"))
         .insert(id, Slot::Local(var));
+    super::provenance::register_address_taken_local(c, bcx, frame, id, cell, &vty)?;
     frame
         .locals_vty
         .last_mut()
@@ -165,6 +166,7 @@ pub(crate) fn push_scope(frame: &mut Frame) {
     frame.scopes.push(HashMap::new());
     frame.locals_vty.push(HashMap::new());
     frame.locals_relation.push(HashMap::new());
+    frame.storage_descriptors.push(HashMap::new());
     frame.cleanup_scopes.push(Vec::new());
 }
 
@@ -180,4 +182,5 @@ pub(crate) fn pop_scope(frame: &mut Frame) {
     frame.scopes.pop();
     frame.locals_vty.pop();
     frame.locals_relation.pop();
+    frame.storage_descriptors.pop();
 }

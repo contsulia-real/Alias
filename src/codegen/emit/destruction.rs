@@ -78,6 +78,29 @@ pub(in crate::codegen) fn register_temporary_cleanup(
         });
 }
 
+/// Register a compiler-owned allocation whose bytes do not contain a language owner. Pointer
+/// view cells and provenance descriptors use this path; interpreting either as a scalar payload
+/// would free an arbitrary lane before freeing the cell itself.
+pub(in crate::codegen) fn register_plain_allocation_cleanup(
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    allocation: Value,
+) {
+    let cell = bcx.declare_var(types::I64);
+    bcx.def_var(cell, allocation);
+    frame
+        .cleanup_scopes
+        .last_mut()
+        .unwrap_or_else(|| invariant_violation("cleanup scope 栈非空"))
+        .push(ScopeCleanup {
+            binding: None,
+            cell,
+            vty: VTy::I(crate::sema::types::IntW::W64),
+            action: ScopeCleanupAction::None,
+            presence: None,
+        });
+}
+
 pub(in crate::codegen) fn emit_cleanup_to_depth<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,

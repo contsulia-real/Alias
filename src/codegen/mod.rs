@@ -60,6 +60,9 @@ pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
     pub(crate) locals_relation: Vec<HashMap<BindingId, Option<StorageRelation>>>,
+    /// Canonical provenance descriptor for each address-taken local storage root in the matching
+    /// lexical scope. A root gets one descriptor even when Refer is evaluated repeatedly.
+    pub(crate) storage_descriptors: Vec<HashMap<BindingId, Variable>>,
     /// Separate owner state for dynamic locals. Moved cells retain stale bits, so replacement and
     /// scope-exit destruction must never use the stored payload as a liveness flag.
     pub(crate) owner_presence: HashMap<BindingId, Variable>,
@@ -92,6 +95,7 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) globals_final: HashMap<BindingId, (usize, VTy, Option<StorageRelation>)>,
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
+    pub(crate) address_taken_roots: HashSet<BindingId>,
     pub(crate) next_fid: u32,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
@@ -139,6 +143,7 @@ pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>>
         globals_final: HashMap::new(),
         top_slots: Vec::new(),
         global_bytes: 0,
+        address_taken_roots: program.address_taken_roots.clone(),
         next_fid: 0,
         pending: VecDeque::new(),
         str_data: HashMap::new(),
@@ -480,6 +485,7 @@ mod fail_closed_tests {
             globals_final: HashMap::new(),
             top_slots: Vec::new(),
             global_bytes: 0,
+            address_taken_roots: HashSet::new(),
             next_fid: 0,
             pending: VecDeque::new(),
             str_data: HashMap::new(),

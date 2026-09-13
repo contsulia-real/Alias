@@ -21,6 +21,7 @@ pub(crate) enum OwnershipBuiltinName {
     Clone,
     Shallow,
     Borrow,
+    Refer,
     Move,
     Free,
 }
@@ -51,6 +52,7 @@ pub(crate) fn classify_ownership_builtin(name: &str) -> Option<OwnershipBuiltinN
         "clone" => OwnershipBuiltinName::Clone,
         "shallow" => OwnershipBuiltinName::Shallow,
         "borrow" => OwnershipBuiltinName::Borrow,
+        "refer" => OwnershipBuiltinName::Refer,
         "move" => OwnershipBuiltinName::Move,
         "free" => OwnershipBuiltinName::Free,
         _ => return None,

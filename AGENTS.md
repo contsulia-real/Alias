@@ -64,7 +64,7 @@ src/
 │   ├── mod.rs              # check(Program) -> CheckedProgram
 │   ├── decls.rs / stmts.rs
 │   ├── places.rs           # 递归 Place(Local/Field/Index) 解析、终端可写性与赋值目标类型检查
-│   ├── exprs.rs + exprs/   # 表达式静态语义；clone/read plan、borrow/move Place resolution
+│   ├── exprs.rs + exprs/   # 表达式静态语义；clone/read plan、borrow/move/refer Place resolution
 │   ├── types.rs            # Ty 与类型槽检查
 │   └── hir.rs + hir/       # typed HIR、lower、expr→Place、function effects、ownership/loan flow、capture、validate、visit
 ├── codegen/
@@ -73,7 +73,8 @@ src/
 │   ├── layout.rs           # runtime heap object 物理布局 owner
 │   ├── emit.rs + emit/     # HIR → Cranelift；clone.rs / shallow.rs 只执行各自 resolved plan
 │   │   ├── value.rs        # resolved expression ABI 对应的 Cranelift SSA lane carrier
-│   │   └── places.rs       # resolved Place storage address、物理写入与字段 storage 查询 owner
+│   │   ├── places.rs       # resolved Place storage address、物理写入与字段 storage 查询 owner
+│   │   └── provenance.rs   # address-taken local descriptor 与 refer pointer view 发射 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
@@ -90,13 +91,13 @@ src/
 
 `src/ast.rs` 只表达源码语法，不拥有最终静态类型、BindingId、MethodId、字段索引或最终调用目标。
 
-parser 可以查询 `builtins.rs` 中**明确属于语法分类**的信息，但不得自行复制 builtin 字符串名单，也不得在多个 parser 文件维护平行分类。`clone` / `shallow` / `borrow` / `move` 由 `OwnershipBuiltinName` 统一分类；无括号调用和保留名判断都消费这一 owner。
+parser 可以查询 `builtins.rs` 中**明确属于语法分类**的信息，但不得自行复制 builtin 字符串名单，也不得在多个 parser 文件维护平行分类。`clone` / `shallow` / `borrow` / `move` / `refer` 由 `OwnershipBuiltinName` 统一分类；无括号调用和保留名判断都消费这一 owner。
 
 ### sema
 
 sema 是语言静态语义的 owner。名字解析、目标类型传播、转换关系、调用/方法归属、Pattern coverage、字段/构造器索引，以及当前已落地的 value category / initial ownership capability / binding storage relation / Place overlap 和后续 loan、function effect 等静态事实，都必须在这里或其明确的 sema 子 owner 中完成。
 
-显式 `clone` 的 DeepCloneable 判定与递归 `DeepClonePlan` 只由 `sema/exprs/deep_clone.rs` 决定；当前已知 owning slot 的稳定 Place 普通读取只由 `sema/exprs/ordinary_read.rs` 解析 source Place，并复用 canonical DeepClone plan owner；显式 `shallow` 的递归 ShallowCloneable 判定、standalone root legality 与 `ShallowClonePlan` 只由 `sema/exprs/shallow_clone.rs` 决定；显式 `borrow(place)` / `move(place)` 的 source Place resolution 分别只由 `sema/exprs/borrow_value.rs` / `move_value.rs` 决定。其它 checker/validator 可以调用这些 owner，但不得复制类型 capability 矩阵或从 AST 形状恢复 Place/source。generic `call()` / `resolve_call_target()` 对 ownership intrinsic 只允许 fail-closed，不得形成第二条解析路径或重新计算 plan。
+显式 `clone` 的 DeepCloneable 判定与递归 `DeepClonePlan` 只由 `sema/exprs/deep_clone.rs` 决定；当前已知 owning slot 的稳定 Place 普通读取只由 `sema/exprs/ordinary_read.rs` 解析 source Place，并复用 canonical DeepClone plan owner；显式 `shallow` 的递归 ShallowCloneable 判定、standalone root legality 与 `ShallowClonePlan` 只由 `sema/exprs/shallow_clone.rs` 决定；显式 `borrow(place)` / `move(place)` / `refer(place)` 的 source Place resolution 分别只由 `sema/exprs/borrow_value.rs` / `move_value.rs` / `refer_value.rs` 决定。其它 checker/validator 可以调用这些 owner，但不得复制类型 capability 矩阵或从 AST 形状恢复 Place/source。generic `call()` / `resolve_call_target()` 对 ownership intrinsic 只允许 fail-closed，不得形成第二条解析路径或重新计算 plan。
 
 检查阶段使用 AST 节点地址作为短生命周期 fact key。该 identity **只在同一次 check → lower 调用链内有效**；两阶段之间禁止移动、clone 后替换或重建 AST 节点。若未来引入 AST 重写，必须先改用稳定 NodeId，不能继续依赖地址并增加补丁式 fallback。
 
@@ -120,6 +121,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；`for` 循环变量另在 `Stmt::For` 固化 element `DeepClonePlan`，防止 loop binding 与仍 live 的容器元素共享 ownership root。用户函数实参和方法 receiver/实参走 resolved parameter pass，函数返回走 resolved return pass，Pattern 走 resolved binding operation；for iterable 经 resolved source_pass 建立 loop holder；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，写入持久容器按 containment 规则拒绝；capture 不走 owning read，而由结构化 capture loan 管理；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
 - 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；普通 borrow binding 当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；return 语境额外允许直接 parameter/self/global source，并由 `ReturnPass` / caller `CallResult` 保持 provenance。`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow binding、borrowed alias capture/generation return、显式 BorrowedValue call forwarding 与 reborrow；
+- 显式 `refer(place)` 固化为专用 `Expr::Refer { loan_id, source: Place, kind }`，并在 `CheckedProgram::address_taken_roots` 精确登记 canonical descriptor root；当前只开放 current-function owning whole local，返回 non-null `ptr<T>` 的 `BorrowedValue + None`。它复用 local NLL loan 与 stored-borrow gate；field/index subview、parameter/capture/global source、borrowed pointer return 与显式 BorrowedValue forwarding 继续 fail-closed；
 - 显式 `move(place)` 固化为专用 `Expr::Move { source: Place }`；当前 dynamic source 接受同一函数内已证明 owning 的完整 local，包含 `Owned` parameter 与 allocation-root ptr；pointer move 同时转移 raw-root obligation，field/array partial move-out 以及缺少 capture/global transfer source 的 move 均 fail-closed；scalar move 保持 InlineValue 值语义；
 - Binding/Method/字段/构造器索引均已结构化解析；
 - 三元与 match 的普通数据值分支在 checker 的有效 lexical scope 内复用 `ordinary_read` owner 解析普通读取；函数值选择继续使用原有 callable/capture-loan 路径，不引入 Func clone。非稳定 Field/Index 与 `?` 成功 payload 进入 owning context 时，在 `ExprInfo::projection_read` 固化 boxed DeepClone plan，不能假装成 stable Place 或隐式 partial move。final gate 复核其节点位置和 canonical plan，emitter 只执行该 plan；
@@ -132,7 +134,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - value category、当前可证明的 initial capability / storage relation，以及每项 capture 的 BindingId/LoanId/root Place/final ReadLoan|WriteLoan 都在最终 HIR validation 前写回；
 - `docs/plan.md` 范围内的 ownership / borrow / pointer 操作一旦进入当前 HIR，就必须在进入 codegen 前固化为足以直接发射的 resolved HIR / typed facts。
 
-`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Binding/Assignment/container/discard operation / Place relation / Move/loan flow / Borrow kind / capture/parameter/return effect、caller argument/result/return pass、borrow source writability、`ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
+`hir::validate_resolved_hir` 是 fail-closed 权威门。它使用显式栈/CFG worklist 而非宿主递归，避免验证器重新引入深度风险。任何 Unknown、缺失 ID、非法 target，或对**当前已经落地**的 value category / initial capability / storage relation / Binding/Assignment/container/discard operation / Place relation / Move/loan flow / Borrow/Refer kind 与 address-taken root / capture/parameter/return effect、caller argument/result/return pass、borrow source writability、`ReadPlace`/显式 clone 的 DeepClonePlan / ShallowClonePlan 的缺失、漂移都必须在进入 codegen 前失败；未来 free 等操作一旦进入 HIR，也不得以当前迁移阶段的 General/缺失 fact 作为 fallback 绕过其完整性门禁。
 
 ### codegen
 
@@ -150,6 +152,8 @@ codegen 只消费已解析 HIR，不得根据：
 重新决定静态语义、ownership 或 borrow relation。
 
 `codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影直接消费 HIR 的 bounds-check fact 并复用统一 array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则或在后端重做检查决策。
+
+`codegen/emit/provenance.rs` 为 `CheckedProgram::address_taken_roots` 中的 local storage 每个生命周期建立恰好一个 canonical descriptor，重复 `refer` 只复用该 identity。当前 pointer view 通过完整四 lane 临时 cell 进入既有 borrowed-alias address carrier；descriptor 与 view cell 都登记到同一词法 cleanup stack，alias cell 只释放自身。后端不得按 refer 次数重建 descriptor，也不得把 pointer address 当 provenance。
 
 Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径。owning replacement 已按“完整 RHS → target projection → 销毁旧 owner → commit 新 owner”发射；初始化不运行 destruction，borrowed alias rebind 不销毁 referent。
 
@@ -187,7 +191,7 @@ ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与
 
 - `Ty → VTy` 只经 `project_ty(&CheckedProgram)` 一次性投影；
 - `ValueAbi` 已显式区分 scalar 与 multi-lane expression、按 `(machine type, byte offset)` 描述的 scalar/aggregate storage lanes、`Direct / IndirectByValue` parameter 和 `Direct / ExplicitSRet` return；调用与返回发射已消费对应 passing；`ptr<T>` / `ptr<T>?` 已投影为 aggregate VTy，其它当前语言值仍使用既有 scalar/root-pointer ABI；
-- `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer type slot / struct layout / Ty→VTy 与 `malloc<T>()`、move、用户函数参数/返回、free expression path 已接通，其它 pointer producer/operator 继续 fail-closed；
+- `PtrLayout` 已冻结当前 Windows x64 capability 的 `provenance / address / view_start / view_end` 四个 I64 lane、`0/8/16/24` offset 与 `size=32 / align=8 / stride=32`；编译入口会把它与目标 ISA 的 I64 machine pointer 核对。`Compiler::machine_ptr_ty` 只表示单个原生地址，不能当作 Alias pointer value ABI；pointer type slot / struct layout / Ty→VTy 与 `malloc<T>()`、local `refer`、move、用户函数参数/返回、free expression path 已接通，其它 pointer producer/operator 继续 fail-closed；
 - `emit/value.rs::ExprValue` 是实际 Cranelift expression result 的唯一 lane carrier；它按 canonical storage lane offset 统一执行 local/global/temporary cell、resolved Place、struct field、array element 与 active result payload 的完整 load/store，窄 scalar 仍只在该边界规范化。scalar-only operator 路径必须显式提取唯一 lane，遇到 aggregate fail-closed。三元与 match 的 CFG merge、用户调用结果与返回路径保留完整 lane；pointer VTy 已进入统一 ABI，具体 pointer value producer/operation 仍保持 fail-closed；
 - 窄整数在表达式寄存器中规范化为 I64，但存储、参数和返回槽仍使用声明宽度；
 - `Borrowed` return 使用独立的 I64 referent-address lane；caller/callee signature 由同一 `Ty::Func → VTy::Func` 投影决定，不能按声明标量宽度截断地址；
@@ -206,7 +210,7 @@ ownership CFG 的 reaching loan 元素区分本函数生成的 Local(LoanId) 与
 
 `src/codegen/layout.rs` 是跨 emitter/runtime 的 heap object 物理布局 owner。目前 closure、raw array、array wrapper、iterator、result 与 string block 的 offset/size 都必须引用这里的命名常量。raw array header 的 data/len/cap/stride offset 只由该 owner 定义；runtime capacity growth 与 emitter element address 必须读取同一 stride 字段。result tag offset 与基于两个 payload `ValueLayout` 计算的 typed payload/root layout 同样只由 `ResultLayout` 定义。
 
-raw allocation 的 canonical `StorageDescriptor { base, extent, kind, raw_metadata }` 与当前空态 `RawInitMetadata { regions, count }` 物理布局也由 `codegen/layout.rs` 单一拥有；`rt.raw.alloc/free` 已通过 `RUNTIME_CONTRACTS` 建立 fallible allocation、稳定 descriptor identity、失败回滚与空 metadata 释放。源码级 `malloc<T>()` / `free` 已开放并由 ownership CFG 保证独立 root 显式消费；`malloc<T>(count)`、initialized-region entry ABI 与 reverse-init destruction 尚未开放，region count 非零时当前 raw free shim 必须 trap，不能在缺少 destruction descriptor 时静默释放。
+canonical `StorageDescriptor { base, extent, kind, raw_metadata }` 与当前空态 `RawInitMetadata { regions, count }` 物理布局由 `codegen/layout.rs` 单一拥有。`rt.raw.alloc/free` 已为 raw allocation 建立 fallible allocation、稳定 descriptor identity、失败回滚与空 metadata 释放；address-taken local 则在 local cell 生命周期内建立 frame-owned descriptor，base/extent 指向完整 local storage，raw metadata 为 null。源码级 `malloc<T>()` / `free` 与 whole-local `refer` 已开放；global/heap/subplace address-taken descriptor、`malloc<T>(count)`、initialized-region entry ABI 与 reverse-init destruction 尚未开放，region count 非零时当前 raw free shim 必须 trap，不能在缺少 destruction descriptor 时静默释放。
 
 `codegen/emit/raw.rs` 只消费已解析的 `RawAllocate/FreeRawAllocation` HIR：count 必须先由 sema 规范化为 i64，乘 stride 使用 checked arithmetic，失败生成 canonical 全零 nullable pointer，成功从 descriptor 组成 `provenance/address/view_start/view_end` 四个 SSA lane；free 只取 canonical provenance lane 调用 runtime，不从地址或 bounds 推断 ownership。真实 COFF/link/process 后端测试覆盖空 raw allocation 的 descriptor 创建、用户函数 transfer/return 与显式释放；final-HIR gate 独立复核 producer/consumer 的 pointer type、category 与 capability 合同。
 
@@ -240,7 +244,7 @@ for/iterator 发射必须保持 iterator fail-fast 版本检查。游标在进�
 
 当前原生 runtime 使用 Windows process heap，分配路径依赖 zero-initialized memory。`HEAP_ZERO_MEMORY` 的意义是当前对象头、cell/env 等未显式写入的 word 初始为零；在相关旧布局仍存在期间，不能改成普通 HeapAlloc 后继续假设 null/0 初值。
 
-当前 `rt.heap.free` 统一调用 Windows HeapFree，释放失败必须终止；已用于数组扩容提交后的旧 backing、插值的内部累积字符串/字面量片段，以及整数/布尔输出包装器拥有的格式化临时字符串。字符串布局显式保存 allocation base，数据视图可指向块内或静态数据，`rt.str.drop` 不得从 data 地址猜测释放目标。该物理元数据不授予语言层 ownership。owning replacement、parameter/self、顶层与局部显式 Binding、`for`/Pattern 隐式 binding、用户调用 temporary、直接 for-source temporary、普通 discarded expression、非 iterator builtin temporary receiver 与空态 raw allocation 的显式 free 已落地；其它嵌套表达式临时值、temporary iterator source 与 initialized raw region 的 reverse-init destruction 仍未闭合，当前也没有 GC/ARC。Alias 的目标 ownership、borrow、destruction、raw allocation、`malloc/free` 与 pointer 生命周期已经由 `docs/plan.md` 冻结。实现该计划时应直接把当前生命周期实现重构到该合同，不得擅自引入 GC、ARC、arena、“临时兼容释放层”或与计划竞争的第二套所有权机制。
+当前 `rt.heap.free` 统一调用 Windows HeapFree，释放失败必须终止；已用于数组扩容提交后的旧 backing、插值的内部累积字符串/字面量片段，以及整数/布尔输出包装器拥有的格式化临时字符串。字符串布局显式保存 allocation base，数据视图可指向块内或静态数据，`rt.str.drop` 不得从 data 地址猜测释放目标。该物理元数据不授予语言层 ownership。owning replacement、parameter/self、顶层与局部显式 Binding、`for`/Pattern 隐式 binding、用户调用 temporary、直接 for-source temporary、普通 discarded expression、非 iterator builtin temporary receiver、空态 raw allocation 的显式 free，以及 address-taken local 的 descriptor/pointer-view 临时 storage cleanup 已落地；其它嵌套表达式临时值、temporary iterator source 与 initialized raw region 的 reverse-init destruction 仍未闭合，当前也没有 GC/ARC。Alias 的目标 ownership、borrow、destruction、raw allocation、`malloc/free` 与 pointer 生命周期已经由 `docs/plan.md` 冻结。实现该计划时应直接把当前生命周期实现重构到该合同，不得擅自引入 GC、ARC、arena、“临时兼容释放层”或与计划竞争的第二套所有权机制。
 
 当前 zero-init、heap block、closure env 等实现细节若在计划执行中被正式替换，只保留新设计实际需要的约束；不要为了开发期旧对象布局制造兼容层。相反，只要某条当前路径仍依赖 zero-init，就必须在其 canonical owner 被完整替换前继续满足该不变量。
 

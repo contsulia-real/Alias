@@ -154,6 +154,11 @@ impl Checker {
                             self.record_call_target(e, LowerCallTarget::Borrow);
                             return Ok(ty);
                         }
+                        OwnershipBuiltinName::Refer => {
+                            let ty = self.check_refer_call(e, args, *span, env)?;
+                            self.record_call_target(e, LowerCallTarget::Refer);
+                            return Ok(ty);
+                        }
                         OwnershipBuiltinName::Move => {
                             let ty = self.check_move_call(e, args, *span, env)?;
                             self.record_call_target(e, LowerCallTarget::Move);

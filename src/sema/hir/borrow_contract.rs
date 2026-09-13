@@ -128,6 +128,7 @@ fn expr_uses_borrowed_binding(expr: &Expr, borrowed: &HashSet<BindingId>) -> boo
                     Expr::Ident(_, Some(id), ..) if borrowed.contains(id) => return true,
                     Expr::ReadPlace { source, .. }
                     | Expr::Borrow { source, .. }
+                    | Expr::Refer { source, .. }
                     | Expr::Move { source, .. }
                         if borrowed.contains(&source.root_binding_id()) =>
                     {
@@ -286,6 +287,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr, allow_borro
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer, false)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
+        | Expr::Refer { source, .. }
         | Expr::Move { source, .. } => push_place_indices(stack, source),
         Expr::Typeof { .. }
         | Expr::Int(..)
@@ -361,7 +363,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     ));
                 }
                 match expr {
-                    Expr::Borrow { source, .. }
+                    Expr::Borrow { source, .. } | Expr::Refer { source, .. }
                         if relations.get(&source.root_binding_id())
                             != Some(&StorageRelation::Owning) =>
                     {
