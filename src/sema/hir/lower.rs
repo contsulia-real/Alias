@@ -53,6 +53,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("字段索引", facts.field_indices.len()),
         ("赋值 Place", facts.assignment_places.len()),
         ("borrow Place", facts.borrow_places.len()),
+        ("pointer offset source", facts.pointer_offsets.len()),
         ("move Place", facts.move_places.len()),
         ("owning-slot ordinary read", facts.owning_reads.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
@@ -506,14 +507,19 @@ fn lower_expr_node(
         crate::ast::Expr::Binary { op, lhs, rhs, span } => {
             let lhs = Box::new(lower_expr(lhs, facts)?);
             let rhs = Box::new(lower_expr(rhs, facts)?);
-            let (pointer_provenance_check, pointer_element_lattice_check) =
-                super::runtime_checks::pointer_binary(*op, lhs.ty(), rhs.ty());
+            let (pointer_provenance_check, pointer_element_lattice_check, pointer_offset_check) =
+                super::runtime_checks::pointer_binary(*op, &lhs, &rhs);
+            let pointer_offset_source = facts.pointer_offsets
+                .remove(&key)
+                .map(|source| source.source_binding);
             Expr::Binary {
                 op: *op,
                 lhs,
                 rhs,
                 pointer_provenance_check,
                 pointer_element_lattice_check,
+                pointer_offset_source,
+                pointer_offset_check,
                 span: *span,
                 info,
             }

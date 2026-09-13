@@ -124,6 +124,11 @@ pub(super) struct LowerBorrowInfo {
     pub(super) source_writable: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LowerPointerOffsetInfo {
+    pub(super) source_binding: BindingId,
+}
+
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时
 /// 被精确消费；它不是 final HIR model，也不能越过 lower 存活到 capture/validation/codegen。
 pub(super) struct LowerFacts {
@@ -139,6 +144,7 @@ pub(super) struct LowerFacts {
     pub(super) field_indices: HashMap<usize, usize>,
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) borrow_places: HashMap<usize, LowerBorrowInfo>,
+    pub(super) pointer_offsets: HashMap<usize, LowerPointerOffsetInfo>,
     pub(super) address_taken_roots: HashSet<BindingId>,
     pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) owning_reads: HashMap<usize, LowerOwningReadInfo>,

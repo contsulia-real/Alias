@@ -93,7 +93,11 @@ impl Checker {
                         }
                     })?;
             self.record_owning_slot_read(&b.value, env, &declared)?;
-            if let Some(borrow) = self.borrow_places.get(&Self::expr_key(&b.value)) {
+            let borrowed_source_writable = self.borrow_places
+                .get(&Self::expr_key(&b.value))
+                .map(|borrow| borrow.source_writable)
+                .or_else(|| self.pointer_offsets.get(&Self::expr_key(&b.value)).map(|_| false));
+            if let Some(source_writable) = borrowed_source_writable {
                 if env.parent.is_none() {
                     return Err(AliasError {
                         msg: "borrowed binding 当前只允许位于受函数体控制的局部作用域".into(),
@@ -101,7 +105,7 @@ impl Checker {
                     });
                 }
                 self.borrowed_bindings
-                    .insert(binding_id, borrow.source_writable);
+                    .insert(binding_id, source_writable);
             }
             self.binding_types
                 .insert(b as *const Binding as usize, declared.clone());

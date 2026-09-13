@@ -231,6 +231,17 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
     }
 }
 
+fn pointer_offset_source(expr: &Expr) -> Option<BindingId> {
+    let mut current = expr;
+    loop {
+        match current {
+            Expr::Binary { pointer_offset_source: Some(source), .. } => return Some(*source),
+            Expr::Convert { expr, mode: ResolvedConversion::Identity, .. } => current = expr,
+            _ => return None,
+        }
+    }
+}
+
 fn returned_source_writable(expr: &Expr) -> Option<bool> {
     let mut current = expr;
     loop {
@@ -662,6 +673,20 @@ impl<'a> GraphBuilder<'a> {
                 });
                 if operation == Some(BindingOperation::BindBorrowedAlias) {
                     self.borrowed.insert(binding.binding_id);
+                    if let Some(source) = pointer_offset_source(&binding.value) {
+                        // Dereference/write-through is not open yet, so this arithmetic slice
+                        // carries a read-only source loan and cannot invent writability.
+                        self.borrowed_source_writable.insert(binding.binding_id, false);
+                        self.action_between(
+                            after_value,
+                            exit,
+                            Action::SetLoans(
+                                LoanHolder::Binding(binding.binding_id),
+                                Some(LoanHolder::Binding(source)),
+                            ),
+                        );
+                        return Ok(());
+                    }
                     if let Some(source_writable) = returned_source_writable(&binding.value) {
                         self.borrowed_source_writable
                             .insert(binding.binding_id, source_writable);
@@ -749,6 +774,18 @@ impl<'a> GraphBuilder<'a> {
                 });
                 if let Place::Local { binding_id, .. } = target {
                     if operation == Some(AssignmentOperation::RebindBorrowedAlias) {
+                        if let Some(source) = pointer_offset_source(value) {
+                            self.borrowed_source_writable.insert(*binding_id, false);
+                            self.action_between(
+                                after_place,
+                                exit,
+                                Action::SetLoans(
+                                    LoanHolder::Binding(*binding_id),
+                                    Some(LoanHolder::Binding(source)),
+                                ),
+                            );
+                            return Ok(());
+                        }
                         let Some((loan_id, _)) = resolved_borrow(value) else {
                             return Err(error(
                                 value.span(),

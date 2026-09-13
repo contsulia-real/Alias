@@ -56,32 +56,61 @@ pub(super) fn array_place_index(_base: &Place, _index: &Expr) -> RuntimeCheckReq
 
 pub(super) fn pointer_binary(
     op: BinOp,
-    left: &Ty,
-    right: &Ty,
+    left: &Expr,
+    right: &Expr,
 ) -> (
     Option<RuntimeCheckRequirement>,
     Option<RuntimeCheckRequirement>,
+    Option<RuntimeCheckRequirement>,
 ) {
+    let left_ty = left.ty();
+    let right_ty = right.ty();
     if !matches!(
-        left,
+        left_ty,
         Ty::Ptr {
             nullable: false,
             ..
         }
-    ) || left != right
+    ) {
+        return (None, None, None);
+    }
+    if matches!(op, BinOp::Add | BinOp::Sub)
+        && matches!(right_ty, Ty::Int(_) | Ty::UInt(_))
     {
-        return (None, None);
+        return (
+            None,
+            None,
+            Some(if constant_integer_is_zero(right) {
+                RuntimeCheckRequirement::Proven
+            } else {
+                RuntimeCheckRequirement::Required
+            }),
+        );
+    }
+    if left_ty != right_ty {
+        return (None, None, None);
     }
     // Static pointer values currently carry no symbolic provenance identity. Preserve that
     // uncertainty explicitly instead of letting codegen infer a proof from expression shape.
     match op {
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-            (Some(RuntimeCheckRequirement::Required), None)
+            (Some(RuntimeCheckRequirement::Required), None, None)
         }
         BinOp::Sub => (
             Some(RuntimeCheckRequirement::Required),
             Some(RuntimeCheckRequirement::Required),
+            None,
         ),
-        _ => (None, None),
+        _ => (None, None, None),
+    }
+}
+
+fn constant_integer_is_zero(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(0, ..) => true,
+        Expr::Convert { expr, mode: ResolvedConversion::Identity, .. } => {
+            constant_integer_is_zero(expr)
+        }
+        _ => false,
     }
 }

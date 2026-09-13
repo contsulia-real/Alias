@@ -226,9 +226,9 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr, allow_borro
         | Expr::Not { expr, .. }
         | Expr::BitNot { expr, .. }
         | Expr::Propagate { expr, .. } => stack.push(Node::Expr(expr, false)),
-        Expr::Binary { lhs, rhs, .. } => {
+        Expr::Binary { lhs, rhs, pointer_offset_source, .. } => {
             stack.push(Node::Expr(rhs, false));
-            stack.push(Node::Expr(lhs, false));
+            stack.push(Node::Expr(lhs, pointer_offset_source.is_some() && allow_borrowed));
         }
         Expr::Ternary {
             cond,
@@ -363,6 +363,14 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                     ));
                 }
                 match expr {
+                    Expr::Binary { pointer_offset_source: Some(source), .. }
+                        if relations.get(source) != Some(&StorageRelation::Borrowed) =>
+                    {
+                        return Err(error(
+                            expr.span(),
+                            "pointer arithmetic source 必须是 live borrowed pointer local",
+                        ));
+                    }
                     Expr::Borrow { source, .. } | Expr::Refer { source, .. }
                         if relations.get(&source.root_binding_id())
                             != Some(&StorageRelation::Owning) =>

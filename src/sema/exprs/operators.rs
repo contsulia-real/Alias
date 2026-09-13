@@ -50,6 +50,10 @@ pub(in crate::sema) fn binary_result_type(
                     nullable: false, ..
                 },
             ) if op == Sub && l == r => Ok(Ty::Int(crate::sema::types::IntW::W64)),
+            (
+                Ty::Ptr { nullable: false, .. },
+                Ty::Int(_) | Ty::UInt(_),
+            ) if matches!(op, Add | Sub) => Ok(l.clone()),
             (Ty::Int(a), Ty::Int(b)) if a == b => Ok(Ty::Int(*a)),
             (Ty::UInt(a), Ty::UInt(b)) if a == b => Ok(Ty::UInt(*a)),
             (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Float(*a)),

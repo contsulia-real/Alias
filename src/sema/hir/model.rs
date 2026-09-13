@@ -518,6 +518,10 @@ pub(crate) enum Expr {
         /// Pointer subtraction additionally requires an integral distance on the pointee stride
         /// lattice. Other binary operations carry no lattice check.
         pointer_element_lattice_check: Option<RuntimeCheckRequirement>,
+        /// Resolved borrowed pointer binding whose reaching loans a derived view must preserve.
+        pointer_offset_source: Option<BindingId>,
+        /// Pointer offset overflow/bounds is either statically proved or guarded at runtime.
+        pointer_offset_check: Option<RuntimeCheckRequirement>,
         span: Span,
         info: ExprInfo,
     },

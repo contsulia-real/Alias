@@ -152,6 +152,9 @@ fn expected_category(
         Expr::Borrow { .. } | Expr::Refer { .. } => {
             ExprCategory::Value(ValueCategory::BorrowedValue)
         }
+        Expr::Binary { pointer_offset_source: Some(_), .. } => {
+            ExprCategory::Value(ValueCategory::BorrowedValue)
+        }
         Expr::Call {
             result,
             target: CallTarget::FunctionValue,

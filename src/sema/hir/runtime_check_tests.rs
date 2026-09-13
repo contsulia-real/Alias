@@ -139,3 +139,37 @@ fn pointer_difference_freezes_provenance_and_lattice_checks() {
         error.msg
     );
 }
+
+#[test]
+fn pointer_offset_freezes_source_and_bounds_check() {
+    let mut program = checked(
+        "func i32 main = () -> {\n    val i32 owner = 1\n    val ptr<i32> start = refer(owner)\n    val ptr<i32> end = start + 1\n    return 0\n}\n",
+    );
+    let Expr::Binary { pointer_offset_source, pointer_offset_check, .. } =
+        local_value(&mut program, "end")
+    else {
+        panic!("end must be a pointer offset")
+    };
+    assert!(pointer_offset_source.is_some());
+    assert_eq!(*pointer_offset_check, Some(RuntimeCheckRequirement::Required));
+
+    *pointer_offset_check = None;
+    let error = validate_resolved_hir(&program)
+        .expect_err("a missing pointer bounds-check decision must fail closed");
+    assert!(
+        error.msg.contains("Binary pointer runtime-check fact 漂移"),
+        "实际: {}",
+        error.msg
+    );
+}
+
+#[test]
+fn zero_pointer_offset_freezes_static_safety_proof() {
+    let mut program = checked(
+        "func i32 main = () -> {\n    val i32 owner = 1\n    val ptr<i32> start = refer(owner)\n    val ptr<i32> same = start + 0\n    return 0\n}\n",
+    );
+    let Expr::Binary { pointer_offset_check, .. } = local_value(&mut program, "same") else {
+        panic!("same must be a pointer offset")
+    };
+    assert_eq!(*pointer_offset_check, Some(RuntimeCheckRequirement::Proven));
+}

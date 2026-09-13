@@ -144,6 +144,8 @@ pub(super) fn emit_abort_runtime<M: Module>(
         ("alias.abort_ptr", "rt_ptr_suffix"),
         ("alias.abort_ptr_distance", "rt_ptr_distance_suffix"),
         ("alias.abort_ptr_lattice", "rt_ptr_lattice_suffix"),
+        ("alias.abort_ptr_arithmetic", "rt_ptr_arithmetic_suffix"),
+        ("alias.abort_ptr_bounds", "rt_ptr_bounds_suffix"),
     ] {
         emit_span_abort(c, symbol, ext, span_data, static_ids, suffix)?;
     }

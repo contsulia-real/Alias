@@ -29,6 +29,8 @@ pub(super) const RUNTIME_STATICS: &[(&str, &[u8])] = &[
     ("rt_ptr_suffix", " — pointer provenance 不兼容\n".as_bytes()),
     ("rt_ptr_distance_suffix", " — pointer difference 超出 i64\n".as_bytes()),
     ("rt_ptr_lattice_suffix", " — pointer element lattice 不兼容\n".as_bytes()),
+    ("rt_ptr_arithmetic_suffix", " — pointer arithmetic 溢出\n".as_bytes()),
+    ("rt_ptr_bounds_suffix", " — pointer view 越界\n".as_bytes()),
 ];
 
 pub(super) fn runtime_static_len(name: &str) -> i64 {

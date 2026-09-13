@@ -103,7 +103,37 @@ impl Checker {
                 } else {
                     self.expr(rhs, env)?
                 };
-                self.binary(*op, l, r, *span)
+                let result = self.binary(*op, l.clone(), r.clone(), *span)?;
+                if matches!(result, Ty::Ptr { nullable: false, .. })
+                    && matches!(l, Ty::Ptr { nullable: false, .. })
+                    && matches!(r, Ty::Int(_) | Ty::UInt(_))
+                    && matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub)
+                {
+                    let Expr::Ident(_, _) = lhs.as_ref() else {
+                        return Err(AliasError {
+                            msg: "pointer arithmetic 当前要求左操作数是 stable borrowed pointer local".into(),
+                            span: lhs.span(),
+                        });
+                    };
+                    let source_binding = self.expr_binding_ids
+                        .get(&Self::expr_key(lhs))
+                        .copied()
+                        .ok_or_else(|| AliasError {
+                            msg: "内部 sema 不变式被破坏: pointer arithmetic source 缺少 BindingId".into(),
+                            span: lhs.span(),
+                        })?;
+                    if !self.borrowed_bindings.contains_key(&source_binding) {
+                        return Err(AliasError {
+                            msg: "pointer arithmetic 当前只从 borrowed pointer view 派生；allocation root owner 保持原位".into(),
+                            span: lhs.span(),
+                        });
+                    }
+                    self.pointer_offsets.insert(
+                        Self::expr_key(e),
+                        crate::sema::hir::LowerPointerOffsetInfo { source_binding },
+                    );
+                }
+                Ok(result)
             }
             Expr::Ternary {
                 cond,

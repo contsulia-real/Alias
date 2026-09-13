@@ -224,13 +224,31 @@ fn emit_expr_value<M: Module>(
             rhs,
             pointer_provenance_check,
             pointer_element_lattice_check,
+            pointer_offset_source,
+            pointer_offset_check,
             span,
             ..
         } => {
             let left = emit_expr(c, bcx, frame, lhs)?;
             let right = emit_expr(c, bcx, frame, rhs)?;
             let left_vty = c.vty(lhs.ty());
-            if matches!(left_vty, VTy::Ptr { .. }) {
+            if pointer_offset_source.is_some() {
+                let right = right.into_scalar("pointer arithmetic offset 必须是 scalar integer");
+                super::provenance::emit_pointer_offset(
+                    c,
+                    bcx,
+                    frame,
+                    (
+                        *op,
+                        &left,
+                        &left_vty,
+                        right,
+                        rhs.ty(),
+                        *pointer_offset_check,
+                        *span,
+                    ),
+                )
+            } else if matches!(left_vty, VTy::Ptr { .. }) {
                 emit_pointer_binary(
                     c,
                     bcx,

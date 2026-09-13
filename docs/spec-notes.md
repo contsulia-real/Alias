@@ -87,7 +87,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 用户类型 | `struct` |
 | 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer equality / ordering / difference 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret` 与 pointer arithmetic 仍未开放并在 sema/final gate fail-closed。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer comparison / difference / borrowed-view arithmetic 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret` 与其它 pointer producer 仍未开放并在 sema/final gate fail-closed。
 
 除上述四种内建泛型外，其它泛型类型尚未实现。
 
@@ -254,13 +254,15 @@ refer place
 
 sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
 
-### 3.8 当前 pointer comparison
+### 3.8 当前 pointer comparison / arithmetic
 
 完全相同静态 pointer 类型（包含相同 pointee 与 nullability）当前支持 `==` / `!=`。相等判定只比较 `(provenance, address)`；`view_start/view_end` 不参与 equality。两个机器地址即使数值相同，只要 canonical descriptor identity 不同就不相等；重复 `refer` 同一 whole storage 得到相同 provenance/address，因此相等。
 
-完全相同的 non-null `ptr<T>` 还支持 `<` / `<=` / `>` / `>=` 以及 pointer-pointer `-`。ordering 先执行 HIR 已固化的 provenance runtime check，不同 canonical storage root 会按运算符 span abort；通过后按 unsigned machine address 比较。difference 同样先验证 provenance，再以 checked i64 address subtraction 求 byte distance，并验证该距离可被 canonical `stride(T)` 整除，最终返回 i64 element distance。overflow、跨 provenance 或非整数 element lattice distance 都 runtime abort。nullable pointer ordering/difference 与 pointer arithmetic 尚未开放。
+完全相同的 non-null `ptr<T>` 还支持 `<` / `<=` / `>` / `>=` 以及 pointer-pointer `-`。ordering 先执行 HIR 已固化的 provenance runtime check，不同 canonical storage root 会按运算符 span abort；通过后按 unsigned machine address 比较。difference 同样先验证 provenance，再以 checked i64 address subtraction 求 byte distance，并验证该距离可被 canonical `stride(T)` 整除，最终返回 i64 element distance。overflow、跨 provenance 或非整数 element lattice distance 都 runtime abort。nullable pointer ordering/difference 仍拒绝。
 
-pointer comparison/difference 会读取完整四 lane value，不能退化成只比较 address lane。参与运算的 borrowed pointer local 是其来源 loan holder；运算发生前对重叠 source 的 write/move/reinitialize 会被 NLL ownership CFG 静态拒绝，运算完成且没有后续使用后 loan 可以结束。
+当前 `ptr<T> +/- integer` 纵切要求左操作数是 stable local borrowed pointer view；整数可以是任一现有有符号或无符号整数类型，单位固定为 canonical `stride(T)`。乘法与 address 加减都 checked，结果必须位于来源的闭区间 `[view_start, view_end]`，因此 one-past-end 合法，再继续越界会按运算符 span abort。结果保持原 provenance 与 bounds，是新的 `BorrowedValue<ptr<T>>`，只能初始化或重新绑定 local borrowed pointer slot；其 reaching loan 从 source slot 传播，不能借 arithmetic 绕过 owner write/move 冲突。nullable allocation root、direct `refer(place)`、临时或复合 pointer expression 必须先进入 stable borrowed local 才能作为该纵切的 source。
+
+pointer comparison/difference/arithmetic 会读取完整四 lane value，不能退化成只比较 address lane。参与运算的 borrowed pointer local 是其来源 loan holder；运算发生前对重叠 source 的 write/move/reinitialize 会被 NLL ownership CFG 静态拒绝，运算完成且没有后续使用后 loan 可以结束。
 
 comparison/difference 不取得或转移 allocation ownership。`malloc<T>()`、`move(owner)` 或 owned pointer call result 等未锚定 `OwnedTemporary` 不能直接作为 operand；必须先 transfer 到 owning local，再以 non-escaping inspection 读取。这样运算不会吞掉一个之后无法显式 `free` / transfer 的 raw root。
 
@@ -285,7 +287,7 @@ ownership CFG 为每个 local/`Owned` parameter pointer root 跟踪独立的 liv
 - `malloc<T>(count)` 的 source integer type 尚未冻结，因此不擅自选用某个现有整数类型；
 - allocation-root ptr 暂不能 transfer 进 field、array/result payload 或 global storage，等待 parent destruction 能消费 aggregate pointer lanes 与 raw child recipe；
 - pointer temporary 不能借给只在调用结束时自动销毁 temporary 的参数，也不能作为 expression statement 隐式丢弃；
-- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref/reinterpret`、heap/subplace `refer` 与 pointer 运算尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
+- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref/reinterpret`、heap/subplace `refer` 与超出 3.8 当前纵切的 pointer producer/arithmetic 尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
 
 ---
 
