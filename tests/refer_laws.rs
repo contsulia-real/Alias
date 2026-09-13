@@ -1,4 +1,4 @@
-//! Public refer laws for the first address-taken storage slice.
+//! Public refer laws for the address-taken local/global storage slice.
 
 use alias::{run, AliasError};
 
@@ -13,11 +13,17 @@ fn local_storage_has_one_live_descriptor_for_repeated_refer() {
 }
 
 #[test]
-fn refer_requires_a_whole_current_function_owning_place() {
-    let global = fail(
-        "val i32 value = 7\nfunc i32 main = () -> {\n    val ptr<i32> view = refer(value)\n    return value\n}\n",
+fn global_storage_uses_a_slab_lifetime_descriptor() {
+    let source = "val i32 value = 7\nfunc i32 main = () -> {\n    val ptr<i32> view = refer(value)\n    return value\n}\n";
+    assert_eq!(run(source).unwrap(), 7);
+}
+
+#[test]
+fn refer_requires_a_whole_addressable_owning_place() {
+    let parameter = fail(
+        "func i32 inspect = (i32 value) -> {\n    val ptr<i32> view = refer(value)\n    return value\n}\nfunc i32 main = () -> return inspect(7)\n",
     );
-    assert!(global.msg.contains("owning local"), "{}", global.msg);
+    assert!(parameter.msg.contains("owning"), "{}", parameter.msg);
 
     let field = fail(
         "struct pair { val i32 value = 7 }\nfunc i32 main = () -> {\n    val pair item = pair()\n    val ptr<i32> view = refer(item.value)\n    return item.value\n}\n",

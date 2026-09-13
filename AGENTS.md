@@ -74,7 +74,7 @@ src/
 │   ├── emit.rs + emit/     # HIR → Cranelift；clone.rs / shallow.rs 只执行各自 resolved plan
 │   │   ├── value.rs        # resolved expression ABI 对应的 Cranelift SSA lane carrier
 │   │   ├── places.rs       # resolved Place storage address、物理写入与字段 storage 查询 owner
-│   │   └── provenance.rs   # address-taken local descriptor 与 refer pointer view 发射 owner
+│   │   └── provenance.rs   # address-taken local/global descriptor 与 refer pointer view 发射 owner
 │   ├── funcgen.rs          # 用户函数/闭包生成
 │   ├── runtime.rs          # RUNTIME_CONTRACTS 与 runtime 调用校验 owner
 │   └── native_runtime.rs + native_runtime/ # 产物内 runtime 实现
@@ -121,7 +121,7 @@ sema 是语言静态语义的 owner。名字解析、目标类型传播、转换
 - 当前已知 owning target 从稳定 Place 普通读取时固化为 `Expr::ReadPlace { source: Place, plan: DeepClonePlan }`；覆盖非 func binding 初始化、local/field replacement、struct 字段默认值/构造实参、array 字面量元素/`push` 实参与 result payload；`for` 循环变量另在 `Stmt::For` 固化 element `DeepClonePlan`，防止 loop binding 与仍 live 的容器元素共享 ownership root。用户函数实参和方法 receiver/实参走 resolved parameter pass，函数返回走 resolved return pass，Pattern 走 resolved binding operation；for iterable 经 resolved source_pass 建立 loop holder；显式 iterator 来源在 local/move/call/return 中由 loan holder 保留，写入持久容器按 containment 规则拒绝；capture 不走 owning read，而由结构化 capture loan 管理；
 - 显式 `shallow` 固化为 `CallTarget::Builtin(BuiltinCall::ShallowClone(ShallowClonePlan))`；`Inline` 只允许作为递归 safe leaf，合法 user-level shallow root 必须是 aggregate，因此一律为 `OwnedTemporary + Available`；
 - 显式 `borrow(place)` 固化为专用 `Expr::Borrow { loan_id, source: Place, kind }`；普通 borrow binding 当前只允许 current-function owning local 所根植的 Place，结果为 `BorrowedValue + None` 并进入 local `Borrowed` slot；return 语境额外允许直接 parameter/self/global source，并由 `ReturnPass` / caller `CallResult` 保持 provenance。`hir/borrow_contract.rs` 阻止 stored/top-level/global borrow binding、borrowed alias capture/generation return、显式 BorrowedValue call forwarding 与 reborrow；
-- 显式 `refer(place)` 固化为专用 `Expr::Refer { loan_id, source: Place, kind }`，并在 `CheckedProgram::address_taken_roots` 精确登记 canonical descriptor root；当前只开放 current-function owning whole local，返回 non-null `ptr<T>` 的 `BorrowedValue + None`。它复用 local NLL loan 与 stored-borrow gate；field/index subview、parameter/capture/global source、borrowed pointer return 与显式 BorrowedValue forwarding 继续 fail-closed；
+- 显式 `refer(place)` 固化为专用 `Expr::Refer { loan_id, source: Place, kind }`，并在 `CheckedProgram::address_taken_roots` 精确登记 canonical descriptor root；当前开放 current-function owning whole local 与 owning global，返回 non-null `ptr<T>` 的 `BorrowedValue + None`。它复用 NLL loan 与 stored-borrow gate；field/index subview、parameter/capture source、borrowed pointer return 与显式 BorrowedValue forwarding 继续 fail-closed；
 - 显式 `move(place)` 固化为专用 `Expr::Move { source: Place }`；当前 dynamic source 接受同一函数内已证明 owning 的完整 local，包含 `Owned` parameter 与 allocation-root ptr；pointer move 同时转移 raw-root obligation，field/array partial move-out 以及缺少 capture/global transfer source 的 move 均 fail-closed；scalar move 保持 InlineValue 值语义；
 - Binding/Method/字段/构造器索引均已结构化解析；
 - 三元与 match 的普通数据值分支在 checker 的有效 lexical scope 内复用 `ordinary_read` owner 解析普通读取；函数值选择继续使用原有 callable/capture-loan 路径，不引入 Func clone。非稳定 Field/Index 与 `?` 成功 payload 进入 owning context 时，在 `ExprInfo::projection_read` 固化 boxed DeepClone plan，不能假装成 stable Place 或隐式 partial move。final gate 复核其节点位置和 canonical plan，emitter 只执行该 plan；
@@ -153,7 +153,7 @@ codegen 只消费已解析 HIR，不得根据：
 
 `codegen/emit/cells.rs` 统一物化 local/capture/global binding cell 的实际 machine address，并根据 resolved `StorageRelation` 区分 owning value cell 与保存 referent address 的 borrowed alias cell；`codegen/emit/places.rs` 再把 resolved Local/Field/Index Place 递归映射到 canonical semantic storage address。Field 投影复用 canonical struct field layout owner，Index 投影直接消费 HIR 的 bounds-check fact 并复用统一 array element address owner；replacement、borrow 与后续 refer 都必须复用这条地址链，禁止重新拼 capture/global/field/index 地址规则或在后端重做检查决策。
 
-`codegen/emit/provenance.rs` 为 `CheckedProgram::address_taken_roots` 中的 local storage 每个生命周期建立恰好一个 canonical descriptor，重复 `refer` 只复用该 identity。当前 pointer view 通过完整四 lane 临时 cell 进入既有 borrowed-alias address carrier；descriptor 与 view cell 都登记到同一词法 cleanup stack，alias cell 只释放自身。后端不得按 refer 次数重建 descriptor，也不得把 pointer address 当 provenance。
+`codegen/emit/provenance.rs` 为 `CheckedProgram::address_taken_roots` 中的 local/global storage 每个生命周期建立恰好一个 canonical descriptor，重复 `refer` 只复用该 identity。local descriptor 登记到词法 cleanup stack；global descriptor 是 global slab 内的静态记录。当前 pointer view 通过完整四 lane 临时 cell 进入既有 borrowed-alias address carrier，view cell 同样使用词法 cleanup，alias cell 只释放自身。后端不得按 refer 次数重建 descriptor，也不得把 pointer address 当 provenance。
 
 Assignment 发射必须直接消费 resolved operation。后端不得再把 `BorrowedValue + Local`、slot relation 或机器地址组合成一条平行的 replacement-vs-rebind 判定路径。owning replacement 已按“完整 RHS → target projection → 销毁旧 owner → commit 新 owner”发射；初始化不运行 destruction，borrowed alias rebind 不销毁 referent。
 

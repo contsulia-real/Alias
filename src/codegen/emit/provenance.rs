@@ -1,4 +1,4 @@
-//! Canonical provenance descriptors for address-taken local storage.
+//! Canonical provenance descriptors for address-taken local and global storage.
 //!
 //! Sema freezes the exact Refer source and address-taken root set. This module only materializes
 //! their physical descriptor and four pointer lanes; it does not infer ownership or loan facts.
@@ -9,13 +9,14 @@ use super::value::ExprValue;
 use crate::codegen::abi::{value_layout, VTy};
 use crate::codegen::layout::{
     STORAGE_DESCRIPTOR_BASE_OFFSET, STORAGE_DESCRIPTOR_BYTES, STORAGE_DESCRIPTOR_EXTENT_OFFSET,
-    STORAGE_DESCRIPTOR_KIND_OFFSET, STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET, STORAGE_KIND_LOCAL,
+    STORAGE_DESCRIPTOR_KIND_OFFSET, STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET, STORAGE_KIND_GLOBAL,
+    STORAGE_KIND_LOCAL,
 };
-use crate::codegen::{invariant_violation, Compiler, Frame};
+use crate::codegen::{bound_vty, invariant_violation, Compiler, Frame};
 use crate::sema::hir::{BindingId, Place};
 use crate::AliasResult;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
-use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 pub(super) fn register_address_taken_local<M: Module>(
@@ -35,8 +36,31 @@ pub(super) fn register_address_taken_local<M: Module>(
     }
     let bytes = bcx.ins().iconst(types::I64, STORAGE_DESCRIPTOR_BYTES);
     let descriptor = c.call_rt(bcx, "alias.cell.new", &[bytes])?;
-    let extent = bcx.ins().iconst(types::I64, layout.stride as i64);
-    let kind = bcx.ins().iconst(types::I64, STORAGE_KIND_LOCAL);
+    initialize_descriptor(bcx, descriptor, storage, layout.stride, STORAGE_KIND_LOCAL);
+    let descriptor_var = bcx.declare_var(types::I64);
+    bcx.def_var(descriptor_var, descriptor);
+    if frame
+        .storage_descriptors
+        .last_mut()
+        .unwrap_or_else(|| invariant_violation("descriptor scope 栈非空"))
+        .insert(binding, descriptor_var)
+        .is_some()
+    {
+        invariant_violation("同一 local storage root 被重复登记 descriptor")
+    }
+    register_plain_allocation_cleanup(bcx, frame, descriptor);
+    Ok(())
+}
+
+fn initialize_descriptor(
+    bcx: &mut FunctionBuilder,
+    descriptor: Value,
+    storage: Value,
+    extent: usize,
+    storage_kind: i64,
+) {
+    let extent = bcx.ins().iconst(types::I64, extent as i64);
+    let kind = bcx.ins().iconst(types::I64, storage_kind);
     let none = bcx.ins().iconst(types::I64, 0);
     bcx.ins().store(
         MemFlagsData::new(),
@@ -62,28 +86,51 @@ pub(super) fn register_address_taken_local<M: Module>(
         descriptor,
         STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET,
     );
-    let descriptor_var = bcx.declare_var(types::I64);
-    bcx.def_var(descriptor_var, descriptor);
-    if frame
-        .storage_descriptors
-        .last_mut()
-        .unwrap_or_else(|| invariant_violation("descriptor scope 栈非空"))
-        .insert(binding, descriptor_var)
-        .is_some()
-    {
-        invariant_violation("同一 local storage root 被重复登记 descriptor")
+}
+
+pub(in crate::codegen) fn initialize_address_taken_global<M: Module>(
+    c: &Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    binding: BindingId,
+) -> AliasResult<()> {
+    let Some(offset) = c.global_descriptor_offsets.get(&binding).copied() else {
+        if c.address_taken_roots.contains(&binding) {
+            invariant_violation("address-taken global 缺少 static descriptor offset")
+        }
+        return Ok(());
+    };
+    let base = bcx.use_var(frame.globals);
+    let descriptor = bcx.ins().iadd_imm_s(base, offset as i64);
+    let storage = binding_storage_addr(c, bcx, frame, binding)
+        .unwrap_or_else(|| invariant_violation("address-taken global BindingId 无 storage"));
+    let layout = value_layout(&bound_vty(c, frame, binding));
+    if layout.size != layout.stride {
+        invariant_violation("address-taken global 的 value size/stride 尚未统一")
     }
-    register_plain_allocation_cleanup(bcx, frame, descriptor);
+    initialize_descriptor(bcx, descriptor, storage, layout.stride, STORAGE_KIND_GLOBAL);
     Ok(())
 }
 
-fn descriptor_for(frame: &Frame, binding: BindingId) -> Variable {
-    frame
+fn descriptor_for<M: Module>(
+    c: &Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &Frame,
+    binding: BindingId,
+) -> Value {
+    if let Some(descriptor) = frame
         .storage_descriptors
         .iter()
         .rev()
         .find_map(|scope| scope.get(&binding).copied())
-        .unwrap_or_else(|| invariant_violation("Refer source 缺少 canonical local descriptor"))
+    {
+        return bcx.use_var(descriptor);
+    }
+    if let Some(offset) = c.global_descriptor_offsets.get(&binding).copied() {
+        let base = bcx.use_var(frame.globals);
+        return bcx.ins().iadd_imm_s(base, offset as i64);
+    }
+    invariant_violation("Refer source 缺少 canonical local/global descriptor")
 }
 
 pub(super) fn emit_refer<M: Module>(
@@ -100,7 +147,7 @@ pub(super) fn emit_refer<M: Module>(
         .unwrap_or_else(|| invariant_violation("Refer source BindingId 无 storage"));
     let source_vty = c.vty(source.ty());
     let layout = value_layout(&source_vty);
-    let descriptor = bcx.use_var(descriptor_for(frame, *binding_id));
+    let descriptor = descriptor_for(c, bcx, frame, *binding_id);
     let view_end = bcx.ins().iadd_imm_s(address, layout.stride as i64);
     let value = ExprValue::pointer([descriptor, address, address, view_end]);
     let cell = allocate_value_cell(c, bcx, result_vty)?;

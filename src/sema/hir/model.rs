@@ -20,7 +20,8 @@ pub(crate) struct CheckedProgram {
     pub(crate) main_id: BindingId,
     pub(crate) items: Vec<Item>,
     /// Roots whose storage address is observed by a resolved Refer node. Codegen consumes this
-    /// set when materializing the root cell so repeated Refer operations share one descriptor.
+    /// set when laying out global storage or materializing a local cell so repeated Refer
+    /// operations share one descriptor.
     pub(crate) address_taken_roots: HashSet<BindingId>,
 }
 

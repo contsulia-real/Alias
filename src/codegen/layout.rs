@@ -89,6 +89,7 @@ pub(crate) const STORAGE_DESCRIPTOR_KIND_OFFSET: i32 = object_word_offset(2);
 pub(crate) const STORAGE_DESCRIPTOR_RAW_METADATA_OFFSET: i32 = object_word_offset(3);
 pub(crate) const STORAGE_KIND_RAW: i64 = 1;
 pub(crate) const STORAGE_KIND_LOCAL: i64 = 2;
+pub(crate) const STORAGE_KIND_GLOBAL: i64 = 3;
 
 /// Raw initialization metadata starts empty and is owned by its StorageDescriptor. Region entry
 /// layout remains with the later typed-initialization phase; freezing it before a producer exists

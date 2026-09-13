@@ -172,6 +172,7 @@ struct GraphBuilder<'a> {
     tasks: Vec<Task<'a>>,
     eligible: HashSet<BindingId>,
     local_roots: HashSet<BindingId>,
+    global_roots: HashSet<BindingId>,
     owning: HashSet<BindingId>,
     borrowed: HashSet<BindingId>,
     borrowed_source_writable: HashMap<BindingId, bool>,
@@ -291,6 +292,7 @@ impl<'a> GraphBuilder<'a> {
             tasks: Vec::new(),
             eligible: HashSet::new(),
             local_roots: HashSet::new(),
+            global_roots: HashSet::new(),
             owning: HashSet::new(),
             borrowed: HashSet::new(),
             borrowed_source_writable: HashMap::new(),
@@ -2118,10 +2120,13 @@ fn run_dataflow(
                 span,
             } => {
                 let root = source.root_binding_id();
-                if address_taken && !graph.local_roots.contains(&root) {
+                if address_taken
+                    && !graph.local_roots.contains(&root)
+                    && !graph.global_roots.contains(&root)
+                {
                     return Err(error(
                         span,
-                        "refer 当前只开放当前函数 owning local 的完整 Place descriptor",
+                        "refer 当前只开放当前函数 owning local 或 global 的完整 Place descriptor",
                     ));
                 }
                 if let Some(parameter_effect) = graph.parameter_permissions.get(&root) {
@@ -2582,6 +2587,7 @@ fn analyze_function<'a>(
     let mut builder = GraphBuilder::new();
     builder.return_passes_required = true;
     builder.owning.extend(global_owning.iter().copied());
+    builder.global_roots.extend(global_owning.iter().copied());
     configure_function_parameters(&mut builder, function)?;
     builder.capture_permissions = captures
         .iter()

@@ -300,6 +300,12 @@ impl<'m, M: Module> Compiler<'m, M> {
             frame.scopes[0].insert(b.binding_id, Slot::Global(off));
             frame.locals_vty[0].insert(b.binding_id, svty);
             frame.locals_relation[0].insert(b.binding_id, relation);
+            crate::codegen::emit::provenance::initialize_address_taken_global(
+                self,
+                &mut bcx,
+                &frame,
+                b.binding_id,
+            )?;
         }
 
         let clo = {

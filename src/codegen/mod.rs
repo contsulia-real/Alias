@@ -96,6 +96,9 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
     pub(crate) address_taken_roots: HashSet<BindingId>,
+    /// Static descriptors embedded in the global slab. The descriptor lifetime is therefore
+    /// exactly the slab lifetime and needs no parallel heap cleanup.
+    pub(crate) global_descriptor_offsets: HashMap<BindingId, usize>,
     pub(crate) next_fid: u32,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
@@ -144,6 +147,7 @@ pub(crate) fn compile_to_object(program: CheckedProgram) -> AliasResult<Vec<u8>>
         top_slots: Vec::new(),
         global_bytes: 0,
         address_taken_roots: program.address_taken_roots.clone(),
+        global_descriptor_offsets: HashMap::new(),
         next_fid: 0,
         pending: VecDeque::new(),
         str_data: HashMap::new(),
@@ -243,6 +247,11 @@ fn compile_program<M: Module>(
             c.top_slots.push(slot);
             c.globals_final
                 .insert(b.binding_id, (slot, slot_vty, relation));
+            if c.address_taken_roots.contains(&b.binding_id) {
+                off = align_to(off, 8);
+                c.global_descriptor_offsets.insert(b.binding_id, off);
+                off += crate::codegen::layout::STORAGE_DESCRIPTOR_BYTES as usize;
+            }
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { .. } = &b.value else {
                     return Err(native_err(b.span, "func 绑定必须由函数字面量初始化"));
@@ -486,6 +495,7 @@ mod fail_closed_tests {
             top_slots: Vec::new(),
             global_bytes: 0,
             address_taken_roots: HashSet::new(),
+            global_descriptor_offsets: HashMap::new(),
             next_fid: 0,
             pending: VecDeque::new(),
             str_data: HashMap::new(),
