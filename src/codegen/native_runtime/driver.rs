@@ -26,6 +26,7 @@ pub(super) const RUNTIME_STATICS: &[(&str, &[u8])] = &[
     ("rt_conv_suffix", " — 转换越界\n".as_bytes()),
     ("rt_overflow_suffix", " — 整数溢出\n".as_bytes()),
     ("rt_iter_suffix", " — 遍历期间集合结构已修改\n".as_bytes()),
+    ("rt_ptr_suffix", " — pointer provenance 不兼容\n".as_bytes()),
 ];
 
 pub(super) fn runtime_static_len(name: &str) -> i64 {

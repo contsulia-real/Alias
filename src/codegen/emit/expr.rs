@@ -6,7 +6,7 @@ use super::cells::{
 use super::clone::{emit_deep_clone_place, emit_deep_clone_value};
 use super::control::emit_stmt;
 use super::ops::{
-    emit_abort_branch, emit_binary, emit_convert, emit_pointer_equality, narrow, widen_signed,
+    emit_abort_branch, emit_binary, emit_convert, emit_pointer_comparison, narrow, widen_signed,
     widen_unsigned,
 };
 use super::places::{emit_place_addr, emit_place_value, field_storage};
@@ -219,15 +219,30 @@ fn emit_expr_value<M: Module>(
             ..
         } => emit_short_circuit(c, bcx, frame, true, lhs, rhs),
         Expr::Binary {
-            op, lhs, rhs, span, ..
+            op,
+            lhs,
+            rhs,
+            pointer_provenance_check,
+            span,
+            ..
         } => {
             let left = emit_expr(c, bcx, frame, lhs)?;
             let right = emit_expr(c, bcx, frame, rhs)?;
             let left_vty = c.vty(lhs.ty());
             if matches!(left_vty, VTy::Ptr { .. }) {
-                Ok(ExprValue::scalar(emit_pointer_equality(
-                    bcx, *op, &left_vty, &left, &right,
-                )))
+                emit_pointer_comparison(
+                    c,
+                    bcx,
+                    (
+                        *op,
+                        &left_vty,
+                        &left,
+                        &right,
+                        *pointer_provenance_check,
+                        *span,
+                    ),
+                )
+                .map(ExprValue::scalar)
             } else {
                 let left = left.into_scalar("scalar binary lhs 收到 multi-lane expression value");
                 let right =

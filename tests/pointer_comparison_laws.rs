@@ -74,3 +74,62 @@ func i32 main = () -> {
     );
     assert!(error.msg.contains("不适用于"), "{}", error.msg);
 }
+
+#[test]
+fn ordering_within_one_provenance_compares_unsigned_addresses() {
+    let source = r#"
+func i32 main = () -> {
+    val i32 owner = 1
+    val ptr<i32> left = refer(owner)
+    val ptr<i32> right = refer(owner)
+    if left < right { return 1 }
+    if left > right { return 2 }
+    if !(left <= right) { return 3 }
+    if !(left >= right) { return 4 }
+    return 0
+}
+"#;
+    assert_eq!(run(source).unwrap(), 0);
+}
+
+#[test]
+fn ordering_across_provenance_aborts_at_the_operator() {
+    let source = "func i32 main = () -> {\n    val i32 first = 1\n    val i32 second = 2\n    val ptr<i32> left = refer(first)\n    val ptr<i32> right = refer(second)\n    if left < right { return 1 }\n    return 0\n}\n";
+    let dir = std::env::temp_dir().join(format!(
+        "alias-pointer-comparison-laws-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create test temp directory");
+    let path = dir.join("ordering.as");
+    std::fs::write(&path, source).expect("write pointer ordering source");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_alias"))
+        .arg(&path)
+        .output()
+        .expect("run Alias CLI");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+
+    assert_eq!(output.stdout, b"");
+    assert_eq!(
+        output.stderr,
+        "错误 @ 6:7 — pointer provenance 不兼容\n".as_bytes()
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn nullable_pointer_ordering_is_rejected_statically() {
+    let error = fail(
+        r#"
+func i32 main = () -> {
+    val ptr<i32>? left = malloc<i32>()
+    val ptr<i32>? right = malloc<i32>()
+    if left < right { return 1 }
+    free(move(left))
+    free(move(right))
+    return 0
+}
+"#,
+    );
+    assert!(error.msg.contains("不适用于"), "{}", error.msg);
+}

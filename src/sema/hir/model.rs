@@ -511,6 +511,10 @@ pub(crate) enum Expr {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+        /// Pointer ordering is defined only inside one provenance domain. Sema freezes whether
+        /// that condition was proved or still needs a runtime guard; non-pointer operations and
+        /// pointer equality carry no provenance check.
+        pointer_provenance_check: Option<RuntimeCheckRequirement>,
         span: Span,
         info: ExprInfo,
     },

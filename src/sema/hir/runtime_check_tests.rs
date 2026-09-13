@@ -76,3 +76,32 @@ fn direct_array_literal_constant_oob_is_rejected_statically() {
         error.msg
     );
 }
+
+#[test]
+fn pointer_ordering_freezes_required_provenance_check() {
+    let mut program = checked(
+        "func i32 main = () -> {\n    val i32 owner = 1\n    val ptr<i32> left = refer(owner)\n    val ptr<i32> right = refer(owner)\n    val bool ordered = left <= right\n    return 0\n}\n",
+    );
+    let Expr::Binary {
+        pointer_provenance_check,
+        ..
+    } = local_value(&mut program, "ordered")
+    else {
+        panic!("ordered must be a pointer comparison")
+    };
+    assert_eq!(
+        *pointer_provenance_check,
+        Some(RuntimeCheckRequirement::Required)
+    );
+
+    *pointer_provenance_check = None;
+    let error = validate_resolved_hir(&program)
+        .expect_err("a missing pointer provenance-check decision must fail closed");
+    assert!(
+        error
+            .msg
+            .contains("Binary pointer provenance-check fact 漂移"),
+        "实际: {}",
+        error.msg
+    );
+}

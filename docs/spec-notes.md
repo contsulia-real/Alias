@@ -87,7 +87,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 用户类型 | `struct` |
 | 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer equality 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret`、pointer ordering/difference/arithmetic 仍未开放并在 sema/final gate fail-closed。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer equality / ordering 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret`、pointer difference/arithmetic 仍未开放并在 sema/final gate fail-closed。
 
 除上述四种内建泛型外，其它泛型类型尚未实现。
 
@@ -254,9 +254,11 @@ refer place
 
 sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
 
-### 3.8 当前 pointer equality
+### 3.8 当前 pointer comparison
 
-完全相同静态 pointer 类型（包含相同 pointee 与 nullability）当前支持 `==` / `!=`。相等判定只比较 `(provenance, address)`；`view_start/view_end` 不参与 equality。两个机器地址即使数值相同，只要 canonical descriptor identity 不同就不相等；重复 `refer` 同一 whole storage 得到相同 provenance/address，因此相等。pointer ordering、difference 与 arithmetic 尚未开放。
+完全相同静态 pointer 类型（包含相同 pointee 与 nullability）当前支持 `==` / `!=`。相等判定只比较 `(provenance, address)`；`view_start/view_end` 不参与 equality。两个机器地址即使数值相同，只要 canonical descriptor identity 不同就不相等；重复 `refer` 同一 whole storage 得到相同 provenance/address，因此相等。
+
+完全相同的 non-null `ptr<T>` 还支持 `<` / `<=` / `>` / `>=`。ordering 先执行 HIR 已固化的 provenance runtime check，不同 canonical storage root 会按运算符 span abort；通过后按 unsigned machine address 比较。nullable pointer ordering、pointer difference 与 arithmetic 尚未开放。
 
 pointer comparison 会读取完整四 lane value，不能退化成只比较 address lane。参与比较的 borrowed pointer local 是其来源 loan holder；比较发生前对重叠 source 的 write/move/reinitialize 会被 NLL ownership CFG 静态拒绝，比较完成且没有后续使用后 loan 可以结束。
 

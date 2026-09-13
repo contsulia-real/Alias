@@ -2,7 +2,7 @@ use super::strings::{call_str_cmp, display_typed};
 use super::value::ExprValue;
 use crate::codegen::abi::{cl_type, ir_type_bits, PtrLane, VTy};
 use crate::codegen::{invariant_violation, Compiler};
-use crate::sema::hir::{BinOp, Expr};
+use crate::sema::hir::{BinOp, Expr, RuntimeCheckRequirement};
 use crate::sema::types::FloatW;
 use crate::{AliasResult, Span};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -153,16 +153,19 @@ pub(crate) fn emit_binary_values<M: Module>(
     }
 }
 
-pub(crate) fn emit_pointer_equality(
+pub(crate) fn emit_pointer_comparison<M: Module>(
+    c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
-    op: BinOp,
-    vty: &VTy,
-    left: &ExprValue,
-    right: &ExprValue,
-) -> Value {
-    if !matches!(op, BinOp::EqEq | BinOp::NotEq) {
-        invariant_violation("pointer comparison 当前只开放 equality")
-    }
+    input: (
+        BinOp,
+        &VTy,
+        &ExprValue,
+        &ExprValue,
+        Option<RuntimeCheckRequirement>,
+        Span,
+    ),
+) -> AliasResult<Value> {
+    let (op, vty, left, right, provenance_check, span) = input;
     let left_provenance = left.pointer_lane(bcx, vty, PtrLane::Provenance);
     let right_provenance = right.pointer_lane(bcx, vty, PtrLane::Provenance);
     let left_address = left.pointer_lane(bcx, vty, PtrLane::Address);
@@ -170,16 +173,42 @@ pub(crate) fn emit_pointer_equality(
     let same_provenance = bcx
         .ins()
         .icmp(IntCC::Equal, left_provenance, right_provenance);
-    let same_address = bcx
-        .ins()
-        .icmp(IntCC::Equal, left_address, right_address);
-    let equal = bcx.ins().band(same_provenance, same_address);
-    let result = if op == BinOp::EqEq {
-        equal
-    } else {
-        bcx.ins().icmp_imm_s(IntCC::Equal, equal, 0)
+    let result = match op {
+        BinOp::EqEq | BinOp::NotEq => {
+            if provenance_check.is_some() {
+                invariant_violation("pointer equality 不携带 provenance runtime check")
+            }
+            let same_address = bcx.ins().icmp(IntCC::Equal, left_address, right_address);
+            let equal = bcx.ins().band(same_provenance, same_address);
+            if op == BinOp::EqEq {
+                equal
+            } else {
+                bcx.ins().icmp_imm_s(IntCC::Equal, equal, 0)
+            }
+        }
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            let VTy::Ptr {
+                nullable: false, ..
+            } = vty
+            else {
+                invariant_violation("pointer ordering 需要 non-null pointer type")
+            };
+            match provenance_check {
+                Some(RuntimeCheckRequirement::Required) => {
+                    let different =
+                        bcx.ins()
+                            .icmp(IntCC::NotEqual, left_provenance, right_provenance);
+                    emit_abort_branch(c, bcx, different, "alias.abort_ptr", span)?;
+                }
+                Some(RuntimeCheckRequirement::Proven) => {}
+                None => invariant_violation("pointer ordering 缺少 provenance-check fact"),
+            }
+            bcx.ins()
+                .icmp(int_cc(op, false), left_address, right_address)
+        }
+        _ => invariant_violation("pointer comparison 收到非比较运算符"),
     };
-    bcx.ins().uextend(types::I64, result)
+    Ok(bcx.ins().uextend(types::I64, result))
 }
 
 fn emit_checked_int_binary<M: Module>(

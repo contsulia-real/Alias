@@ -4,7 +4,7 @@
 //! from expression shape. Pointer provenance, bounds, alignment, and raw-initialization operations
 //! extend this owner as those semantic nodes land.
 
-use super::{Expr, Place, ResolvedConversion, RuntimeCheckRequirement};
+use super::{BinOp, Expr, Place, ResolvedConversion, RuntimeCheckRequirement};
 use crate::sema::types::{IntW, Ty};
 use crate::{AliasError, AliasResult, Span};
 
@@ -52,4 +52,27 @@ pub(super) fn array_place_index(_base: &Place, _index: &Expr) -> RuntimeCheckReq
     // A stable array Place can be resized by aliases between evaluations. Without a frozen length
     // fact in HIR, its current runtime header is the only authority and the guard cannot be elided.
     RuntimeCheckRequirement::Required
+}
+
+pub(super) fn pointer_ordering(
+    op: BinOp,
+    left: &Ty,
+    right: &Ty,
+) -> Option<RuntimeCheckRequirement> {
+    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        && matches!(
+            left,
+            Ty::Ptr {
+                nullable: false,
+                ..
+            }
+        )
+        && left == right
+    {
+        // Static pointer values currently carry no symbolic provenance identity. Preserve that
+        // uncertainty explicitly instead of letting codegen infer a proof from expression shape.
+        Some(RuntimeCheckRequirement::Required)
+    } else {
+        None
+    }
 }

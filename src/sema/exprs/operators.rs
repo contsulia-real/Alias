@@ -63,11 +63,17 @@ pub(in crate::sema) fn binary_result_type(
             (Ty::Float(a), Ty::Float(b)) if a == b => Ok(Ty::Bool),
             (Ty::Str, Ty::Str) => Ok(Ty::Bool),
             (Ty::Bool, Ty::Bool) if matches!(op, EqEq | NotEq) => Ok(Ty::Bool),
-            (Ty::Ptr { .. }, Ty::Ptr { .. })
-                if matches!(op, EqEq | NotEq) && l == r =>
-            {
+            (Ty::Ptr { .. }, Ty::Ptr { .. }) if matches!(op, EqEq | NotEq) && l == r => {
                 Ok(Ty::Bool)
             }
+            (
+                Ty::Ptr {
+                    nullable: false, ..
+                },
+                Ty::Ptr {
+                    nullable: false, ..
+                },
+            ) if matches!(op, Lt | Le | Gt | Ge) && l == r => Ok(Ty::Bool),
             _ => Err(mixed(span)),
         },
         And | Or => Err(AliasError {

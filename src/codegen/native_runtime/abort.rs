@@ -141,6 +141,7 @@ pub(super) fn emit_abort_runtime<M: Module>(
         ("alias.abort_conv", "rt_conv_suffix"),
         ("alias.abort_overflow", "rt_overflow_suffix"),
         ("alias.abort_iter", "rt_iter_suffix"),
+        ("alias.abort_ptr", "rt_ptr_suffix"),
     ] {
         emit_span_abort(c, symbol, ext, span_data, static_ids, suffix)?;
     }
