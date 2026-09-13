@@ -262,6 +262,8 @@ sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan
 
 pointer comparison 会读取完整四 lane value，不能退化成只比较 address lane。参与比较的 borrowed pointer local 是其来源 loan holder；比较发生前对重叠 source 的 write/move/reinitialize 会被 NLL ownership CFG 静态拒绝，比较完成且没有后续使用后 loan 可以结束。
 
+comparison 不取得或转移 allocation ownership。`malloc<T>()`、`move(owner)` 或 owned pointer call result 等未锚定 `OwnedTemporary` 不能直接作为 comparison operand；必须先 transfer 到 owning local，再以 non-escaping inspection 读取。这样比较不会吞掉一个之后无法显式 `free` / transfer 的 raw root。
+
 ### 3.9 当前 raw allocation / free 纵切
 
 当前源码入口：

@@ -133,3 +133,32 @@ func i32 main = () -> {
     );
     assert!(error.msg.contains("不适用于"), "{}", error.msg);
 }
+
+#[test]
+fn comparison_cannot_consume_an_unanchored_allocation_root() {
+    for source in [
+        r#"
+func i32 main = () -> {
+    val bool equal = malloc<i32>() == malloc<i32>()
+    if equal { return 1 }
+    return 0
+}
+"#,
+        r#"
+func i32 main = () -> {
+    val ptr<i32>? owner = malloc<i32>()
+    val bool equal = move(owner) == owner
+    if equal { return 1 }
+    return 0
+}
+"#,
+    ] {
+        let error = fail(source);
+        assert!(
+            error.msg.contains("allocation root temporary")
+                && error.msg.contains("owning local"),
+            "{}",
+            error.msg
+        );
+    }
+}

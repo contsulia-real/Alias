@@ -7,7 +7,8 @@
 use super::{
     place_relation, ArgumentPass, ArmBody, AssignmentOperation, BindingId, BindingOperation, Body, BorrowKind,
     CallArg, CallResult, CheckedProgram, Expr, Item, LoanId, OwnedReturnLoan, OwningWrite, PatternBindingOperation,
-    Place, PlaceRelation, PreviousOwner, ResolvedConversion, ReturnPass, Stmt, StrPart,
+    OwnershipCapability, Place, PlaceRelation, PreviousOwner, ResolvedConversion, ReturnPass, Stmt,
+    StrPart, ValueCategory,
 };
 use crate::sema::types::{ParamEffect, Ty};
 use crate::{AliasError, AliasResult, Span};
@@ -1171,6 +1172,15 @@ impl<'a> GraphBuilder<'a> {
                 });
             }
             Expr::Binary { lhs, rhs, .. } if matches!(lhs.ty(), Ty::Ptr { .. }) => {
+                if [lhs.as_ref(), rhs.as_ref()].into_iter().any(|operand| {
+                    operand.value_category() == Some(ValueCategory::OwnedTemporary)
+                        && operand.ownership_capability() == Some(OwnershipCapability::Available)
+                }) {
+                    return Err(error(
+                        expr.span(),
+                        "pointer comparison 不能消费未锚定的 allocation root temporary；请先 transfer 到 owning local",
+                    ));
+                }
                 let middle = self.node(Action::Nop);
                 self.push_pointer_inspection(rhs, middle, exit, replacement, loops);
                 self.push_pointer_inspection(lhs, entry, middle, replacement, loops);
