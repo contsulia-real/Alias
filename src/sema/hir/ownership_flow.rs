@@ -48,6 +48,9 @@ struct BorrowSpec<'a> {
 enum Action<'a> {
     Nop,
     Read(BindingId, AccessKind, bool, Span),
+    /// Read-only inspection of a pointer capability. The value stays in transient SSA lanes, so
+    /// this does not expose an alias or consume the owning pointer root.
+    InspectPointer(BindingId, Span),
     CloneRead(&'a Place, Span),
     ProjectedAccess(&'a Expr, AccessKind, Span),
     Borrow {
@@ -1167,6 +1170,11 @@ impl<'a> GraphBuilder<'a> {
                     loops,
                 });
             }
+            Expr::Binary { lhs, rhs, .. } if matches!(lhs.ty(), Ty::Ptr { .. }) => {
+                let middle = self.node(Action::Nop);
+                self.push_pointer_inspection(rhs, middle, exit, replacement, loops);
+                self.push_pointer_inspection(lhs, entry, middle, replacement, loops);
+            }
             Expr::Binary { lhs, rhs, .. } => {
                 self.expression_sequence(vec![lhs, rhs], entry, exit, replacement, loops)
             }
@@ -1551,6 +1559,28 @@ impl<'a> GraphBuilder<'a> {
         Ok(())
     }
 
+    fn push_pointer_inspection(
+        &mut self,
+        expr: &'a Expr,
+        entry: usize,
+        exit: usize,
+        replacement: Option<&'a Place>,
+        loops: LoopTargets,
+    ) {
+        if let Expr::Ident(_, Some(binding_id), span, _) = expr {
+            self.action_between(entry, exit, Action::InspectPointer(*binding_id, *span));
+        } else {
+            self.tasks.push(Task::Expr {
+                expr,
+                entry,
+                exit,
+                replacement,
+                capture_holder: None,
+                loops,
+            });
+        }
+    }
+
     fn build_place_eval(
         &mut self,
         place: &'a Place,
@@ -1822,7 +1852,9 @@ fn compute_liveness(
         if let Action::BindLoan(binding, _) = graph.nodes[node_id].action {
             next_in.remove(&binding);
         }
-        if let Action::Read(binding, _, _, _) = graph.nodes[node_id].action {
+        if let Action::Read(binding, _, _, _) | Action::InspectPointer(binding, _) =
+            graph.nodes[node_id].action
+        {
             if graph.borrowed.contains(&binding) || graph.loan_holder_bindings.contains(&binding) {
                 next_in.insert(LoanHolder::Binding(binding));
             }
@@ -2077,6 +2109,28 @@ fn run_dataflow(
                 // claim that the source remained exclusive.
                 if graph.eligible.contains(&id) {
                     state.exposed.insert(id);
+                }
+            }
+            Action::InspectPointer(id, span) => {
+                if graph.borrowed.contains(&id) {
+                    if facts.reaching[node_id]
+                        .as_ref()
+                        .and_then(|reaching| reaching.get(&LoanHolder::Binding(id)))
+                        .is_none()
+                    {
+                        return Err(error(span, "borrowed pointer 使用点没有 live loan"));
+                    }
+                    continue_state(&mut inputs, &mut queue, graph, node_id, &state);
+                    continue;
+                }
+                if state.moved.contains(&id) {
+                    return Err(error(span, "pointer 已被 move，重新初始化前不能读取"));
+                }
+                if active.iter().any(|loan_id| {
+                    facts.sources[loan_id].root_binding_id() == id
+                        && facts.kinds[loan_id] == BorrowKind::Write
+                }) {
+                    return Err(error(span, "pointer inspection 与 live WriteLoan 冲突"));
                 }
             }
             Action::CloneRead(source, span) => {
@@ -2492,6 +2546,7 @@ pub(super) fn infer_parameter_effects_for_function(
                     ParamEffect::ReadBorrow
                 },
             ),
+            Action::InspectPointer(id, _) => (id, ParamEffect::ReadBorrow),
             Action::CloneRead(source, _) => (source.root_binding_id(), ParamEffect::ReadBorrow),
             Action::ProjectedAccess(expr, access, _) => (
                 super::expr_places::from_expr(expr)
@@ -2739,6 +2794,7 @@ pub(super) fn infer_capture_kinds_for_function(
                     BorrowKind::Read
                 },
             ),
+            Action::InspectPointer(binding, _) => (binding, BorrowKind::Read),
             Action::CloneRead(source, _) => (source.root_binding_id(), BorrowKind::Read),
             Action::ProjectedAccess(expr, access, _) => (
                 super::expr_places::from_expr(expr)

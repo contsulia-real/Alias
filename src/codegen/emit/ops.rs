@@ -1,5 +1,6 @@
 use super::strings::{call_str_cmp, display_typed};
-use crate::codegen::abi::{cl_type, ir_type_bits, VTy};
+use super::value::ExprValue;
+use crate::codegen::abi::{cl_type, ir_type_bits, PtrLane, VTy};
 use crate::codegen::{invariant_violation, Compiler};
 use crate::sema::hir::{BinOp, Expr};
 use crate::sema::types::FloatW;
@@ -150,6 +151,35 @@ pub(crate) fn emit_binary_values<M: Module>(
         }
         And | Or => invariant_violation("短路逻辑运算由 emit_short_circuit 发射"),
     }
+}
+
+pub(crate) fn emit_pointer_equality(
+    bcx: &mut FunctionBuilder,
+    op: BinOp,
+    vty: &VTy,
+    left: &ExprValue,
+    right: &ExprValue,
+) -> Value {
+    if !matches!(op, BinOp::EqEq | BinOp::NotEq) {
+        invariant_violation("pointer comparison 当前只开放 equality")
+    }
+    let left_provenance = left.pointer_lane(bcx, vty, PtrLane::Provenance);
+    let right_provenance = right.pointer_lane(bcx, vty, PtrLane::Provenance);
+    let left_address = left.pointer_lane(bcx, vty, PtrLane::Address);
+    let right_address = right.pointer_lane(bcx, vty, PtrLane::Address);
+    let same_provenance = bcx
+        .ins()
+        .icmp(IntCC::Equal, left_provenance, right_provenance);
+    let same_address = bcx
+        .ins()
+        .icmp(IntCC::Equal, left_address, right_address);
+    let equal = bcx.ins().band(same_provenance, same_address);
+    let result = if op == BinOp::EqEq {
+        equal
+    } else {
+        bcx.ins().icmp_imm_s(IntCC::Equal, equal, 0)
+    };
+    bcx.ins().uextend(types::I64, result)
 }
 
 fn emit_checked_int_binary<M: Module>(
