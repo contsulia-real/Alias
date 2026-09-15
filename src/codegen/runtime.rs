@@ -135,6 +135,7 @@ pub(crate) static RUNTIME_CONTRACTS: &[RuntimeContract] = &[
     contract!("alias.abort_ptr_lattice", [val(RuntimeTy::I32)]),
     contract!("alias.abort_ptr_arithmetic", [val(RuntimeTy::I32)]),
     contract!("alias.abort_ptr_bounds", [val(RuntimeTy::I32)]),
+    contract!("alias.abort_ptr_alignment", [val(RuntimeTy::I32)]),
     contract!("rt.heap.alloc", [val(RuntimeTy::I64)] -> val(RuntimeTy::Ptr)),
     contract!("rt.heap.try_alloc", [val(RuntimeTy::I64)] -> nullable(RuntimeTy::Ptr)),
     contract!("rt.heap.free", [nullable(RuntimeTy::Ptr)]),

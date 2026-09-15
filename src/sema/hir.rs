@@ -47,6 +47,8 @@ mod raw_allocation_tests;
 #[cfg(test)]
 mod refer_tests;
 #[cfg(test)]
+mod reinterpret_tests;
+#[cfg(test)]
 mod runtime_check_tests;
 #[cfg(test)]
 mod shallow_clone_tests;
@@ -65,7 +67,7 @@ pub(crate) use model::{
     BindingOperation, BindingOwner, Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget,
     Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId,
     Item, LoanId, MatchArm, MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability,
-    OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PointerOffsetSource,
+    OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PointerViewSource,
     PreviousOwner, ResolvedConversion, ReturnPass, RuntimeCheckRequirement, ShallowClonePlan, Stmt,
     StorageRelation, StrPart, StructDef, StructField, ValueCategory,
 };
@@ -125,8 +127,8 @@ pub(super) struct LowerBorrowInfo {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct LowerPointerOffsetInfo {
-    pub(super) source: PointerOffsetSource,
+pub(super) struct LowerPointerViewInfo {
+    pub(super) source: PointerViewSource,
 }
 
 /// sema check → HIR lowering 的短生命周期边界合同。所有字段必须在 lowering 完成时
@@ -144,7 +146,7 @@ pub(super) struct LowerFacts {
     pub(super) field_indices: HashMap<usize, usize>,
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) borrow_places: HashMap<usize, LowerBorrowInfo>,
-    pub(super) pointer_offsets: HashMap<usize, LowerPointerOffsetInfo>,
+    pub(super) pointer_views: HashMap<usize, LowerPointerViewInfo>,
     pub(super) address_taken_roots: HashSet<BindingId>,
     pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) owning_reads: HashMap<usize, LowerOwningReadInfo>,

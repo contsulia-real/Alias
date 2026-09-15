@@ -22,6 +22,11 @@ fn pointer_requires_one_complete_storable_pointee_type() {
     let unit =
         fail("func unit inspect = (ptr<unit> value) -> return\nfunc i32 main = () -> return 0\n");
     assert!(unit.msg.contains("不是完整可存储类型"), "{}", unit.msg);
+
+    let nested = fail(
+        "func unit inspect = (ptr<array<func>> value) -> return\nfunc i32 main = () -> return 0\n",
+    );
+    assert!(nested.msg.contains("不是完整可存储类型"), "{}", nested.msg);
 }
 
 #[test]

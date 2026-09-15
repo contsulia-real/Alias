@@ -109,13 +109,13 @@ impl Checker {
                     && matches!(r, Ty::Int(_) | Ty::UInt(_))
                     && matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub)
                 {
-                    let source = if let Some(source) = self.pointer_offsets
+                    let source = if let Some(source) = self.pointer_views
                         .get(&Self::expr_key(lhs))
                         .map(|info| info.source)
                     {
                         source
                     } else if let Some(borrow) = self.borrow_places.get(&Self::expr_key(lhs)) {
-                        crate::sema::hir::PointerOffsetSource::Loan(borrow.loan_id)
+                        crate::sema::hir::PointerViewSource::Loan(borrow.loan_id)
                     } else if let Some(binding) = self.expr_binding_ids
                         .get(&Self::expr_key(lhs))
                         .copied()
@@ -126,16 +126,16 @@ impl Checker {
                                 span: lhs.span(),
                             });
                         }
-                        crate::sema::hir::PointerOffsetSource::Binding(binding)
+                        crate::sema::hir::PointerViewSource::Binding(binding)
                     } else {
                         return Err(AliasError {
                             msg: "pointer arithmetic source 必须是 borrow-derived pointer view".into(),
                             span: lhs.span(),
                         });
                     };
-                    self.pointer_offsets.insert(
+                    self.pointer_views.insert(
                         Self::expr_key(e),
-                        crate::sema::hir::LowerPointerOffsetInfo { source },
+                        crate::sema::hir::LowerPointerViewInfo { source },
                     );
                 }
                 Ok(result)
@@ -167,6 +167,9 @@ impl Checker {
                 args,
                 span,
             } => self.check_raw_allocate(element_ty, args, *span),
+            Expr::Reinterpret { target_ty, args, span } => {
+                self.check_reinterpret(e, target_ty, args, *span, env)
+            }
             Expr::Call { callee, args, span } => {
                 let ownership_intrinsic = match callee.as_ref() {
                     Expr::Ident(name, _) => classify_ownership_builtin(name),

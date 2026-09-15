@@ -6,7 +6,7 @@
 
 use super::super::{Checker, Env};
 use crate::ast::{CallArg, TypeExpr};
-use crate::sema::types::{check_value_type_slot, Ty};
+use crate::sema::types::{check_value_type_slot, ensure_pointer_pointee, Ty};
 use crate::{AliasError, AliasResult, Span};
 
 impl Checker {
@@ -23,6 +23,7 @@ impl Checker {
             });
         }
         let pointee = check_value_type_slot(element_ty, span, &self.structs)?;
+        ensure_pointer_pointee(&pointee, span)?;
         Ok(Ty::Ptr {
             pointee: Box::new(pointee),
             nullable: true,

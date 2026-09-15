@@ -148,6 +148,10 @@ impl CheckedProgram {
                             visit(element_ty);
                             stack.push(TypeNode::Expr(count));
                         }
+                        Expr::ReinterpretPointer { target_ty, source, .. } => {
+                            visit(target_ty);
+                            stack.push(TypeNode::Expr(source));
+                        }
                         Expr::FreeRawAllocation { pointer, .. } => {
                             stack.push(TypeNode::Expr(pointer));
                         }

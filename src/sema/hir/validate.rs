@@ -146,6 +146,7 @@ fn push_expr_children<'a>(stack: &mut Vec<HirValidationNode<'a>>, expr: &'a Expr
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::FuncLit { body, .. } => push_validation_body(stack, body),
         Expr::RawAllocate { count, .. } => stack.push(HirValidationNode::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(HirValidationNode::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(HirValidationNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
@@ -1172,6 +1173,9 @@ pub(super) fn validate_resolved_hir(program: &CheckedProgram) -> AliasResult<()>
                     // cross-reference traversal still must not hide unresolved operands.
                     Expr::RawAllocate { count, .. } => {
                         stack.push(HirValidationNode::Expr(count));
+                    }
+                    Expr::ReinterpretPointer { source, .. } => {
+                        stack.push(HirValidationNode::Expr(source));
                     }
                     Expr::FreeRawAllocation { pointer, .. } => {
                         stack.push(HirValidationNode::Expr(pointer));

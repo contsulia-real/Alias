@@ -2880,6 +2880,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(subject));
         }
         Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(Node::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
@@ -3042,6 +3043,9 @@ fn push_scoped_expr<'a>(
             stack.push(ScopedNode::Expr(subject, current));
         }
         Expr::RawAllocate { count, .. } => stack.push(ScopedNode::Expr(count, current)),
+        Expr::ReinterpretPointer { source, .. } => {
+            stack.push(ScopedNode::Expr(source, current));
+        }
         Expr::FreeRawAllocation { pointer, .. } => {
             stack.push(ScopedNode::Expr(pointer, current));
         }
@@ -3221,6 +3225,7 @@ fn push_mut_expr<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) {
             stack.push(MutNode::Expr(subject));
         }
         Expr::RawAllocate { count, .. } => stack.push(MutNode::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(MutNode::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }

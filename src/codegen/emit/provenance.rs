@@ -240,3 +240,57 @@ pub(super) fn emit_pointer_offset<M: Module>(
     register_plain_allocation_cleanup(bcx, frame, cell);
     Ok(ExprValue::scalar(cell))
 }
+
+pub(super) fn emit_reinterpret<M: Module>(
+    c: &mut Compiler<M>,
+    bcx: &mut FunctionBuilder,
+    frame: &mut Frame,
+    input: (
+        &ExprValue,
+        &VTy,
+        &VTy,
+        RuntimeCheckRequirement,
+        crate::Span,
+    ),
+) -> AliasResult<ExprValue> {
+    let (source, source_vty, result_vty, alignment_check, span) = input;
+    let VTy::Ptr { nullable: false, .. } = source_vty else {
+        invariant_violation("reinterpret source 必须是 non-null pointer")
+    };
+    let VTy::Ptr { pointee, nullable: false } = result_vty else {
+        invariant_violation("reinterpret result 必须是 non-null pointer")
+    };
+    let provenance = source.pointer_lane(bcx, source_vty, PtrLane::Provenance);
+    let address = source.pointer_lane(bcx, source_vty, PtrLane::Address);
+    let source_end = source.pointer_lane(bcx, source_vty, PtrLane::ViewEnd);
+    let layout = value_layout(pointee);
+    let align = i64::try_from(layout.align)
+        .unwrap_or_else(|_| invariant_violation("reinterpret alignment 超出 i64"));
+    let stride = i64::try_from(layout.stride)
+        .unwrap_or_else(|_| invariant_violation("reinterpret stride 超出 i64"));
+    match alignment_check {
+        RuntimeCheckRequirement::Required => {
+            let align = bcx.ins().iconst(types::I64, align);
+            let remainder = bcx.ins().urem(address, align);
+            let misaligned = bcx.ins().icmp_imm_s(
+                cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                remainder,
+                0,
+            );
+            super::ops::emit_abort_branch(c, bcx, misaligned, "alias.abort_ptr_alignment", span)?;
+        }
+        RuntimeCheckRequirement::Proven => {}
+    }
+    let available = bcx.ins().isub(source_end, address);
+    let stride = bcx.ins().iconst(types::I64, stride);
+    let tail = bcx.ins().urem(available, stride);
+    let extent = bcx.ins().isub(available, tail);
+    let view_end = bcx.ins().iadd(address, extent);
+    let value = ExprValue::pointer([provenance, address, address, view_end]);
+    // Borrowed bindings need an addressable carrier for four lanes. This cell is not a new
+    // provenance descriptor, storage root, or initialized target object.
+    let cell = allocate_value_cell(c, bcx, result_vty)?;
+    value.store(bcx, cell, 0, result_vty);
+    register_plain_allocation_cleanup(bcx, frame, cell);
+    Ok(ExprValue::scalar(cell))
+}

@@ -284,12 +284,7 @@ pub(crate) fn check_type_slot(
                 "iterator" => Ok(Ty::Iterator(Box::new(ts.remove(0)))),
                 "ptr" => {
                     let pointee = ts.remove(0);
-                    if matches!(pointee, Ty::Unit | Ty::FuncPoly | Ty::Unknown) {
-                        return Err(AliasError {
-                            msg: format!("ptr pointee {} 不是完整可存储类型", pointee.name()),
-                            span,
-                        });
-                    }
+                    ensure_pointer_pointee(&pointee, span)?;
                     Ok(Ty::Ptr {
                         pointee: Box::new(pointee),
                         nullable: false,
@@ -344,6 +339,28 @@ pub(crate) fn check_type_slot(
                 }
             }
         },
+    }
+}
+
+pub(crate) fn ensure_pointer_pointee(ty: &Ty, span: Span) -> AliasResult<()> {
+    fn complete(ty: &Ty) -> bool {
+        match ty {
+            Ty::Unit | Ty::FuncPoly | Ty::Unknown => false,
+            Ty::Result(ok, err) => complete(ok) && complete(err),
+            Ty::Array(elem) | Ty::Iterator(elem) | Ty::Ptr { pointee: elem, .. } => complete(elem),
+            Ty::Func { params, ret, .. } => {
+                params.iter().all(complete) && (ret.as_ref() == &Ty::Unit || complete(ret))
+            }
+            Ty::Int(_) | Ty::UInt(_) | Ty::Float(_) | Ty::Bool | Ty::Str | Ty::Struct(_) => true,
+        }
+    }
+    if complete(ty) {
+        Ok(())
+    } else {
+        Err(AliasError {
+            msg: format!("ptr pointee {} 不是完整可存储类型", ty.name()),
+            span,
+        })
     }
 }
 

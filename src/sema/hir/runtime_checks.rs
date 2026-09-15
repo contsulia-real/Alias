@@ -120,6 +120,22 @@ pub(super) fn pointer_binary(
     })
 }
 
+pub(super) fn pointer_reinterpret(
+    source: &Expr,
+    target: &Ty,
+) -> AliasResult<RuntimeCheckRequirement> {
+    if !matches!(source.ty(), Ty::Ptr { nullable: false, .. }) {
+        return Err(AliasError {
+            msg: "reinterpret source 必须是 non-null ptr".into(),
+            span: source.span(),
+        });
+    }
+    crate::sema::types::ensure_pointer_pointee(target, source.span())?;
+    // Pointer HIR currently has no symbolic address-alignment fact. Keep the uncertainty explicit;
+    // codegen consumes this decision and never guesses alignment from the expression shape.
+    Ok(RuntimeCheckRequirement::Required)
+}
+
 fn constant_integer_is_zero(expr: &Expr) -> bool {
     match expr {
         Expr::Int(0, ..) => true,

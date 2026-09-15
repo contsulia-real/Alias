@@ -284,6 +284,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr, allow_borro
             stack.push(Node::Expr(subject, false));
         }
         Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count, false)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(Node::Expr(source, allow_borrowed)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer, false)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
@@ -364,7 +365,7 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                 }
                 match expr {
                     Expr::Binary {
-                        pointer_offset_source: Some(super::PointerOffsetSource::Binding(source)),
+                        pointer_offset_source: Some(super::PointerViewSource::Binding(source)),
                         ..
                     }
                         if relations.get(source) != Some(&StorageRelation::Borrowed) =>
@@ -372,6 +373,15 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
                         return Err(error(
                             expr.span(),
                             "pointer arithmetic source 必须是 live borrowed pointer local",
+                        ));
+                    }
+                    Expr::ReinterpretPointer {
+                        source_origin: super::PointerViewSource::Binding(source),
+                        ..
+                    } if relations.get(source) != Some(&StorageRelation::Borrowed) => {
+                        return Err(error(
+                            expr.span(),
+                            "reinterpret source 必须是 live borrowed pointer local",
                         ));
                     }
                     Expr::Borrow { source, .. } | Expr::Refer { source, .. }

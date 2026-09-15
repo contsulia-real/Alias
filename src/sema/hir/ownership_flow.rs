@@ -231,11 +231,12 @@ fn resolved_borrow(expr: &Expr) -> Option<(LoanId, &Place)> {
     }
 }
 
-fn pointer_offset_source(expr: &Expr) -> Option<super::PointerOffsetSource> {
+fn pointer_view_source(expr: &Expr) -> Option<super::PointerViewSource> {
     let mut current = expr;
     loop {
         match current {
             Expr::Binary { pointer_offset_source: Some(source), .. } => return Some(*source),
+            Expr::ReinterpretPointer { source_origin, .. } => return Some(*source_origin),
             Expr::Convert { expr, mode: ResolvedConversion::Identity, .. } => current = expr,
             _ => return None,
         }
@@ -673,12 +674,12 @@ impl<'a> GraphBuilder<'a> {
                 });
                 if operation == Some(BindingOperation::BindBorrowedAlias) {
                     self.borrowed.insert(binding.binding_id);
-                    if let Some(source) = pointer_offset_source(&binding.value) {
-                        // Dereference/write-through is not open yet, so this arithmetic slice
+                    if let Some(source) = pointer_view_source(&binding.value) {
+                        // Dereference/write-through is not open yet, so derived pointer views
                         // carries a read-only source loan and cannot invent writability.
                         self.borrowed_source_writable.insert(binding.binding_id, false);
                         match source {
-                            super::PointerOffsetSource::Binding(source) => self.action_between(
+                            super::PointerViewSource::Binding(source) => self.action_between(
                                 after_value,
                                 exit,
                                 Action::SetLoans(
@@ -686,7 +687,7 @@ impl<'a> GraphBuilder<'a> {
                                     Some(LoanHolder::Binding(source)),
                                 ),
                             ),
-                            super::PointerOffsetSource::Loan(loan) => self.action_between(
+                            super::PointerViewSource::Loan(loan) => self.action_between(
                                 after_value,
                                 exit,
                                 Action::BindLoan(LoanHolder::Binding(binding.binding_id), loan),
@@ -781,10 +782,10 @@ impl<'a> GraphBuilder<'a> {
                 });
                 if let Place::Local { binding_id, .. } = target {
                     if operation == Some(AssignmentOperation::RebindBorrowedAlias) {
-                        if let Some(source) = pointer_offset_source(value) {
+                        if let Some(source) = pointer_view_source(value) {
                             self.borrowed_source_writable.insert(*binding_id, false);
                             match source {
-                                super::PointerOffsetSource::Binding(source) => self.action_between(
+                                super::PointerViewSource::Binding(source) => self.action_between(
                                     after_place,
                                     exit,
                                     Action::SetLoans(
@@ -792,7 +793,7 @@ impl<'a> GraphBuilder<'a> {
                                         Some(LoanHolder::Binding(source)),
                                     ),
                                 ),
-                                super::PointerOffsetSource::Loan(loan) => self.action_between(
+                                super::PointerViewSource::Loan(loan) => self.action_between(
                                     after_place,
                                     exit,
                                     Action::BindLoan(LoanHolder::Binding(*binding_id), loan),
@@ -1593,6 +1594,14 @@ impl<'a> GraphBuilder<'a> {
             }
             Expr::RawAllocate { count, .. } => self.tasks.push(Task::Expr {
                 expr: count,
+                entry,
+                exit,
+                replacement: None,
+                capture_holder: None,
+                loops,
+            }),
+            Expr::ReinterpretPointer { source, .. } => self.tasks.push(Task::Expr {
+                expr: source,
                 entry,
                 exit,
                 replacement: None,
@@ -3053,6 +3062,7 @@ fn push_expr_mut<'a>(stack: &mut Vec<MutNode<'a>>, expr: &'a mut Expr) {
             stack.push(MutNode::Expr(subject));
         }
         Expr::RawAllocate { count, .. } => stack.push(MutNode::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(MutNode::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(MutNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }

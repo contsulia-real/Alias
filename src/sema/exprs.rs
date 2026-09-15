@@ -12,6 +12,7 @@ mod move_value;
 mod operators;
 mod ordinary_read;
 mod raw_allocation;
+mod reinterpret_value;
 mod shallow_clone;
 mod typing;
 

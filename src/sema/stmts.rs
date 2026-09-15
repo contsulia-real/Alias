@@ -96,7 +96,7 @@ impl Checker {
             let borrowed_source_writable = self.borrow_places
                 .get(&Self::expr_key(&b.value))
                 .map(|borrow| borrow.source_writable)
-                .or_else(|| self.pointer_offsets.get(&Self::expr_key(&b.value)).map(|_| false));
+                .or_else(|| self.pointer_views.get(&Self::expr_key(&b.value)).map(|_| false));
             if let Some(source_writable) = borrowed_source_writable {
                 if env.parent.is_none() {
                     return Err(AliasError {

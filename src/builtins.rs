@@ -29,6 +29,7 @@ pub(crate) enum OwnershipBuiltinName {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GenericIntrinsicName {
     Malloc,
+    Reinterpret,
 }
 
 pub(crate) fn classify_call_builtin(name: &str) -> Option<CallBuiltinName> {
@@ -62,6 +63,7 @@ pub(crate) fn classify_ownership_builtin(name: &str) -> Option<OwnershipBuiltinN
 pub(crate) fn classify_generic_intrinsic(name: &str) -> Option<GenericIntrinsicName> {
     Some(match name {
         "malloc" => GenericIntrinsicName::Malloc,
+        "reinterpret" => GenericIntrinsicName::Reinterpret,
         _ => return None,
     })
 }

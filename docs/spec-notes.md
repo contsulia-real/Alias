@@ -87,7 +87,7 @@ parser AST 只表达语法，不保存最终静态类型，也不决定调用最
 | 用户类型 | `struct` |
 | 内建泛型 | `result<T,E>`、`array<T>`、`iterator<T>`、`ptr<T>` / `ptr<T>?` |
 
-`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer comparison / difference / borrowed-view arithmetic 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref/reinterpret` 与其它 pointer producer 仍未开放并在 sema/final gate fail-closed。
+`ptr<T>` 是 non-null pointer type，`ptr<T>?` 是相同四-lane ABI 的 nullable 形式；nullability 不编码 ownership relation。当前 nullable `?` 类型后缀只对 `ptr<T>` 开放，pointee 必须是完整可存储类型。pointer 类型槽、struct field layout、Ty→VTy 投影、`malloc<T>()` 产生的 nullable allocation-root value、3.7 所述 `refer` pointer view，以及 3.8 的 pointer comparison / difference / borrowed-view arithmetic / reinterpret 已经接通；完整 local pointer owner 可由 `move` 转移并由 `free` 消费。普通 pointer 读写、string/display 转换、显式 count 形式的 `malloc<T>(count)`、`deref` 与其它 pointer producer 仍未开放并在 sema/final gate fail-closed。
 
 除上述四种内建泛型外，其它泛型类型尚未实现。
 
@@ -250,7 +250,7 @@ refer place
 
 每个实际 address-taken local/global 在其 storage 生命周期内只创建一个 canonical `StorageDescriptor`。local descriptor 由词法 cleanup 生命周期管理；global descriptor 是 global slab 内的静态记录并随 slab 释放。重复 `refer` 复用同一 descriptor identity，并分别形成 `{ provenance=descriptor, address=storage, view_start=address, view_end=address+stride(T) }` 四 lane view。pointer-view 临时 cell 由当前词法 cleanup 生命周期释放；borrowed alias cell 只保存该 pointer-view cell 的地址，不拥有 descriptor、pointer view 或 referent。
 
-`refer` 复用 3.6 的 NLL loan 与 stored-borrow 限制：结果当前只能初始化或重新绑定 local borrowed slot，不能写入 global、field、array/result payload 等持久 owning storage，也不能作为 borrowed pointer return 或显式 BorrowedValue 实参向外转发。`deref`、pointer index/arithmetic 与 heap/subplace descriptor 生命周期尚未开放，因此当前 pointer view 只能建立并由静态生命周期检查约束，尚不能在源码中解引用。
+`refer` 复用 3.6 的 NLL loan 与 stored-borrow 限制：结果当前只能初始化或重新绑定 local borrowed slot，不能写入 global、field、array/result payload 等持久 owning storage，也不能作为 borrowed pointer return 或显式 BorrowedValue 实参向外转发。`deref`、pointer index 与 heap/subplace descriptor 生命周期尚未开放，因此当前 pointer view 仍不能在源码中解引用。
 
 sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
 
@@ -263,6 +263,10 @@ sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan
 当前 `ptr<T> +/- integer` 接受 stable local borrowed pointer view、直接 `refer(place)` 以及由两者继续形成的 arithmetic chain；整数可以是任一现有有符号或无符号整数类型，单位固定为 canonical `stride(T)`。乘法与 address 加减都 checked，结果必须位于来源的闭区间 `[view_start, view_end]`，因此 one-past-end 合法，再继续越界会按运算符 span abort；直接 `refer(place)` 链的常量 offset 可静态证明时在 sema 拒绝越界并将合法路径标记为 `Proven`。结果保持原 provenance 与 bounds，是新的 `BorrowedValue<ptr<T>>`，只能初始化或重新绑定 local borrowed pointer slot；其 resolved source 是原 borrowed binding 或 `LoanId`，reaching loan 会传播到最终 slot，不能借 arithmetic 绕过 owner write/move 冲突。nullable allocation root 与其它 owning/unresolved pointer producer 仍不能作为该纵切的 source。
 
 pointer comparison/difference/arithmetic 会读取完整四 lane value，不能退化成只比较 address lane。参与运算的 borrowed pointer local 是其来源 loan holder；运算发生前对重叠 source 的 write/move/reinitialize 会被 NLL ownership CFG 静态拒绝，运算完成且没有后续使用后 loan 可以结束。
+
+`reinterpret<T>(source)` 当前接受 non-null、borrow-derived pointer view，包括 local borrowed pointer binding、直接 `refer(place)`、pointer arithmetic 或另一层 reinterpret；`T` 必须是完整可存储类型。它保持 source provenance 与当前 address，从 `source.view_end - source.address` 的剩余 bytes 中只纳入整数个 canonical `stride(T)`，并把新 view 收窄为 `{provenance, current, current, current + count * stride(T)}`；不足一个完整 stride 的尾部 bytes 被排除，source 不被修改。当前 HIR 尚无 symbolic address-alignment fact，因此每次 reinterpret 都携带 canonical runtime alignment check，失败按 intrinsic span abort。
+
+reinterpret 只建立 typed lattice，不创建 ownership root、storage object 或 initialization identity，也不会把 source bytes 当作已经存在的 `Initialized<T>`。结果仍是 `BorrowedValue<ptr<T>>`，只能初始化或重新绑定 local borrowed pointer slot；resolved source origin 会把原 reaching loan 传播到最终 slot，所以它不能绕过 owner write/move 冲突。nullable allocation root、其它 owning/unresolved pointer producer、持久 storage 与 borrowed return/argument forwarding 仍保持 fail-closed。
 
 comparison/difference 不取得或转移 allocation ownership。`malloc<T>()`、`move(owner)` 或 owned pointer call result 等未锚定 `OwnedTemporary` 不能直接作为 operand；必须先 transfer 到 owning local，再以 non-escaping inspection 读取。这样运算不会吞掉一个之后无法显式 `free` / transfer 的 raw root。
 
@@ -287,7 +291,7 @@ ownership CFG 为每个 local/`Owned` parameter pointer root 跟踪独立的 liv
 - `malloc<T>(count)` 的 source integer type 尚未冻结，因此不擅自选用某个现有整数类型；
 - allocation-root ptr 暂不能 transfer 进 field、array/result payload 或 global storage，等待 parent destruction 能消费 aggregate pointer lanes 与 raw child recipe；
 - pointer temporary 不能借给只在调用结束时自动销毁 temporary 的参数，也不能作为 expression statement 隐式丢弃；
-- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref/reinterpret`、heap/subplace `refer` 与超出 3.8 当前纵切的 pointer producer/arithmetic 尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
+- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref`/pointer index、heap/subplace `refer` 与超出 3.8 当前纵切的 pointer producer/arithmetic 尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
 
 ---
 
@@ -864,7 +868,7 @@ line / col / len
 - `iterator` / function/closure 的显式 clone/shallow；
 - string/array 的显式 shallow；
 - 标量作为 user-level shallow 根；
-- `malloc<T>(count)`、raw initialized-region 操作以及其余尚未落地的 pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
+- `malloc<T>(count)`、raw initialized-region 操作以及除 comparison/difference/arithmetic/reinterpret 外尚未落地的 pointer 操作；dynamic capture/global move 仍等待对应 transfer source 分析；
 - borrowed alias capture 的 referent-loan forwarding、显式 BorrowedValue 的用户调用 receiver/argument forwarding、borrowed alias generation 的 return forwarding、capture borrowed return source、reborrow、top-level/global borrow 与 terminal Index write-through；
 - stored iterator/source-loan 对象图（v1 禁止，不作为待实现能力）；
 - initialized raw region 的完整 destruction / free 生命周期；

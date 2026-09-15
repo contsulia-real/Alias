@@ -36,23 +36,30 @@ impl Parser {
                 Some(Tok::Lt)
                     if matches!(
                         &expr,
-                        Expr::Ident(name, _)
-                            if classify_generic_intrinsic(name)
-                                == Some(GenericIntrinsicName::Malloc)
+                        Expr::Ident(name, _) if classify_generic_intrinsic(name).is_some()
                     ) =>
                 {
+                    let Expr::Ident(name, _) = &expr else { unreachable!() };
+                    let intrinsic = classify_generic_intrinsic(name).expect("guarded above");
                     chain += 1;
                     self.bump()?;
-                    let element_ty = self.parse_type()?;
+                    let target_ty = self.parse_type()?;
                     self.expect(&Tok::Gt)?;
                     if self.peek() != Some(&Tok::LParen) {
-                        return Err(self.err_here("malloc<T> 后必须跟调用括号"));
+                        return Err(self.err_here(format!("{name}<T> 后必须跟调用括号")));
                     }
                     let args = self.parse_args()?;
-                    expr = Expr::RawAllocate {
-                        element_ty,
-                        args,
-                        span,
+                    expr = match intrinsic {
+                        GenericIntrinsicName::Malloc => Expr::RawAllocate {
+                            element_ty: target_ty,
+                            args,
+                            span,
+                        },
+                        GenericIntrinsicName::Reinterpret => Expr::Reinterpret {
+                            target_ty,
+                            args,
+                            span,
+                        },
                     };
                 }
                 Some(Tok::Dot) => {

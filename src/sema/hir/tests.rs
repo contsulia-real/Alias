@@ -537,6 +537,7 @@ fn push_expr<'a>(stack: &mut Vec<TestNode<'a>>, expr: &'a Expr) {
             stack.push(TestNode::Expr(subject));
         }
         Expr::RawAllocate { count, .. } => stack.push(TestNode::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(TestNode::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(TestNode::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }

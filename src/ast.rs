@@ -256,6 +256,13 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// Typed pointer-view construction has dedicated generic intrinsic syntax until Alias gains
+    /// general generic calls. Sema resolves its source provenance and alignment contract.
+    Reinterpret {
+        target_ty: TypeExpr,
+        args: Vec<CallArg>,
+        span: Span,
+    },
     /// 两项无括号邻接。parser 不在这里猜 `f x` 是单参函数调用还是
     /// `value method` 的零参方法中缀；该裁决必须由 sema 基于 lhs 静态类型完成。
     Juxtapose {
@@ -363,6 +370,7 @@ impl Expr {
             | Expr::Ternary { span, .. }
             | Expr::Call { span, .. }
             | Expr::RawAllocate { span, .. }
+            | Expr::Reinterpret { span, .. }
             | Expr::Juxtapose { span, .. }
             | Expr::MethodCall { span, .. }
             | Expr::Field { span, .. }

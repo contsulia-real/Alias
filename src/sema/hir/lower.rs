@@ -53,7 +53,7 @@ fn ensure_facts_consumed(facts: &LowerFacts) -> AliasResult<()> {
         ("字段索引", facts.field_indices.len()),
         ("赋值 Place", facts.assignment_places.len()),
         ("borrow Place", facts.borrow_places.len()),
-        ("pointer offset source", facts.pointer_offsets.len()),
+        ("pointer view source", facts.pointer_views.len()),
         ("move Place", facts.move_places.len()),
         ("owning-slot ordinary read", facts.owning_reads.len()),
         ("构造器实参字段索引", facts.ctor_arg_indices.len()),
@@ -509,7 +509,7 @@ fn lower_expr_node(
             let rhs = Box::new(lower_expr(rhs, facts)?);
             let (pointer_provenance_check, pointer_element_lattice_check, pointer_offset_check) =
                 super::runtime_checks::pointer_binary(*op, &lhs, &rhs)?;
-            let pointer_offset_source = facts.pointer_offsets
+            let pointer_offset_source = facts.pointer_views
                 .remove(&key)
                 .map(|source| source.source);
             Expr::Binary {
@@ -571,6 +571,38 @@ fn lower_expr_node(
             Expr::RawAllocate {
                 element_ty: (**pointee).clone(),
                 count: Box::new(count),
+                span: *span,
+                info,
+            }
+        }
+        crate::ast::Expr::Reinterpret { args, span, .. } => {
+            let [arg] = args.as_slice() else {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: reinterpret 元数不是 1".into(),
+                    span: *span,
+                });
+            };
+            let source = Box::new(lower_expr(&arg.value, facts)?);
+            let source_origin = take_required(
+                &mut facts.pointer_views,
+                key,
+                *span,
+                "reinterpret pointer view source fact",
+            )?
+            .source;
+            let Ty::Ptr { pointee, nullable: false } = &info.ty else {
+                return Err(AliasError {
+                    msg: "内部 sema 不变式被破坏: reinterpret 结果不是 non-null ptr".into(),
+                    span: *span,
+                });
+            };
+            let target_ty = (**pointee).clone();
+            let alignment_check = super::runtime_checks::pointer_reinterpret(&source, &target_ty)?;
+            Expr::ReinterpretPointer {
+                target_ty,
+                source,
+                source_origin,
+                alignment_check,
                 span: *span,
                 info,
             }

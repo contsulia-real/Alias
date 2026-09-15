@@ -111,7 +111,7 @@ pub(crate) struct PlaceInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PointerOffsetSource {
+pub(crate) enum PointerViewSource {
     Binding(BindingId),
     Loan(LoanId),
 }
@@ -525,7 +525,7 @@ pub(crate) enum Expr {
         /// lattice. Other binary operations carry no lattice check.
         pointer_element_lattice_check: Option<RuntimeCheckRequirement>,
         /// Resolved borrowed pointer binding whose reaching loans a derived view must preserve.
-        pointer_offset_source: Option<PointerOffsetSource>,
+        pointer_offset_source: Option<PointerViewSource>,
         /// Pointer offset overflow/bounds is either statically proved or guarded at runtime.
         pointer_offset_check: Option<RuntimeCheckRequirement>,
         span: Span,
@@ -559,6 +559,16 @@ pub(crate) enum Expr {
     RawAllocate {
         element_ty: Ty,
         count: Box<Expr>,
+        span: Span,
+        info: ExprInfo,
+    },
+    /// A typed, non-owning view over the source pointer's remaining byte range. The source origin
+    /// preserves the reaching loan; alignment_check is the only backend branch decision.
+    ReinterpretPointer {
+        target_ty: Ty,
+        source: Box<Expr>,
+        source_origin: PointerViewSource,
+        alignment_check: RuntimeCheckRequirement,
         span: Span,
         info: ExprInfo,
     },
@@ -680,6 +690,7 @@ impl Expr {
             | Self::BitNot { info, .. }
             | Self::Ternary { info, .. }
             | Self::RawAllocate { info, .. }
+            | Self::ReinterpretPointer { info, .. }
             | Self::FreeRawAllocation { info, .. }
             | Self::Call { info, .. }
             | Self::MethodCall { info, .. }
@@ -713,6 +724,7 @@ impl Expr {
             | Self::BitNot { info, .. }
             | Self::Ternary { info, .. }
             | Self::RawAllocate { info, .. }
+            | Self::ReinterpretPointer { info, .. }
             | Self::FreeRawAllocation { info, .. }
             | Self::Call { info, .. }
             | Self::MethodCall { info, .. }
@@ -765,6 +777,7 @@ impl Expr {
             | Self::BitNot { span, .. }
             | Self::Ternary { span, .. }
             | Self::RawAllocate { span, .. }
+            | Self::ReinterpretPointer { span, .. }
             | Self::FreeRawAllocation { span, .. }
             | Self::Call { span, .. }
             | Self::MethodCall { span, .. }

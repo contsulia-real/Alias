@@ -61,7 +61,7 @@ fn produces_owned_temporary(
         | Expr::ArrayLit { .. }
         | Expr::FuncLit { .. }
         | Expr::RawAllocate { .. } => true,
-        Expr::FreeRawAllocation { .. } => false,
+        Expr::FreeRawAllocation { .. } | Expr::ReinterpretPointer { .. } => false,
         Expr::Cast { .. }
         | Expr::Convert {
             mode: ResolvedConversion::Convert,
@@ -149,7 +149,7 @@ fn expected_category(
         }));
     }
     Ok(match expr {
-        Expr::Borrow { .. } | Expr::Refer { .. } => {
+        Expr::Borrow { .. } | Expr::Refer { .. } | Expr::ReinterpretPointer { .. } => {
             ExprCategory::Value(ValueCategory::BorrowedValue)
         }
         Expr::Binary { pointer_offset_source: Some(_), .. } => {
@@ -406,6 +406,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(Node::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::Typeof { .. }
         | Expr::Int(..)

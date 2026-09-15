@@ -60,6 +60,20 @@ pub(crate) fn emit_container_value<M: Module>(
     }
 }
 
+fn normalized_pointer_view(
+    bcx: &mut FunctionBuilder,
+    expr: &Expr,
+    value: ExprValue,
+    vty: &VTy,
+) -> ExprValue {
+    if matches!(expr, Expr::Ident(..)) {
+        value
+    } else {
+        let cell = value.into_scalar("derived pointer view 必须由 canonical cell 承载");
+        ExprValue::load(bcx, cell, 0, vty)
+    }
+}
+
 fn emit_expr_value<M: Module>(
     c: &mut Compiler<M>,
     bcx: &mut FunctionBuilder,
@@ -121,6 +135,29 @@ fn emit_expr_value<M: Module>(
         } => {
             let result_vty = c.vty(e.ty());
             super::raw::emit_raw_allocate(c, bcx, frame, element_ty, count, &result_vty)
+        }
+        Expr::ReinterpretPointer {
+            source,
+            alignment_check,
+            span,
+            ..
+        } => {
+            let source_vty = c.vty(source.ty());
+            let source_value = emit_expr(c, bcx, frame, source)?;
+            let source_value = normalized_pointer_view(bcx, source, source_value, &source_vty);
+            let result_vty = c.vty(e.ty());
+            super::provenance::emit_reinterpret(
+                c,
+                bcx,
+                frame,
+                (
+                    &source_value,
+                    &source_vty,
+                    &result_vty,
+                    *alignment_check,
+                    *span,
+                ),
+            )
         }
         Expr::FreeRawAllocation { pointer, .. } => {
             super::raw::emit_raw_free(c, bcx, frame, pointer)
@@ -233,12 +270,7 @@ fn emit_expr_value<M: Module>(
             let right = emit_expr(c, bcx, frame, rhs)?;
             let left_vty = c.vty(lhs.ty());
             if pointer_offset_source.is_some() {
-                let left = if matches!(lhs.as_ref(), Expr::Ident(..)) {
-                    left
-                } else {
-                    let cell = left.into_scalar("derived pointer view 必须由 canonical cell 承载");
-                    ExprValue::load(bcx, cell, 0, &left_vty)
-                };
+                let left = normalized_pointer_view(bcx, lhs, left, &left_vty);
                 let right = right.into_scalar("pointer arithmetic offset 必须是 scalar integer");
                 super::provenance::emit_pointer_offset(
                     c,

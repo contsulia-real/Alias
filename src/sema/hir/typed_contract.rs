@@ -19,11 +19,12 @@ fn invariant(span: Span, msg: impl Into<String>) -> AliasError {
     }
 }
 
-fn expected_pointer_offset_source(expr: &Expr) -> Option<super::PointerOffsetSource> {
+fn expected_pointer_view_source(expr: &Expr) -> Option<super::PointerViewSource> {
     match expr {
-        Expr::Ident(_, Some(binding), ..) => Some(super::PointerOffsetSource::Binding(*binding)),
-        Expr::Refer { loan_id, .. } => Some(super::PointerOffsetSource::Loan(*loan_id)),
+        Expr::Ident(_, Some(binding), ..) => Some(super::PointerViewSource::Binding(*binding)),
+        Expr::Refer { loan_id, .. } => Some(super::PointerViewSource::Loan(*loan_id)),
         Expr::Binary { pointer_offset_source, .. } => *pointer_offset_source,
+        Expr::ReinterpretPointer { source_origin, .. } => Some(*source_origin),
         _ => None,
     }
 }
@@ -144,6 +145,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
             stack.push(Node::Expr(subject));
         }
         Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(Node::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
@@ -309,7 +311,7 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                 ));
             }
             let expected_offset_source = if expected_checks.2.is_some() {
-                expected_pointer_offset_source(lhs)
+                expected_pointer_view_source(lhs)
             } else {
                 None
             };
@@ -441,6 +443,28 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
                     expr.span(),
                     "RawAllocate pointee/count contract 漂移",
                 ));
+            }
+        }
+        Expr::ReinterpretPointer {
+            target_ty,
+            source,
+            source_origin,
+            alignment_check,
+            ..
+        } => {
+            let Ty::Ptr { pointee, nullable: false } = expr.ty() else {
+                return Err(invariant(expr.span(), "ReinterpretPointer 结果不是 non-null ptr"));
+            };
+            if !types_match(pointee, target_ty)
+                || !matches!(source.ty(), Ty::Ptr { nullable: false, .. })
+            {
+                return Err(invariant(expr.span(), "ReinterpretPointer source/result 类型合同漂移"));
+            }
+            if Some(*source_origin) != expected_pointer_view_source(source) {
+                return Err(invariant(expr.span(), "ReinterpretPointer source origin fact 漂移"));
+            }
+            if *alignment_check != super::runtime_checks::pointer_reinterpret(source, target_ty)? {
+                return Err(invariant(expr.span(), "ReinterpretPointer alignment fact 漂移"));
             }
         }
         Expr::FreeRawAllocation { pointer, .. } => {

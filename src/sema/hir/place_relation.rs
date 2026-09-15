@@ -304,6 +304,7 @@ fn push_expr_children<'a>(stack: &mut Vec<Node<'a>>, expr: &'a Expr) {
         Expr::FuncLit { body, .. } => push_body(stack, body),
         Expr::Match { subject, arms, .. } => push_match_children(stack, subject, arms),
         Expr::RawAllocate { count, .. } => stack.push(Node::Expr(count)),
+        Expr::ReinterpretPointer { source, .. } => stack.push(Node::Expr(source)),
         Expr::FreeRawAllocation { pointer, .. } => stack.push(Node::Expr(pointer)),
         Expr::ReadPlace { source, .. }
         | Expr::Borrow { source, .. }
