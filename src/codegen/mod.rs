@@ -13,8 +13,8 @@ mod runtime;
 mod raw_tests;
 
 use crate::sema::hir::{
-    BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, DestroyPlan, Expr, Item,
-    MethodId, Param, StorageRelation,
+    BindKind, Binding, BindingId, BindingOwner, Body, CheckedProgram, DescriptorRegion,
+    DescriptorRoot, DestroyPlan, Expr, Item, MethodId, Param, StorageRelation,
 };
 use crate::sema::types::Ty;
 use crate::target::TARGET_TRIPLE;
@@ -60,9 +60,8 @@ pub(crate) struct Frame {
     pub(crate) scopes: Vec<HashMap<BindingId, Slot>>,
     pub(crate) locals_vty: Vec<HashMap<BindingId, VTy>>,
     pub(crate) locals_relation: Vec<HashMap<BindingId, Option<StorageRelation>>>,
-    /// Canonical provenance descriptor for each address-taken local storage root in the matching
-    /// lexical scope. A root gets one descriptor even when Refer is evaluated repeatedly.
-    pub(crate) storage_descriptors: Vec<HashMap<BindingId, Variable>>,
+    /// Canonical provenance descriptor per address-taken physical local storage root.
+    pub(crate) storage_descriptors: Vec<HashMap<DescriptorRoot, Variable>>,
     /// Separate owner state for dynamic locals. Moved cells retain stale bits, so replacement and
     /// scope-exit destruction must never use the stored payload as a liveness flag.
     pub(crate) owner_presence: HashMap<BindingId, Variable>,
@@ -95,10 +94,10 @@ pub(crate) struct Compiler<'m, M: Module> {
     pub(crate) globals_final: HashMap<BindingId, (usize, VTy, Option<StorageRelation>)>,
     pub(crate) top_slots: Vec<usize>,
     pub(crate) global_bytes: usize,
-    pub(crate) address_taken_roots: HashSet<BindingId>,
+    pub(crate) address_taken_roots: HashSet<DescriptorRoot>,
     /// Static descriptors embedded in the global slab. The descriptor lifetime is therefore
     /// exactly the slab lifetime and needs no parallel heap cleanup.
-    pub(crate) global_descriptor_offsets: HashMap<BindingId, usize>,
+    pub(crate) global_descriptor_offsets: HashMap<DescriptorRoot, usize>,
     pub(crate) next_fid: u32,
     pub(crate) pending: VecDeque<PendingFn>,
     pub(crate) str_data: HashMap<String, cranelift_module::DataId>,
@@ -247,10 +246,16 @@ fn compile_program<M: Module>(
             c.top_slots.push(slot);
             c.globals_final
                 .insert(b.binding_id, (slot, slot_vty, relation));
-            if c.address_taken_roots.contains(&b.binding_id) {
-                off = align_to(off, 8);
-                c.global_descriptor_offsets.insert(b.binding_id, off);
-                off += crate::codegen::layout::STORAGE_DESCRIPTOR_BYTES as usize;
+            for region in [DescriptorRegion::Cell, DescriptorRegion::Object] {
+                let root = DescriptorRoot {
+                    binding: b.binding_id,
+                    region,
+                };
+                if c.address_taken_roots.contains(&root) {
+                    off = align_to(off, 8);
+                    c.global_descriptor_offsets.insert(root, off);
+                    off += crate::codegen::layout::STORAGE_DESCRIPTOR_BYTES as usize;
+                }
             }
             if b.kind == BindKind::Func {
                 let Expr::FuncLit { .. } = &b.value else {

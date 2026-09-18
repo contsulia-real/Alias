@@ -6,7 +6,7 @@
 
 use super::super::{Checker, Env};
 use crate::ast::{CallArg, Expr};
-use crate::sema::hir::LowerBorrowInfo;
+use crate::sema::hir::{LowerBorrowInfo, LowerPlaceInfo};
 use crate::sema::types::Ty;
 use crate::{AliasError, AliasResult, Span};
 
@@ -32,6 +32,16 @@ impl Checker {
         }
 
         let place = self.resolve_place_expr(&arg.value, env)?;
+        if matches!(
+            &place,
+            LowerPlaceInfo::Field { base, .. } | LowerPlaceInfo::Index { base, .. }
+                if !matches!(base.as_ref(), LowerPlaceInfo::Local { .. })
+        ) {
+            return Err(AliasError {
+                msg: "refer nested subplace 尚缺独立 heap object descriptor".into(),
+                span: arg.value.span(),
+            });
+        }
         if self
             .borrowed_bindings
             .contains_key(&place.root_binding_id())

@@ -2250,7 +2250,7 @@ fn run_dataflow(
                 {
                     return Err(error(
                         span,
-                        "refer 当前只开放当前函数 owning local 或 global 的完整 Place descriptor",
+                        "refer 当前只开放根植于当前函数 owning local 或 global 的 Place descriptor",
                     ));
                 }
                 if let Some(parameter_effect) = graph.parameter_permissions.get(&root) {

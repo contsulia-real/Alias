@@ -246,13 +246,13 @@ refer(place)
 refer place
 ```
 
-`refer` 是预定义保留名。它把当前函数内完整 owning local 或 owning global 的 storage 暴露为 non-null `ptr<T>` pointer view，结果类别为 `BorrowedValue`，不产生 ownership capability，也不延长 source 生命周期。当前 source 必须恰好是 whole-binding `Place::Local`；field/index subview、borrowed alias、parameter 与 capture 仍 fail-closed。
+`refer` 是预定义保留名。它把当前函数内 owning local 或 owning global 的可寻址 storage 暴露为 non-null `ptr<T>` pointer view，结果类别为 `BorrowedValue`，不产生 ownership capability，也不延长 source 生命周期。当前 source 可以是 whole-binding `Place::Local` 或其直接 Field/Index subplace；nested subplace、borrowed alias、parameter 与 capture 仍 fail-closed。
 
-每个实际 address-taken local/global 在其 storage 生命周期内只创建一个 canonical `StorageDescriptor`。local descriptor 由词法 cleanup 生命周期管理；global descriptor 是 global slab 内的静态记录并随 slab 释放。重复 `refer` 复用同一 descriptor identity，并分别形成 `{ provenance=descriptor, address=storage, view_start=address, view_end=address+stride(T) }` 四 lane view。pointer-view 临时 cell 由当前词法 cleanup 生命周期释放；borrowed alias cell 只保存该 pointer-view cell 的地址，不拥有 descriptor、pointer view 或 referent。
+每个实际 address-taken 物理 storage root 在其生命周期内只创建一个 canonical `StorageDescriptor`：binding cell 与它持有的 heap object / array backing 是不同 root，不能因属于同一 owning binding 就共用 provenance。local descriptor 由词法 cleanup 生命周期管理；global descriptor 是 global slab 内的静态记录并随 slab 释放。同一物理 root 上重复 `refer` 复用 descriptor identity，并分别形成 `{ provenance=descriptor, address=storage, view_start=address, view_end=address+stride(T) }` 四 lane view。pointer-view 临时 cell 由当前词法 cleanup 生命周期释放；borrowed alias cell 只保存该 pointer-view cell 的地址，不拥有 descriptor、pointer view 或 referent。
 
-`refer` 复用 3.6 的 NLL loan 与 stored-borrow 限制：结果当前只能初始化或重新绑定 local borrowed slot，不能写入 global、field、array/result payload 等持久 owning storage，也不能作为 borrowed pointer return 或显式 BorrowedValue 实参向外转发。`deref`、pointer index 与 heap/subplace descriptor 生命周期尚未开放，因此当前 pointer view 仍不能在源码中解引用。
+`refer` 复用 3.6 的 NLL loan 与 stored-borrow 限制：结果当前只能初始化或重新绑定 local borrowed slot，不能写入 global、field、array/result payload 等持久 owning storage，也不能作为 borrowed pointer return 或显式 BorrowedValue 实参向外转发。source 当前接受根植于当前函数 owning local 或 owning global 的 whole Local，以及其直接 Field / Index Place；直接 field/index subview 复用对应 heap struct object / array backing 的 canonical descriptor identity，与 whole-local cell descriptor 分离，并按实际 projection address 与 `stride(T)` 收窄 view。动态 array index 在建 view 时执行已冻结的 bounds check；backing 迁移与 live element loan 冲突并静态拒绝，后续合法 `refer` 会刷新 descriptor 的物理 base/extent。nested projection 需要逐层 heap object descriptor 生命周期，当前继续 fail-closed。projected loan 继续消费 canonical Place overlap：只有静态证明 `Disjoint` 的 sibling write 可以并存，Overlap/Unknown 均拒绝。`deref`、pointer index 尚未开放，因此当前 pointer view 仍不能在源码中解引用。
 
-sema 将其固化为携带 `LoanId`、resolved whole-local `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
+sema 将其固化为携带 `LoanId`、resolved `Place`、最终 loan kind 与 address-taken root fact 的专用 `Refer` HIR；final-HIR gate 独立复算 pointer 类型、Place、loan 与 root 集合。codegen 只消费该 HIR 和 canonical layout，不能从机器地址恢复 provenance 或重新判定 source 合法性。
 
 ### 3.8 当前 pointer comparison / arithmetic
 
@@ -291,7 +291,7 @@ ownership CFG 为每个 local/`Owned` parameter pointer root 跟踪独立的 liv
 - `malloc<T>(count)` 的 source integer type 尚未冻结，因此不擅自选用某个现有整数类型；
 - allocation-root ptr 暂不能 transfer 进 field、array/result payload 或 global storage，等待 parent destruction 能消费 aggregate pointer lanes 与 raw child recipe；
 - pointer temporary 不能借给只在调用结束时自动销毁 temporary 的参数，也不能作为 expression statement 隐式丢弃；
-- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref`/pointer index、heap/subplace `refer` 与超出 3.8 当前纵切的 pointer producer/arithmetic 尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
+- initialized-region 登记、typed raw write/read、逆初始化顺序销毁、`deref`/pointer index、raw heap 与 nested subplace `refer` 及超出 3.8 当前纵切的 pointer producer/arithmetic 尚未开放；当前 metadata 非空时 runtime free 继续 fail-closed trap。
 
 ---
 

@@ -413,11 +413,8 @@ fn validate_expr(expr: &Expr) -> AliasResult<()> {
             if !types_match(source.ty(), pointee) {
                 return Err(invariant(expr.span(), "Refer source/result pointee 类型不一致"));
             }
-            if !matches!(source.as_ref(), Place::Local { .. }) {
-                return Err(invariant(
-                    expr.span(),
-                    "Refer subplace descriptor lifecycle 尚未开放",
-                ));
+            if source.descriptor_root().is_none() {
+                return Err(invariant(expr.span(), "Refer nested subplace descriptor 尚未开放"));
             }
         }
         Expr::Move { source, .. } => {
@@ -560,7 +557,9 @@ pub(super) fn validate(program: &CheckedProgram) -> AliasResult<()> {
             Node::Expr(expr) => {
                 validate_expr(expr)?;
                 if let Expr::Refer { source, .. } = expr {
-                    address_taken_roots.insert(source.root_binding_id());
+                    address_taken_roots.insert(source.descriptor_root().ok_or_else(|| {
+                        invariant(expr.span(), "Refer 缺少 storage descriptor root")
+                    })?);
                 }
                 push_expr_children(&mut stack, expr);
             }

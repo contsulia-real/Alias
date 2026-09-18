@@ -1013,10 +1013,12 @@ fn lower_refer_expr(
     let _ = lower_expr(callee, facts)?;
     let source_expr = lower_expr(&args[0].value, facts)?;
     let source_fact = take_required(&mut facts.borrow_places, key, span, "refer Place")?;
-    facts
-        .address_taken_roots
-        .insert(source_fact.place.root_binding_id());
     let source = lower_resolved_place(source_expr, source_fact.place, span)?;
+    let descriptor_root = source.descriptor_root().ok_or_else(|| AliasError {
+        msg: "refer nested subplace 尚缺独立 heap object descriptor".into(),
+        span,
+    })?;
+    facts.address_taken_roots.insert(descriptor_root);
     Ok(Expr::Refer {
         loan_id: source_fact.loan_id,
         source: Box::new(source),

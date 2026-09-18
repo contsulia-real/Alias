@@ -19,10 +19,21 @@ pub(crate) struct FunctionId(pub(crate) u32);
 pub(crate) struct CheckedProgram {
     pub(crate) main_id: BindingId,
     pub(crate) items: Vec<Item>,
-    /// Roots whose storage address is observed by a resolved Refer node. Codegen consumes this
-    /// set when laying out global storage or materializing a local cell so repeated Refer
-    /// operations share one descriptor.
-    pub(crate) address_taken_roots: HashSet<BindingId>,
+    /// Physical storage roots observed by resolved Refer nodes. A binding cell and its heap
+    /// object/backing are different roots even when the same binding owns both.
+    pub(crate) address_taken_roots: HashSet<DescriptorRoot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DescriptorRegion {
+    Cell,
+    Object,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DescriptorRoot {
+    pub(crate) binding: BindingId,
+    pub(crate) region: DescriptorRegion,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +147,27 @@ pub(crate) enum Place {
 }
 
 impl Place {
+    /// Current physical storage roots: a whole binding lives in its cell; one direct field or
+    /// element lives in that binding's heap object/backing. Nested projections require distinct
+    /// object identities and remain closed until that descriptor lifecycle is represented.
+    pub(crate) fn descriptor_root(&self) -> Option<DescriptorRoot> {
+        match self {
+            Self::Local { binding_id, .. } => Some(DescriptorRoot {
+                binding: *binding_id,
+                region: DescriptorRegion::Cell,
+            }),
+            Self::Field { base, .. } | Self::Index { base, .. } => {
+                let Self::Local { binding_id, .. } = base.as_ref() else {
+                    return None;
+                };
+                Some(DescriptorRoot {
+                    binding: *binding_id,
+                    region: DescriptorRegion::Object,
+                })
+            }
+        }
+    }
+
     pub(crate) fn info(&self) -> &PlaceInfo {
         match self {
             Self::Local { info, .. } | Self::Field { info, .. } | Self::Index { info, .. } => info,

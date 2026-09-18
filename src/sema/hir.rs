@@ -65,7 +65,8 @@ pub(crate) use destruction::{DestroyNode, DestroyPlan};
 pub(crate) use model::{
     ArgumentPass, ArmBody, AssignmentOperation, BinOp, BindKind, Binding, BindingId,
     BindingOperation, BindingOwner, Body, BorrowKind, BuiltinCall, CallArg, CallResult, CallTarget,
-    Capture, CheckedProgram, CtorKind, DeepClonePlan, Expr, ExprCategory, ExprInfo, FunctionId,
+    Capture, CheckedProgram, CtorKind, DeepClonePlan, DescriptorRegion, DescriptorRoot, Expr,
+    ExprCategory, ExprInfo, FunctionId,
     Item, LoanId, MatchArm, MethodId, MethodTarget, OwnedReturnLoan, OwnershipCapability,
     OwningWrite, Param, Pattern, PatternBindingOperation, Place, PlaceInfo, PointerViewSource,
     PreviousOwner, ResolvedConversion, ReturnPass, RuntimeCheckRequirement, ShallowClonePlan, Stmt,
@@ -147,7 +148,7 @@ pub(super) struct LowerFacts {
     pub(super) assignment_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) borrow_places: HashMap<usize, LowerBorrowInfo>,
     pub(super) pointer_views: HashMap<usize, LowerPointerViewInfo>,
-    pub(super) address_taken_roots: HashSet<BindingId>,
+    pub(super) address_taken_roots: HashSet<DescriptorRoot>,
     pub(super) move_places: HashMap<usize, LowerPlaceInfo>,
     pub(super) owning_reads: HashMap<usize, LowerOwningReadInfo>,
     pub(super) ctor_arg_indices: HashMap<usize, usize>,
